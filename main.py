@@ -157,7 +157,7 @@ def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone):
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-INSTANCE_ID = os.getenv("GREEN_API_INSTANCE_ID", "710722758620")
+INSTANCE_ID = os.getenv("GREEN_API_INSTANCE_ID", "Instance 710722788775")
 GREEN_API_TOKEN = os.getenv("GREEN_API_TOKEN", "")
 GREEN_API_BASE = os.getenv("GREEN_API_BASE", "https://7107.api.greenapi.com")
 
