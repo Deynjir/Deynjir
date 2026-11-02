@@ -8,7 +8,6 @@ import difflib
 import unicodedata
 from fastapi import FastAPI, Request
 from supabase import create_client, Client
-from groq import Groq
 import requests
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
@@ -155,9 +154,10 @@ def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone):
 
 # Securely load credentials from Render's Environment panel variables
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
-INSTANCE_ID = os.getenv("GREEN_API_INSTANCE_ID", "Instance 710722788775")
+INSTANCE_ID = os.getenv("GREEN_API_INSTANCE_ID", "710722758620")
 GREEN_API_TOKEN = os.getenv("GREEN_API_TOKEN", "")
 GREEN_API_BASE = os.getenv("GREEN_API_BASE", "https://7107.api.greenapi.com")
 
@@ -425,7 +425,7 @@ def message_has_explicit_amount_for_name(message_text, customer_name):
 
 
 def local_fallback_parse(message_text):
-    """Conservatively parse common commands when Groq is unavailable.
+    """Conservatively parse common commands when Gemini is unavailable.
 
     This intentionally supports clear, single-customer commands only. It returns
     None rather than guessing for multi-customer, ambiguous, or unsupported text.
@@ -1054,7 +1054,7 @@ async def whatsapp_webhook(request: Request):
         print(f"❌ DATABASE ERROR (Business User Lookup): {db_err}")
         return {"status": "business_user_db_error"}
 
-    # Manual debt-reminder workflow: fully rule-based, no Groq request.
+    # Manual debt-reminder workflow: fully rule-based, no Gemini request.
     # Start: XUSUUSIN -> numbered unpaid-customer list -> "1,3" -> confirmation.
     reminder_text = str(message_text or "").strip()
     reminder_state = REMINDER_SESSIONS.get(sender_phone)
@@ -1254,40 +1254,81 @@ async def whatsapp_webhook(request: Request):
     
     if pdf_only_requested:
         entries = [{"action": "HISTORY", "customer_name": pdf_customer_name}]
-        print(f"📄 Skipping Groq for PDF follow-up; using saved customer {pdf_customer_name!r}")
+        print(f"📄 Skipping Gemini for PDF follow-up; using saved customer {pdf_customer_name!r}")
     else:
         try:
-            chat_completion = groq_client.chat.completions.create(
-                messages=[{"role": "system", "content": dynamic_system_prompt}, {"role": "user", "content": message_text}],
-                model="openai/gpt-oss-20b",
-                temperature=0.0
+            if not GEMINI_API_KEY:
+                raise RuntimeError("GEMINI_API_KEY is not configured in environment variables")
+
+            gemini_url = (
+                "https://generativelanguage.googleapis.com/v1beta/"
+                f"models/{GEMINI_MODEL}:generateContent"
             )
-            try:
-                ai_response = chat_completion.choices[0].message.content.strip()
-            except Exception as parse_err:
-                print(f"⚠️ Direct extraction failed, casting raw string: {parse_err}")
-                ai_response = str(chat_completion).strip()
-            print(f"🤖 Groq AI Processed Output: {ai_response}")
+            gemini_payload = {
+                "systemInstruction": {
+                    "parts": [{"text": dynamic_system_prompt}]
+                },
+                "contents": [{
+                    "role": "user",
+                    "parts": [{"text": message_text}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.0,
+                    "responseMimeType": "application/json"
+                }
+            }
+            gemini_response = requests.post(
+                gemini_url,
+                headers={
+                    "x-goog-api-key": GEMINI_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                json=gemini_payload,
+                timeout=45
+            )
+            if not gemini_response.ok:
+                # Include the provider's error message, but never log the API key.
+                raise RuntimeError(
+                    f"Gemini API HTTP {gemini_response.status_code}: "
+                    f"{gemini_response.text[:1000]}"
+                )
+            gemini_data = gemini_response.json()
+            candidate_parts = (
+                gemini_data.get("candidates", [{}])[0]
+                .get("content", {}).get("parts", [])
+            )
+            ai_response = "".join(
+                part.get("text", "") for part in candidate_parts
+                if isinstance(part, dict)
+            ).strip()
+            if not ai_response:
+                block_reason = (
+                    gemini_data.get("promptFeedback", {}).get("blockReason")
+                    or gemini_data.get("candidates", [{}])[0].get("finishReason")
+                    or "No text returned"
+                )
+                raise ValueError(f"Gemini returned no usable text: {block_reason}")
+            print(f"🤖 Gemini AI Processed Output: {ai_response}")
             json_match = re.search(r'[\[{].*[\]}]', ai_response, re.DOTALL)
             if not json_match:
-                raise ValueError("No JSON found in Groq output")
+                raise ValueError("No JSON found in Gemini output")
             parsed = json.loads(json_match.group())
             entries = [parsed] if isinstance(parsed, dict) else parsed
             if not entries:
-                raise ValueError("Empty Groq entries")
+                raise ValueError("Empty Gemini entries")
         except Exception as ai_err:
-            # Groq is optional: when rate-limited or unavailable, use conservative
+            # Gemini is optional: when rate-limited or unavailable, use conservative
             # local rules and continue through the SAME Supabase transaction logic.
             error_text = str(ai_err)
             is_rate_limited = (
                 "429" in error_text or "rate_limit" in error_text.lower()
                 or "RateLimitError" in type(ai_err).__name__
             )
-            print(f"❌ Groq request/parse failed: {error_text}")
+            print(f"❌ Gemini request/parse failed: {error_text}")
             entries = local_fallback_parse(message_text)
             if entries:
                 print(f"🛟 Local fallback parsed command: {entries}")
-                print("🛟 Continuing through shared Supabase transaction logic; Groq will be tried again on the next message.")
+                print("🛟 Continuing through shared Supabase transaction logic; Gemini will be tried again on the next message.")
             else:
                 # A plain customer name is a safe SEARCH only if it matches this
                 # shopkeeper's own records; unsupported text must never create debt.
@@ -1313,19 +1354,19 @@ async def whatsapp_webhook(request: Request):
                         "delete MAGACA, ama search MAGACA."
                     )
                     send_whatsapp(sender_phone, reply)
-                    return {"status": "groq_rate_limited_unparsed"}
+                    return {"status": "gemini_rate_limited_unparsed"}
                 send_whatsapp(
                     sender_phone,
                     "⚠️ AI-gu hadda ma shaqaynayo. "
                     "Fadlan isticmaal qaab kale sida MAGACA $lacagta ama search MAGACA."
                 )
-                return {"status": "groq_error_unparsed"}
+                return {"status": "gemini_error_unparsed"}
 
-    # Both Groq and local fallback use the same downstream business rules.
+    # Both Gemini and local fallback use the same downstream business rules.
     # In particular, ordinary amounts add; explicit edit/ka dhig replaces.
     
     # Make explicit customer-search commands deterministic, like HISTORY:
-    # don't depend on Groq choosing the correct action or extracting the full name.
+    # don't depend on Gemini choosing the correct action or extracting the full name.
     # HISTORY/statement wording takes priority and is never converted to SEARCH.
     original_text = str(message_text or "").strip()
     lower_text = original_text.casefold()
