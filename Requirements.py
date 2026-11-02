@@ -2,7 +2,6 @@
 fastapi
 uvicorn[standard]
 supabase
-groq
 requests
 python-dotenv
 pandas
