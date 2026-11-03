@@ -1098,7 +1098,7 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(
                 sender_phone,
                 f"⏳ Ku soo dhawoow {APP_NAME}.\n\n"
-                "Lambarkan wuxuu u adeegaa maamulka ganacsiyada.\n"
+                "Lambarkan wuxuu u adeegaa ganacsiyada.\n"
                 "Haddii aad rabto inaad isticmaasho, fadlan la xiriir: +252633732215."
             )
             return {"status": "not_registered"}
@@ -1314,9 +1314,9 @@ async def whatsapp_webhook(request: Request):
                     send_ok = send_whatsapp(
                         target_phone,
                         build_debt_reminder(
-                            fresh,
-                            shopkeeper.get("name"),
-                            shopkeeper.get("phone_number") or sender_phone,
+    fresh,
+    business_user.get("name"),
+    business_user.get("phone_number") or sender_phone,
                         ),
                     )
                     if send_ok is False:
@@ -1332,7 +1332,7 @@ async def whatsapp_webhook(request: Request):
                 f"✅ Tirada xusuusinta ladiray: {sent_count}\n"
                 f"⚠️ Tirada Laga booday (deyn la bixiyey/lambar maqan): {skipped_count}\n"
                 f"❌ Tirada fashilmay: {failed_count}\n\n"
-                "Ogow: in xusuusinta la diray ma xaqiijinayso in qofku akhriyey fariinta."
+
             )
             send_whatsapp(sender_phone, report)
             print(f"📣 Reminder batch complete: sent={sent_count}, skipped={skipped_count}, failed={failed_count}")
@@ -1477,7 +1477,7 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(
                     sender_phone,
                     "⚠️ AI-gu hadda ma shaqaynayo. "
-                    "Fadlan isticmaal qaab kale sida MAGACA $lacagta ama search MAGACA."
+                    "Fadlan isticmaal tusaalayaashan MAGACA $ lacagta ama search MAGACA."
                 )
                 return {"status": "gemini_error_unparsed"}
 
@@ -1514,10 +1514,10 @@ async def whatsapp_webhook(request: Request):
                 return {"status": "pending_clarification_save_error"}
             send_whatsapp(
                 sender_phone,
-                "Fariintaadu waxay leedahay magac iyo lacag, laakiin jihada macaamilka ma cadda.\n\n"
+                "Waxaad soo qortay magac iyo tiro keliya.\n\n"
                 "Ma *Deyn cusub oo baxday* baa mise *Deyn soo xarootay*?\n"
                 "Ku jawaab: *DEYN CUSUB* ama *DEYN SOO XAROOTAY*.\n"
-                "Waxba lama diiwaangelin ilaa aad caddeyso."
+                "Waxba lama diiwaangelinayo ilaa aad caddeyso."
             )
             return {"status": "awaiting_transaction_clarification"}
         elif has_financial_entries and explicit_direction:
@@ -1930,7 +1930,7 @@ async def whatsapp_webhook(request: Request):
                     if filter_date:
                         send_whatsapp(
                             sender_phone,
-                            f"✅ Ma jiraan deymo balanteedu tahay {filter_date}."
+                            f"✅ Ma jiraan deymo balantoodu tahay {filter_date}."
                         )
                         send_due_list_followup(sender_phone)
                     else:
@@ -2408,7 +2408,7 @@ async def whatsapp_webhook(request: Request):
 
                             send_whatsapp(
                                 sender_phone,
-                                "❌ PDF lama samayn karin hadda. "
+                                "❌ PDF lama samayn karo hadda. "
                                 "Fadlan mar kale isku day."
                             )
 
@@ -2808,7 +2808,7 @@ async def daily_digest(request: Request):
             omitted = len(due_today) - len(shown)
 
             message_lines = [
-                "☀️ *Xasuusinta Maalinle ah ee Daynjir* ☀️",
+                "☀️ *Xasuusin* ☀️",
                 "",
                 "*Balamaha maanta & kuwa dhaafay:*",
                 *shown,
