@@ -148,8 +148,7 @@ def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone):
 
     f"Fariintan waxaa kuu soo diray *{sender}*.\n\n"
 
-    f"Fadlan sida ugu dhakhsaha badan u bixi lacagta. 
-    Mahadsanid."
+    f"Fadlan sida ugu dhakhsaha badan u bixi lacagta.  Mahadsanid."
 )
 
 
