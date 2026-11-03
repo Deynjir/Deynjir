@@ -236,6 +236,12 @@ Somali casual-language rules (understand spelling mistakes and informal phrasing
 - "Cali balantiisa ka dhig 2026-10-20" -> EDIT, customer_name="Cali", new_date="2026-10-20".
 - "Cali deynta $50 ka dhig, balantana 2026-10-20" -> EDIT with new_amount=50 and new_date="2026-10-20".
 
+TRANSACTION DIRECTION SAFETY:
+- "Cali $50" or "Axmed 30" has no direction. Extract the name and amount as a provisional ADD entry; the application will ask the user to choose ADD or PAY before saving anything.
+- "Cali $50 ayuu iga qaatay" is ADD.
+- "Cali $50 ayuu bixiyay" and "Cali wuxuu iga soo celiyay $50" are PAY.
+- For multiple name+amount entries without direction, extract every entry; the application asks one clarification and applies the answer to all entries.
+
 PAYMENT SAFETY:
 - Return the field payment_type for every entry: "FULL", "PARTIAL", "UNKNOWN", or null.
 - Use FULL only when the message clearly means the entire debt was paid.
@@ -424,6 +430,38 @@ def message_has_explicit_amount_for_name(message_text, customer_name):
     return False
 
 
+def classify_transaction_direction(message_text):
+    """Return ADD/PAY only when the user's wording clearly states direction."""
+    text = normalize_customer_name(str(message_text or ""))
+    add_patterns = [
+        r"\b(?:deyn cusub|dayn cusub|new debt|add debt|added debt)\b",
+        r"\b(?:iga qaatay|wuu qaatay|ayaa qaatay|ayuu qaatay|qaatey|amaah)\b",
+        r"\b(?:took|borrowed)\b",
+    ]
+    pay_patterns = [
+        r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|soo celiyay|soo celiyey|celiyay|celiyey)\b",
+        r"\b(?:waan ka helay|waxaan ka helay|lacag ayuu soo celiyay)\b",
+        r"\b(?:paid|payment received|paid back|repaid|returned the money)\b",
+    ]
+    has_add = any(re.search(pattern, text, flags=re.I) for pattern in add_patterns)
+    has_pay = any(re.search(pattern, text, flags=re.I) for pattern in pay_patterns)
+    if has_add and not has_pay:
+        return "ADD"
+    if has_pay and not has_add:
+        return "PAY"
+    return None
+
+
+def parse_transaction_clarification(message_text):
+    """Recognize a short reply to the pending ADD-vs-PAY question."""
+    text = normalize_customer_name(str(message_text or ""))
+    if re.fullmatch(r"(?:deyn cusub|dayn cusub|deyn cusub oo baxday|lacag baxday|add|new debt|deyn baa baxday)", text, re.I):
+        return "ADD"
+    if re.fullmatch(r"(?:deyn soo xarootay|lacag soo xarootay|lacag baa soo gashay|lacag la helay|pay|payment|money received|received payment)", text, re.I):
+        return "PAY"
+    return None
+
+
 def local_fallback_parse(message_text):
     """Conservatively parse common commands when Gemini is unavailable.
 
@@ -451,6 +489,32 @@ def local_fallback_parse(message_text):
         period = "week" if ("week" in low or "todobaad" in low) else ("month" if ("month" in low or "bishan" in low) else None)
         return [{**base, "action": "REPORT", "filter_type": period}]
 
+    # Preserve bare name+amount entries for the explicit clarification flow.
+    # This is intentionally NOT an ADD decision: the webhook asks whether the
+    # money was a new debt or a received payment before writing any transaction.
+    if classify_transaction_direction(raw) is None and not re.search(
+        r"\b(?:edit|kadhig|ka\s+dhig|delete|remove|search|find|history|taariikh|report|export)\b",
+        low,
+    ):
+        segments = [part.strip() for part in re.split(r"[,;\n]+", raw) if part.strip()]
+        ambiguous_entries = []
+        for segment in segments:
+            match = re.search(r"(?:\$\s*(\d+(?:[.,]\d{1,2})?)|(\d+(?:[.,]\d{1,2})?)\s*\$|(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-]))", segment)
+            if not match:
+                ambiguous_entries = []
+                break
+            amount_text = next((value for value in match.groups() if value is not None), None)
+            name_text = (segment[:match.start()] + " " + segment[match.end():]).strip(" -:,$")
+            name_text = re.sub(r"\b(?:usd|dollars?|dollar)\b", " ", name_text, flags=re.I)
+            name_text = " ".join(name_text.split()).strip()
+            if not name_text:
+                ambiguous_entries = []
+                break
+            ambiguous_entries.append({**base, "action": "ADD", "customer_name": name_text,
+                                      "amount": float(amount_text.replace(",", "."))})
+        if ambiguous_entries:
+            return ambiguous_entries
+
     # Identify a single amount. Currency-marked amounts are safe; plain numbers
     # are accepted only when transaction wording makes their meaning explicit.
     amount_matches = list(re.finditer(r"\$\s*(\d+(?:[.,]\d{1,2})?)|(?<!\w)(\d+(?:[.,]\d{1,2})?)\s*\$", raw))
@@ -468,7 +532,7 @@ def local_fallback_parse(message_text):
     is_delete = bool(re.match(r"^(?:delete|remove|tirtir)\b", low))
     is_search = bool(re.match(r"^(?:search|find|lookup|look\s+up|raadi|raadso|show|check|hubi)\b", low))
     is_history = bool(re.search(r"\b(?:history|taariikh|statement|xisaab)\b", low))
-    is_payment = bool(re.search(r"\b(?:bixiyay|bixisay|wuu\s+bixiyay|wuxuu\s+bixiyay|paid|payment)\b", low))
+    is_payment = bool(re.search(r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|wuu\s+bixiyay|wuxuu\s+bixiyay|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|paid|payment|repaid|paid\s+back)\b", low))
 
     if not amount_matches and not any((is_delete, is_search, is_history, is_payment)):
         # A bare name can be searched safely only if the caller verifies it exists.
@@ -495,7 +559,7 @@ def local_fallback_parse(message_text):
     name_text = re.sub(r"\b(?:\$|usd|dollars?|ayuu|ayuu\s+iga\s+qaatay)\b", " ", name_text, flags=re.I)
     name_text = re.sub(r"^(?:edit|add|deyn|delete|remove|tirtir|search|find|lookup|look\s+up|raadi|raadso|show|check|hubi)\b\s*[:,-]?\s*", "", name_text, flags=re.I)
     name_text = re.sub(r"\b(?:deyntiisa|deynta|deynteeda|balance|amount)\s+(?:ka\s+dhig|kadhig|ka\s+dhigo)\b", " ", name_text, flags=re.I)
-    name_text = re.sub(r"\b(?:ka\s+dhig|kadhig|ka\s+dhigo|wuu\s+bixiyay|wuxuu\s+bixiyay|bixiyay|bixisay|paid|payment|iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|deyn|added|add)\b", " ", name_text, flags=re.I)
+    name_text = re.sub(r"\b(?:ka\s+dhig|kadhig|ka\s+dhigo|wuu|wuxuu|ayuu|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|bixiyay|bixiyey|bixisay|bixiyeen|paid|payment|repaid|iga\s+soo|iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|deyntii|deynta|oo\s+dhan|added|add)\b", " ", name_text, flags=re.I)
     name_text = re.sub(r"\b(?:history|taariikh|statement|xisaab)\b", " ", name_text, flags=re.I)
     name_text = re.sub(r"\b(?:debt|debts|show|search|find|lookup|look\s+up|check|raadi|raadso|hubi)\b", " ", name_text, flags=re.I)
     name_text = re.sub(r"[^\w\s'/-]", " ", name_text, flags=re.UNICODE)
@@ -1054,6 +1118,59 @@ async def whatsapp_webhook(request: Request):
         print(f"❌ DATABASE ERROR (Business User Lookup): {db_err}")
         return {"status": "business_user_db_error"}
 
+    # A pending transaction clarification is persisted in Supabase so it survives
+    # Render restarts. The original message is replayed only after a clear answer.
+    pending_clarification = None
+    forced_transaction_action = None
+    try:
+        pending_result = (
+            supabase.table("pending_transaction_clarifications")
+            .select("sender_phone, original_message, parsed_entries, created_at")
+            .eq("sender_phone", sender_phone)
+            .eq("business_user_id", business_user_id)
+            .limit(1)
+            .execute()
+        )
+        if pending_result.data:
+            candidate = pending_result.data[0]
+            created_raw = candidate.get("created_at")
+            created_at = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00")) if created_raw else None
+            if created_at and created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if not created_at or datetime.now(timezone.utc) - created_at > timedelta(minutes=30):
+                supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).execute()
+            else:
+                pending_clarification = candidate
+    except Exception as pending_err:
+        print(f"⚠️ Pending clarification lookup failed: {pending_err}")
+        send_whatsapp(sender_phone, "❌ Ma hubin karo fariintii sugaysay. Fadlan mar kale isku day.")
+        return {"status": "pending_clarification_lookup_error"}
+
+    if pending_clarification:
+        clarification_action = parse_transaction_clarification(message_text)
+        if clarification_action:
+            try:
+                entries = pending_clarification.get("parsed_entries") or []
+                if isinstance(entries, str):
+                    entries = json.loads(entries)
+                if not isinstance(entries, list) or not entries:
+                    raise ValueError("Saved pending entries are empty or invalid")
+                forced_transaction_action = clarification_action
+                message_text = pending_clarification.get("original_message") or message_text
+                supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).execute()
+                print(f"✅ Clarification received; replaying saved message as {forced_transaction_action}")
+            except Exception as pending_err:
+                print(f"❌ Pending clarification restore failed: {pending_err}")
+                send_whatsapp(sender_phone, "❌ Fariintii hore dib looma soo celin karin. Fadlan mar kale dir.")
+                return {"status": "pending_clarification_restore_error"}
+        elif re.fullmatch(r"\s*(?:jooji|cancel|baaji)\s*", str(message_text), re.I):
+            supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).execute()
+            send_whatsapp(sender_phone, "Waa la joojiyay. Wax deyn ah lama diiwaangelin.")
+            return {"status": "pending_clarification_cancelled"}
+        else:
+            send_whatsapp(sender_phone, "Fadlan marka hore ka jawaab fariintii sugaysay: *DEYN CUSUB* ama *DEYN SOO XAROOTAY*. Qor *JOOJI* si aad u baajiso.")
+            return {"status": "awaiting_transaction_clarification"}
+
     # Manual debt-reminder workflow: fully rule-based, no Gemini request.
     # Start: XUSUUSIN -> numbered unpaid-customer list -> "1,3" -> confirmation.
     reminder_text = str(message_text or "").strip()
@@ -1255,6 +1372,8 @@ async def whatsapp_webhook(request: Request):
     if pdf_only_requested:
         entries = [{"action": "HISTORY", "customer_name": pdf_customer_name}]
         print(f"📄 Skipping Gemini for PDF follow-up; using saved customer {pdf_customer_name!r}")
+    elif forced_transaction_action:
+        print(f"🔁 Using saved entries with confirmed action {forced_transaction_action}")
     else:
         try:
             if not GEMINI_API_KEY:
@@ -1361,6 +1480,50 @@ async def whatsapp_webhook(request: Request):
                     "Fadlan isticmaal qaab kale sida MAGACA $lacagta ama search MAGACA."
                 )
                 return {"status": "gemini_error_unparsed"}
+
+    # If the user answered the pending question, apply that answer to every
+    # entry extracted from the saved original message. Otherwise require an
+    # explicit direction before any ADD/PAY financial operation.
+    if forced_transaction_action:
+        for parsed_entry in entries:
+            if parsed_entry.get("action") in {"ADD", "PAY"}:
+                parsed_entry["action"] = forced_transaction_action
+    elif not pdf_only_requested:
+        explicit_direction = classify_transaction_direction(message_text)
+        has_financial_entries = any(
+            isinstance(item, dict)
+            and item.get("action") in {"ADD", "PAY"}
+            and item.get("customer_name")
+            and item.get("amount") is not None
+            for item in entries
+        )
+        # Only intercept likely debt/payment entries. Non-financial commands
+        # (LIST, SEARCH, HISTORY, EDIT, etc.) continue through normal handling.
+        if has_financial_entries and explicit_direction is None:
+            try:
+                supabase.table("pending_transaction_clarifications").upsert({
+                    "sender_phone": sender_phone,
+                    "business_user_id": business_user_id,
+                    "original_message": str(message_text),
+                    "parsed_entries": entries,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }, on_conflict="sender_phone").execute()
+            except Exception as pending_err:
+                print(f"❌ Could not save pending transaction clarification: {pending_err}")
+                send_whatsapp(sender_phone, "❌ Ma kaydin karo fariinta sugaysa. Waxba lama diiwaangelin; fadlan mar kale isku day.")
+                return {"status": "pending_clarification_save_error"}
+            send_whatsapp(
+                sender_phone,
+                "Fariintaadu waxay leedahay magac iyo lacag, laakiin jihada macaamilka ma cadda.\n\n"
+                "Ma *Deyn cusub oo baxday* baa mise *Deyn soo xarootay*?\n"
+                "Ku jawaab: *DEYN CUSUB* ama *DEYN SOO XAROOTAY*.\n"
+                "Waxba lama diiwaangelin ilaa aad caddeyso."
+            )
+            return {"status": "awaiting_transaction_clarification"}
+        elif has_financial_entries and explicit_direction:
+            for parsed_entry in entries:
+                if parsed_entry.get("action") in {"ADD", "PAY"}:
+                    parsed_entry["action"] = explicit_direction
 
     # Both Gemini and local fallback use the same downstream business rules.
     # In particular, ordinary amounts add; explicit edit/ka dhig replaces.
