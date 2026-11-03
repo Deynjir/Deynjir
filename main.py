@@ -141,15 +141,16 @@ def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone):
     )
 
     return (
-        f"Asc {name},\n"
-        
-        f"Waxaan si xushmad leh kuu xusuusinaynaa in aad soo bixiso "
-        f"lacagtii daynta ahayd oo dhan: *${balance:.2f}*.\n"
-        
-        f"Fariintan waxaa kuu soo diray *{sender}*.\n"
-        
-        f"Fadlan sida ugu dhakhsaha badan u bixi lacagta. Mahadsanid."
-    )
+    f"Asc {name},\n\n"
+
+    f"Waxaan si xushmad leh kuu xusuusinayaa in aad soo bixiso "
+    f"lacagtii daynta ahayd oo dhan: *${balance:.2f}*.\n\n"
+
+    f"Fariintan waxaa kuu soo diray *{sender}*.\n\n"
+
+    f"Fadlan sida ugu dhakhsaha badan u bixi lacagta. 
+    Mahadsanid."
+)
 
 
 # Securely load credentials from Render's Environment panel variables
