@@ -155,7 +155,7 @@ def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone):
 # Securely load credentials from Render's Environment panel variables
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 
 INSTANCE_ID = os.getenv("GREEN_API_INSTANCE_ID", "710722758620")
 GREEN_API_TOKEN = os.getenv("GREEN_API_TOKEN", "")
