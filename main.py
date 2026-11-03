@@ -1286,11 +1286,15 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(sender_phone, "⌛ Xulashadu ma jirto ama way dhacday. Soo qor *XUSUUSIN* mar kale.")
                 return {"status": "reminder_state_missing"}
 
+            
             sent_count = 0
             skipped_count = 0
             failed_count = 0
+
             for number in state.get("selected") or []:
                 original = state["customers"][number - 1]
+                customer_name = original.get("name") or "Macmiil"
+
                 try:
                     fresh_result = (
                         supabase.table("customers")
@@ -1299,44 +1303,77 @@ async def whatsapp_webhook(request: Request):
                         .eq("business_user_id", business_user_id)
                         .execute()
                     )
+
                     if not fresh_result.data:
                         skipped_count += 1
-                        continue
-                    fresh = fresh_result.data[0]
-                    if fresh.get("is_paid") is True or float(fresh.get("amount") or 0) <= 0:
-                        skipped_count += 1
-                        continue
-                    target_phone = normalize_reminder_phone(fresh.get("phone_number"))
-                    if not target_phone:
-                        skipped_count += 1
-                        continue
-
-                    send_ok = send_whatsapp(
-                        target_phone,
-                        build_debt_reminder(
-    fresh,
-    business_user.get("name"),
-    business_user.get("phone_number") or sender_phone,
-                        ),
-                    )
-                    if send_ok is False:
-                        failed_count += 1
+                        status_message = (
+                            "Xusuusinta waa laga booday "
+                            "(deyn la bixiyay/lambar maqan)."
+                        )
                     else:
-                        sent_count += 1
+                        fresh = fresh_result.data[0]
+                        customer_name = fresh.get("name") or customer_name
+
+                        if fresh.get("is_paid") is True or float(fresh.get("amount") or 0) <= 0:
+                            skipped_count += 1
+                            status_message = (
+                                "Xusuusinta waa laga booday "
+                                "(deyn la bixiyay/lambar maqan)."
+                            )
+
+                        else:
+                            target_phone = normalize_reminder_phone(
+                                fresh.get("phone_number")
+                            )
+
+                            if not target_phone:
+                                skipped_count += 1
+                                status_message = (
+                                    "Xusuusinta waa laga booday "
+                                    "(deyn la bixiyay/lambar maqan)."
+                                )
+                            else:
+                                send_ok = send_whatsapp(
+                                    target_phone,
+                                    build_debt_reminder(
+                                        fresh,
+                                        business_user.get("name"),
+                                        business_user.get("phone_number") or sender_phone,
+                                    ),
+                                )
+
+                                if send_ok is False:
+                                    failed_count += 1
+                                    status_message = "Xusuusintan lama dirin."
+                                else:
+                                    sent_count += 1
+                                    status_message = "Fariinta xusuusinta waa la diray."
+
                 except Exception as send_err:
                     failed_count += 1
-                    print(f"❌ REMINDER SEND ERROR for debtor id={original.get('id')}: {send_err}")
+                    status_message = "Xusuusintan lama dirin."
+                    print(
+                        f"❌ REMINDER SEND ERROR for debtor "
+                        f"id={original.get('id')}: {send_err}"
+                    )
 
-            report = (
-                "📣 *NATIIJADA XUSUUSINTA*\n\n"
-                f"✅ Tirada xusuusinta ladiray: {sent_count}\n"
-                f"⚠️ Tirada Laga booday (deyn la bixiyey/lambar maqan): {skipped_count}\n"
-                f"❌ Tirada fashilmay: {failed_count}\n\n"
+                # Send one result to the shopkeeper for this customer.
+                send_whatsapp(
+                    sender_phone,
+                    f"*{customer_name}*\n{status_message}"
+                )
 
+            print(
+                f"📣 Reminder batch complete: sent={sent_count}, "
+                f"skipped={skipped_count}, failed={failed_count}"
             )
-            send_whatsapp(sender_phone, report)
-            print(f"📣 Reminder batch complete: sent={sent_count}, skipped={skipped_count}, failed={failed_count}")
-            return {"status": "reminder_batch_complete", "accepted": sent_count, "skipped": skipped_count, "failed": failed_count}
+
+            return {
+                "status": "reminder_batch_complete",
+                "accepted": sent_count,
+                "skipped": skipped_count,
+                "failed": failed_count,
+            }
 
         send_whatsapp(
             sender_phone,
