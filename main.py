@@ -924,7 +924,7 @@ def _stage_import(admin_phone, entries):
     lines = ["📋 *HORDHACA DEYNTA LA DIIWAANGELINAYO*", f"Tirada macaamiisha: {len(entries)}", ""]
     for i, item in enumerate(entries, 1):
         lines.append(f"{i}. {item['name']} — ${item['amount']:.2f} — {item['promised_date']}")
-    lines += ["", f"*Wadarta guud: ${total:.2f}*", "", "Haddii xogtu sax tahay, qor *CONFIRM IMPORT* si loo kaydiyo.", "Haddii aad rabto inaad joojiso, qor *CANCEL IMPORT*.", "Fadlan hubi magacyada iyo lacagaha ka hor intaadan xaqiijin."]
+    lines += ["", f"*Wadarta guud: ${total:.2f}*", "", "Hubi magacyada iyo lacagaha.", "Haddii ay sax yihiin, soo qor *OK* si loo kaydiyo.", "Haddii kale, soo qor *CANCEL* si loo joojiyo."]
     send_whatsapp(admin_phone, "\n".join(lines))
 
 
@@ -1083,11 +1083,11 @@ async def whatsapp_webhook(request: Request):
     # Owner-only shop selection and staged import workflow.
     if sender_phone == owner_phone:
         import_text = str(message_text or "").strip()
-        if re.fullmatch(r"\s*CANCEL\s+IMPORT\s*", import_text, re.I):
+        if re.fullmatch(r"\s*CANCEL\s*", import_text, re.I) and sender_phone in IMPORT_SESSIONS:
             IMPORT_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, "✅ Import waa la joojiyey. Waxba lama kaydin.")
             return {"status": "import_cancelled"}
-        if re.fullmatch(r"\s*CONFIRM\s+IMPORT\s*", import_text, re.I):
+        if re.fullmatch(r"\s*OK\s*", import_text, re.I):
             session = IMPORT_SESSIONS.get(sender_phone)
             if not session or not session.get("entries"):
                 send_whatsapp(sender_phone, "Ma jiro liis sugaya xaqiijin. Marka hore dir liiska.")
@@ -1121,7 +1121,7 @@ async def whatsapp_webhook(request: Request):
                 IMPORT_SESSIONS[sender_phone] = {"business_user_id": shop["id"], "shop_phone": target_phone,
                     "shop_name": shop.get("name") or target_phone, "entries": None,
                     "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL}
-                send_whatsapp(sender_phone, f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\nHadda ii soo dir hal ama dhowr deyn oo qoraal ah, Excel/CSV, ama sawirka liiska.\nWaxba lama kaydin doono ilaa aad tiraahdo *CONFIRM IMPORT*.\nJooji: *CANCEL IMPORT*.")
+                send_whatsapp(sender_phone, f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\nHadda ii soo dir hal ama dhowr deyn oo qoraal ah, Excel/CSV, ama sawirka liiska.\nMarkaad hubiso liiska, soo qor *OK* si loo kaydiyo.\nHaddii aad rabto inaad joojiso, soo qor *CANCEL*.")
                 return {"status": "import_shop_selected"}
             except Exception as exc:
                 print(f"❌ Import shop lookup error: {exc}")
@@ -1133,7 +1133,7 @@ async def whatsapp_webhook(request: Request):
                 IMPORT_SESSIONS.pop(sender_phone, None)
                 send_whatsapp(sender_phone, "Waqtigii import-ka wuu dhammaaday. Bilow mar kale: IMPORT 252...")
                 return {"status": "import_expired"}
-            if re.fullmatch(r"\s*CONFIRM\s+IMPORT\s*", import_text, re.I):
+            if re.fullmatch(r"\s*OK\s*", import_text, re.I):
                 pass
             else:
                 try:
