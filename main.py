@@ -43,6 +43,9 @@ LAST_HISTORY_REQUESTS = {}
 # cleared before sending so a repeated "HAA DIR" cannot resend the same batch.
 REMINDER_SESSIONS = {}
 REMINDER_SESSION_TTL = timedelta(minutes=15)
+# Admin-assisted imports are staged for preview and explicit confirmation.
+IMPORT_SESSIONS = {}
+IMPORT_SESSION_TTL = timedelta(minutes=30)
 DEFAULT_COUNTRY_CODE = re.sub(r"\D", "", os.getenv("DEFAULT_COUNTRY_CODE", ""))
 
 
@@ -833,6 +836,121 @@ def send_due_list_followup(phone):
         "ama\n"
         "Liiska daynta iyo balamaha"
     )
+def _import_parse_date(value):
+    if value is None or str(value).strip().lower() in ("", "nan", "nat", "none", "null"):
+        return today_eat().isoformat()
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    raw = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            continue
+    raise ValueError(f"Taariikh aan la fahmi karin: {raw}")
+
+
+def _validate_import_entries(entries):
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("Wax macaamiil ah lagama helin.")
+    clean = []
+    for i, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Saf {i} ma saxna.")
+        name = str(entry.get("name") or entry.get("customer_name") or "").strip()
+        if not name or name.lower() in ("nan", "none"):
+            raise ValueError(f"Saf {i}: magaca macmiilka ma cadda.")
+        try:
+            amount = float(entry.get("amount"))
+        except (TypeError, ValueError):
+            raise ValueError(f"Saf {i} ({name}): lacagtu ma cadda.")
+        if amount <= 0:
+            raise ValueError(f"Saf {i} ({name}): lacagtu waa inay ka weyn tahay eber.")
+        phone = entry.get("phone_number") or entry.get("customer_phone")
+        if str(phone or "").strip().lower() in ("nan", "none", "null"):
+            phone = None
+        phone = re.sub(r"[^0-9+]", "", str(phone)) if phone else None
+        clean.append({
+            "name": name,
+            "amount": round(amount, 2),
+            "promised_date": _import_parse_date(entry.get("promised_date") or entry.get("due_date") or entry.get("due")),
+            "phone_number": phone or None,
+        })
+    return clean
+
+
+def _extract_import_text(raw_text):
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY lama dejin.")
+    prompt = (
+        "Extract every customer debt from the following text. Return ONLY a JSON array. "
+        "Each item must have name, amount (number), promised_date (YYYY-MM-DD or null), "
+        "phone_number (string or null). Do not guess unclear names or amounts; use null "
+        "for unclear values. Today's date is " + today_eat().isoformat() + ".\n\nTEXT:\n" + raw_text
+    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    response = requests.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+        json={"contents":[{"role":"user","parts":[{"text":prompt}]}],
+              "generationConfig":{"temperature":0,"responseMimeType":"application/json"}}, timeout=45)
+    response.raise_for_status()
+    data = response.json()
+    text = "".join(x.get("text", "") for x in data.get("candidates", [{}])[0].get("content", {}).get("parts", []))
+    parsed = json.loads(text)
+    return _validate_import_entries(parsed)
+
+
+def _extract_import_image(image_bytes, mime_type):
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY lama dejin.")
+    import base64
+    prompt = (
+        "Read this handwritten or printed debt list. Extract ALL rows. Return ONLY a JSON array "
+        "with name, amount (number), promised_date (YYYY-MM-DD or null), phone_number (string or null). "
+        "Do not guess unclear names or amounts; use null for unclear values. Today's date is " + today_eat().isoformat()
+    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    payload = {"contents":[{"role":"user","parts":[{"text":prompt},
+        {"inline_data":{"mime_type":mime_type,"data":base64.b64encode(image_bytes).decode("ascii")}}]}],
+        "generationConfig":{"temperature":0,"responseMimeType":"application/json"}}
+    response = requests.post(url, headers={"x-goog-api-key":GEMINI_API_KEY,"Content-Type":"application/json"}, json=payload, timeout=60)
+    response.raise_for_status()
+    data=response.json()
+    text="".join(x.get("text","") for x in data.get("candidates",[{}])[0].get("content",{}).get("parts",[]))
+    return _validate_import_entries(json.loads(text))
+
+
+def _stage_import(admin_phone, entries):
+    total = sum(item["amount"] for item in entries)
+    lines = ["📋 *HORDHAC DEYN LA SOO GELINAYO*", f"Tirada macaamiisha: {len(entries)}", ""]
+    for i, item in enumerate(entries, 1):
+        lines.append(f"{i}. {item['name']} — ${item['amount']:.2f} — {item['promised_date']}")
+    lines += ["", f"*Wadarta: ${total:.2f}*", "", "Haddii liisku sax yahay qor *CONFIRM IMPORT*.", "Qor *CANCEL IMPORT* si aad u joojiso.", "Fadlan hubi magacyada iyo lacagaha ka hor xaqiijinta."]
+    send_whatsapp(admin_phone, "\n".join(lines))
+
+
+def _commit_import(admin_phone, session):
+    entries = session["entries"]
+    business_user_id = session["business_user_id"]
+    added = 0
+    skipped = 0
+    for item in entries:
+        # Conservative duplicate guard: don't re-add an identical unpaid debt for the same shop.
+        existing = (supabase.table("customers").select("id")
+            .eq("business_user_id", business_user_id)
+            .eq("name", item["name"]).eq("amount", item["amount"])
+            .eq("is_paid", False).limit(1).execute())
+        if existing.data:
+            skipped += 1
+            continue
+        row = {"business_user_id": business_user_id, "name": item["name"],
+               "amount": item["amount"], "original_amount": item["amount"],
+               "promised_date": item["promised_date"], "phone_number": item["phone_number"],
+               "is_paid": False}
+        supabase.table("customers").insert(row).execute()
+        added += 1
+    send_whatsapp(admin_phone, f"✅ Import waa dhammaaday.\nLa daray: {added}\nLaga booday (deyn isku mid ah oo hore u jirtay): {skipped}\nGanacsiga waxaa lagu kaydiyey ID-ga dukaanka la doortay.")
+
+
 @app.post("/webhook")
 async def whatsapp_webhook(request: Request):
     data = await request.json()
@@ -881,147 +999,69 @@ async def whatsapp_webhook(request: Request):
     
     message_text = ""
     
-    # ✅ HANDLE EXCEL/CSV FILES
+    # Import files only during an owner-started IMPORT session. Never auto-register
+    # the sender and never write rows before the owner confirms the preview.
     if type_message == "documentMessage":
-        print("📄 Excel/CSV file detected!")
+        if sender_phone != str(OWNER_PHONE).replace("+", "").strip() or sender_phone not in IMPORT_SESSIONS:
+            send_whatsapp(sender_phone, "Faylkan lama soo gelin karo ilaa aad marka hore dirto *IMPORT 252...*.")
+            return {"status": "import_session_required"}
         try:
-            doc_data = message_data["fileMessageData"]
-            file_name = doc_data.get("fileName", "")
-            
-            if not str(file_name).lower().endswith((".xlsx", ".xls", ".csv")):
-                send_whatsapp(sender_phone, "❌ Please send Excel (.xlsx, .xls) or CSV file only.")
-                return {"status": "unsupported_file_type"}
-            
-            download_url = doc_data.get("downloadUrl")
+            doc = message_data.get("fileMessageData", {})
+            filename = str(doc.get("fileName") or "")
+            url = doc.get("downloadUrl")
+            if not filename.lower().endswith((".xlsx", ".xls", ".csv")) or not url:
+                send_whatsapp(sender_phone, "Fadlan dir Excel (.xlsx), CSV ama XLS fayl leh.")
+                return {"status": "unsupported_or_missing_file"}
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            if filename.lower().endswith(".csv"):
+                frame = pd.read_csv(BytesIO(response.content))
+            else:
+                frame = pd.read_excel(BytesIO(response.content))
+            columns = {str(c).strip().lower(): c for c in frame.columns}
+            name_col = columns.get("name") or columns.get("customer") or columns.get("customer name")
+            amount_col = columns.get("amount") or columns.get("debt")
+            if not name_col or not amount_col:
+                raise ValueError("Faylku waa inuu leeyahay Name iyo Amount columns.")
+            due_col = next((columns[k] for k in ("due", "due date", "due_date", "promised_date") if k in columns), None)
+            phone_col = next((columns[k] for k in ("phone", "phone number", "phone_number") if k in columns), None)
+            raw=[]
+            for _, row in frame.iterrows():
+                raw.append({"name": row[name_col], "amount": row[amount_col],
+                    "promised_date": row[due_col] if due_col else None,
+                    "phone_number": row[phone_col] if phone_col else None})
+            entries = _validate_import_entries(raw)
+            IMPORT_SESSIONS[sender_phone]["entries"] = entries
+            IMPORT_SESSIONS[sender_phone]["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
+            _stage_import(sender_phone, entries)
+            return {"status": "import_preview_ready", "count": len(entries)}
+        except Exception as exc:
+            print(f"❌ Import document error: {type(exc).__name__}: {exc}")
+            send_whatsapp(sender_phone, f"❌ Faylka lama akhrin karin: {str(exc)[:250]}")
+            return {"status": "import_document_error"}
+
+    if type_message == "imageMessage":
+        if sender_phone != str(OWNER_PHONE).replace("+", "").strip() or sender_phone not in IMPORT_SESSIONS:
+            send_whatsapp(sender_phone, "Sawir liis deyn ah soo geli kadib marka aad dirto *IMPORT 252...*.")
+            return {"status": "import_session_required"}
+        try:
+            image_data = message_data.get("imageMessageData") or message_data.get("fileMessageData", {})
+            download_url = image_data.get("downloadUrl")
             if not download_url:
-                send_whatsapp(sender_phone, "❌ Could not download file.")
-                return {"status": "no_download_url"}
-            
-            print(f"📥 Downloading file: {file_name}")
-            
-            file_response = requests.get(download_url, timeout=30)
-            if file_response.status_code != 200:
-                send_whatsapp(sender_phone, "❌ Failed to download file.")
-                return {"status": "download_failed"}
-            
-            try:
-                print("🔍 Parsing file...")
-                if str(file_name).lower().endswith('.csv'):
-                    df = pd.read_csv(BytesIO(file_response.content))
-                else:
-                    df = pd.read_excel(BytesIO(file_response.content), engine='openpyxl')
-                
-                print(f"📊 Found {len(df)} rows in file")
-                print(f"📋 Columns: {list(df.columns)}")
-                if 'Due' in df.columns:
-                    print(f"🔍 Due values: {df['Due'].tolist()}")
-                elif 'Due Date' in df.columns:
-                    print(f"🔍 Due Date values: {df['Due Date'].tolist()}")
-                elif 'due_date' in df.columns:
-                    print(f"🔍 due_date values: {df['due_date'].tolist()}")
-                else:
-                    print("🔍 No Due column found!")
-                
-                required_cols = ['Name', 'Amount']
-                if not all(col in df.columns for col in required_cols):
-                    send_whatsapp(sender_phone, "❌ File must have 'Name' and 'Amount' columns.")
-                    return {"status": "missing_columns"}
-                
-                try:
-                    sk_query = supabase.table("business_users").select("*").eq("phone_number", sender_phone).execute()
-                    if not sk_query.data:
-                        sk_insert = supabase.table("business_users").insert({"phone_number": sender_phone}).execute()
-                        business_user_id = sk_insert.data[0]["id"]
-                    else:
-                        business_user_id = sk_query.data[0]["id"]
-                except Exception as db_err:
-                    print(f"❌ DATABASE ERROR: {db_err}")
-                    send_whatsapp(sender_phone, "❌ Database error.")
-                    return {"status": "shopkeeper_db_error"}
-                
-                added_count = 0
-                failed_count = 0
-                
-                for index, row in df.iterrows():
-                    try:
-                        name = str(row['Name']).strip()
-                        amount = float(row['Amount'])
-                        
-                        # FIX: Handle Excel date properly - check all column variations
-                        due_date = None
-                        due_val = None
-                        
-                        # Try all possible column names
-                        for col_name in ['Due', 'Due Date', 'due_date', 'due']:
-                            if col_name in df.columns:
-                                due_val = row[col_name]
-                                break
-                        
-                        if due_val is not None and str(due_val).strip().lower() not in ("nan", ""):
-                            if hasattr(due_val, "strftime"):
-                                due_date = due_val.strftime("%Y-%m-%d")
-                            else:
-                                due_str = str(due_val).strip()
-                                due_date = None
+                raise ValueError("Sawirka lama soo dejisan karin.")
+            image_response = requests.get(download_url, timeout=30)
+            image_response.raise_for_status()
+            mime = image_data.get("mimeType") or "image/jpeg"
+            entries = _extract_import_image(image_response.content, mime)
+            IMPORT_SESSIONS[sender_phone]["entries"] = entries
+            IMPORT_SESSIONS[sender_phone]["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
+            _stage_import(sender_phone, entries)
+            return {"status": "import_image_preview_ready", "count": len(entries)}
+        except Exception as exc:
+            print(f"❌ Import image error: {type(exc).__name__}: {exc}")
+            send_whatsapp(sender_phone, f"❌ Sawirka si sax ah looma akhrin karin: {str(exc)[:250]}")
+            return {"status": "import_image_error"}
 
-                                for fmt in (
-                                    "%Y-%m-%d",
-                                    "%d/%m/%Y",
-                                    "%d-%m-%Y",
-                                    "%m/%d/%Y",
-                                ):
-                                    try:
-                                        parsed_date = datetime.strptime(due_str, fmt)
-                                        due_date = parsed_date.strftime("%Y-%m-%d")
-                                        break
-                                    except ValueError:
-                                        pass
-
-                                if due_date is None:
-                                    due_date = (
-                                        now_eat()
-                                    ).date().isoformat()
-                        else:
-                            due_date = (
-                                now_eat()
-                            ).date().isoformat()
-
-                        starting_amount = float(amount)
-
-                        debtor_data = {
-                            "business_user_id": business_user_id,
-                            "name": name,
-                            "amount": starting_amount,
-                            "original_amount": starting_amount,
-                            "promised_date": due_date,
-                            "is_paid": False
-                        }
-
-                        supabase.table("customers").insert(debtor_data).execute()
-                        added_count += 1
-                        print(f"  ✅ Added: {name} - ${amount}")
-                        
-                    except Exception as row_err:
-                        print(f"  ❌ Row {index} failed: {row_err}")
-                        failed_count += 1
-                
-                if added_count > 0:
-                    send_whatsapp(sender_phone, f"✅ Imported {added_count} debts from Excel!\n\n📊 **Summary**:\n✅ Added: {added_count}")
-                else:
-                    send_whatsapp(sender_phone, "❌ No valid debts found in file.")
-                
-                return {"status": "success"}
-                
-            except Exception as parse_err:
-                print(f"❌ Parse error: {parse_err}")
-                send_whatsapp(sender_phone, f"❌ File error: {parse_err}")
-                return {"status": "parse_error"}
-                
-        except Exception as file_err:
-            print(f"❌ File error: {str(file_err)}")
-            send_whatsapp(sender_phone, f"❌ File error: {str(file_err)}")
-            return {"status": "file_error"}
-    
     # ✅ HANDLE TEXT MESSAGES
     try:
         if type_message == "textMessage":
@@ -1039,6 +1079,73 @@ async def whatsapp_webhook(request: Request):
     # Normalize sender; GREEN-API chat IDs may include "@c.us".
     sender_phone = str(sender_phone).replace("+", "").split("@")[0].strip()
     owner_phone = str(OWNER_PHONE).replace("+", "").split("@")[0].strip()
+
+    # Owner-only shop selection and staged import workflow.
+    if sender_phone == owner_phone:
+        import_text = str(message_text or "").strip()
+        if re.fullmatch(r"\s*CANCEL\s+IMPORT\s*", import_text, re.I):
+            IMPORT_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "✅ Import waa la joojiyey. Waxba lama kaydin.")
+            return {"status": "import_cancelled"}
+        if re.fullmatch(r"\s*CONFIRM\s+IMPORT\s*", import_text, re.I):
+            session = IMPORT_SESSIONS.get(sender_phone)
+            if not session or not session.get("entries"):
+                send_whatsapp(sender_phone, "Ma jiro liis sugaya xaqiijin. Marka hore dir liiska.")
+                return {"status": "no_import_to_confirm"}
+            if datetime.now(timezone.utc) > session.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
+                IMPORT_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "Waqtigii import-ka wuu dhammaaday. Bilow mar kale: IMPORT 252...")
+                return {"status": "import_expired"}
+            try:
+                _commit_import(sender_phone, session)
+                IMPORT_SESSIONS.pop(sender_phone, None)
+                return {"status": "import_confirmed"}
+            except Exception as exc:
+                print(f"❌ Import commit error: {type(exc).__name__}: {exc}")
+                send_whatsapp(sender_phone, "❌ Kaydintu way fashilantay. Waxba ha ku celin ilaa la hubiyo Supabase logs.")
+                return {"status": "import_commit_error"}
+        match = re.fullmatch(r"\s*IMPORT\s+(\+?\d{8,15})\s*", import_text, re.I)
+        if match:
+            target_phone = match.group(1).replace("+", "")
+            try:
+                target = (supabase.table("business_users")
+                    .select("id, phone_number, name, approval_status")
+                    .eq("phone_number", target_phone).limit(1).execute())
+                if not target.data:
+                    send_whatsapp(sender_phone, "❌ Lambarkan dukaan kuma jiro Deynjir. Hubi numberka.")
+                    return {"status": "import_shop_not_found"}
+                shop = target.data[0]
+                if shop.get("approval_status") != "approved":
+                    send_whatsapp(sender_phone, "❌ Dukaankan lama ansixin. Import lama bilaabi karo.")
+                    return {"status": "import_shop_not_approved"}
+                IMPORT_SESSIONS[sender_phone] = {"business_user_id": shop["id"], "shop_phone": target_phone,
+                    "shop_name": shop.get("name") or target_phone, "entries": None,
+                    "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL}
+                send_whatsapp(sender_phone, f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\nHadda ii soo dir hal ama dhowr deyn oo qoraal ah, Excel/CSV, ama sawirka liiska.\nWaxba lama kaydin doono ilaa aad tiraahdo *CONFIRM IMPORT*.\nJooji: *CANCEL IMPORT*.")
+                return {"status": "import_shop_selected"}
+            except Exception as exc:
+                print(f"❌ Import shop lookup error: {exc}")
+                send_whatsapp(sender_phone, "❌ Dukaanka lama hubin karin. Mar kale isku day.")
+                return {"status": "import_shop_lookup_error"}
+        active_import = IMPORT_SESSIONS.get(sender_phone)
+        if active_import and not re.fullmatch(r"\s*(?:APPROVE|REJECT)\b.*", import_text, re.I):
+            if datetime.now(timezone.utc) > active_import.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
+                IMPORT_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "Waqtigii import-ka wuu dhammaaday. Bilow mar kale: IMPORT 252...")
+                return {"status": "import_expired"}
+            if re.fullmatch(r"\s*CONFIRM\s+IMPORT\s*", import_text, re.I):
+                pass
+            else:
+                try:
+                    entries = _extract_import_text(import_text)
+                    active_import["entries"] = entries
+                    active_import["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
+                    _stage_import(sender_phone, entries)
+                    return {"status": "import_text_preview_ready", "count": len(entries)}
+                except Exception as exc:
+                    print(f"❌ Import text parse error: {type(exc).__name__}: {exc}")
+                    send_whatsapp(sender_phone, "❌ Liiska si kalsooni leh looma akhrin karin. Fadlan caddee magacyada iyo lacagaha, kadib mar kale dir.")
+                    return {"status": "import_text_parse_error"}
 
     # Owner approves/rejects with: APPROVE 252... or REJECT 252...
     parts = message_text.strip().split(maxsplit=1)
