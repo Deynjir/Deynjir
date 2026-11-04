@@ -1724,11 +1724,11 @@ async def whatsapp_webhook(request: Request):
                 return {"status": "pending_clarification_save_error"}
             send_whatsapp(
                 sender_phone,
-                "Waxaad soo qortay magac iyo lacag keliya.\\n\\n"
-                "*Maxaad ula jeeddaa?*\\n"
-                "1️⃣ Dayn cusub – Taabo 1\\n"
-                "2️⃣ Dayn bixin – Taabo 2\\n"
-                "3️⃣ JOOJI – Taabo 3\\n\\n"
+                "Waxaad soo qortay magac iyo lacag keliya.\n\n"
+                "*Maxaad ula jeeddaa?*\n\n"
+                "1️⃣ Dayn cusub – Taabo 1\n\n"
+                "2️⃣ Dayn bixin – Taabo 2\n\n"
+                "3️⃣ JOOJI – Taabo 3\n\n"
                 "Waxba lama diiwaangelinayo ilaa aad doorato."
             )
             return {"status": "awaiting_transaction_clarification"}
