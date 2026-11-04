@@ -700,7 +700,9 @@ def local_fallback_parse(message_text):
     is_replace = bool(re.search(r"\b(?:edit|kadhig|ka\s+dhig|ka\s+dhigo)\b", low))
     is_delete = bool(re.match(r"^(?:delete|remove|tirtir)\b", low))
     is_search = bool(re.match(r"^(?:search|find|lookup|look\s+up|raadi|raadso|show|check|hubi)\b", low))
-    is_history = bool(re.search(r"\b(?:history|taariikh|statement|xisaab)\b", low))
+    is_history = bool(re.search(r"\b(?:history|taariikh|statement|xisaab(?:ta)?)\b",
+        low
+    ))
     is_payment = bool(re.search(r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|wuu\s+bixiyay|wuxuu\s+bixiyay|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|paid|payment|repaid|paid\s+back)\b", low))
 
     if not amount_matches and not any((is_delete, is_search, is_history, is_payment)):
@@ -725,11 +727,21 @@ def local_fallback_parse(message_text):
     name_text = raw
     for m in reversed(amount_matches):
         name_text = name_text[:m.start()] + " " + name_text[m.end():]
+
     name_text = re.sub(r"\b(?:\$|usd|dollars?|ayuu|ayuu\s+iga\s+qaatay)\b", " ", name_text, flags=re.I)
+
     name_text = re.sub(r"^(?:edit|add|deyn|delete|remove|tirtir|search|find|lookup|look\s+up|raadi|raadso|show|check|hubi)\b\s*[:,-]?\s*", "", name_text, flags=re.I)
+
     name_text = re.sub(r"\b(?:deyntiisa|deynta|deynteeda|balance|amount)\s+(?:ka\s+dhig|kadhig|ka\s+dhigo)\b", " ", name_text, flags=re.I)
+
     name_text = re.sub(r"\b(?:ka\s+dhig|kadhig|ka\s+dhigo|wuu|wuxuu|ayuu|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|bixiyay|bixiyey|bixisay|bixiyeen|paid|payment|repaid|iga\s+soo|iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|deyntii|deynta|oo\s+dhan|added|add)\b", " ", name_text, flags=re.I)
-    name_text = re.sub(r"\b(?:history|taariikh|statement|xisaab)\b", " ", name_text, flags=re.I)
+
+    name_text = re.sub(
+        r"\b(?:history|taariikh|statement|xisaab(?:ta)?)\b",
+        " ",
+        name_text,
+        flags=re.I
+    )
     name_text = re.sub(r"\b(?:debt|debts|show|search|find|lookup|look\s+up|check|raadi|raadso|hubi)\b", " ", name_text, flags=re.I)
     name_text = re.sub(r"[^\w\s'/-]", " ", name_text, flags=re.UNICODE)
     name = " ".join(name_text.split()).strip(" -_/,")
