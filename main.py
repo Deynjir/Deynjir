@@ -3022,6 +3022,113 @@ async def evening_checkin(request: Request):
     }
 
 
+@app.get("/cron/inactivity-checkin")
+async def inactivity_checkin(request: Request):
+    """Send a 6 PM reminder only to approved users with no debt activity today."""
+    if not cron_authorized(request):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Unauthorized cron request")
+
+    print("🌙 INACTIVITY CHECK-IN STARTED")
+    today, start_iso, end_iso = _cron_date_boundaries()
+
+    sent_count = 0
+    skipped_count = 0
+    error_count = 0
+
+    try:
+        users_result = (
+            supabase.table("business_users")
+            .select("id, phone_number, name")
+            .eq("approval_status", "approved")
+            .execute()
+        )
+        users = users_result.data or []
+    except Exception as e:
+        print(f"❌ Error loading business users: {type(e).__name__}: {e}")
+        return {"status": "database_error"}
+
+    message = (
+        "🌙 *Xusuusin*\n"
+        "Maanta waxba ma aadan soo gelin.\n"
+        "Ma jiraan deymo kuusoo xarooday ama kuwo cusub oo kaa baxay?\n"
+        "Haddii ay jiraan, fadlan ila wadaag si aan diiwaankaaga deynta "
+        "u cusboonaysiino, xisaabtaaduna u noqoto mid sax ah.\n"
+        "Mahadsanid! 🤝"
+    )
+
+    for user in users:
+        business_user_id = user.get("id")
+        phone = str(user.get("phone_number") or "").strip()
+
+        if not business_user_id or not phone:
+            skipped_count += 1
+            continue
+
+        try:
+            # Check whether any new debt was recorded today.
+            debts_result = (
+                supabase.table("customers")
+                .select("id")
+                .eq("business_user_id", business_user_id)
+                .gte("created_at", start_iso)
+                .lt("created_at", end_iso)
+                .limit(1)
+                .execute()
+            )
+
+            # Check whether any payment was recorded today.
+            payments_result = (
+                supabase.table("payments")
+                .select("id")
+                .eq("business_user_id", business_user_id)
+                .gte("paid_at", start_iso)
+                .lt("paid_at", end_iso)
+                .limit(1)
+                .execute()
+            )
+
+            has_new_debt = bool(debts_result.data)
+            has_payment = bool(payments_result.data)
+
+            # Do not send the inactivity reminder if there was activity.
+            if has_new_debt or has_payment:
+                skipped_count += 1
+                print(
+                    f"⏭️ Reminder skipped: user={business_user_id}, "
+                    f"new_debt={has_new_debt}, payment={has_payment}"
+                )
+                continue
+
+            ok = send_whatsapp(phone, message)
+
+            if ok:
+                sent_count += 1
+                print(f"✅ Inactivity reminder sent: user={business_user_id}")
+            else:
+                error_count += 1
+                print(f"❌ Inactivity reminder failed: user={business_user_id}")
+
+        except Exception as e:
+            error_count += 1
+            print(
+                f"❌ Inactivity reminder error: user={business_user_id}, "
+                f"{type(e).__name__}: {e}"
+            )
+
+    print(
+        f"🏁 INACTIVITY CHECK-IN FINISHED: "
+        f"sent={sent_count}, skipped={skipped_count}, errors={error_count}"
+    )
+
+    return {
+        "status": "done",
+        "sent": sent_count,
+        "skipped": skipped_count,
+        "errors": error_count,
+        "date": today.isoformat(),
+    }
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
