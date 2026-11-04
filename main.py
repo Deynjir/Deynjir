@@ -2018,7 +2018,7 @@ async def whatsapp_webhook(request: Request):
                         debt_list.append(
                             f"{index}. {debtor_name}: "
                             f"${debtor_amount:.2f}{status} "
-                            f"— Ballan: {due_date or 'lama gelin'}"
+                            f" {due_date or 'lama gelin'}"
                         )
                     else:
                         debt_list.append(
@@ -2034,7 +2034,7 @@ async def whatsapp_webhook(request: Request):
 
                 if wants_due_dates and overdue_count > 0:
                     message = (
-                        f"⚠️ {overdue_count} deyn balan dhaafay:\n\n"
+                        f"⚠️ {overdue_count} deyn balan dhaaftay:\n\n"
                         + message
                     )
 
