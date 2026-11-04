@@ -801,7 +801,7 @@ def find_debtor_matches(business_user_id, name):
 
 
 def ask_for_full_name(sender_phone, matches, action):
-    message = "⚠️ Dad isku magac ah ayaan helay:\n\n"
+    message = "⚠️ Waxaan helay macaamiil isku magac ah:\n\n"
 
     for number, debtor in enumerate(matches, start=1):
         due_date = debtor.get("promised_date") or "lama gelin"
@@ -822,7 +822,7 @@ def ask_for_full_name(sender_phone, matches, action):
         example = f"edit {matches[0]['name']} $50"
 
     message += (
-        "\n✍️ Fadlan mar kale qor magaca oo buuxa.\n"
+        "\n✍️ Fadlan mar kale qor magaca oo buuxa si aan qofka saxda ah u doorto.\n"
         f"Tusaale: {example}"
     )
 
@@ -831,10 +831,10 @@ def ask_for_full_name(sender_phone, matches, action):
 def send_due_list_followup(phone):
     send_whatsapp(
         phone,
-        "Si aad u eegto liiska deynta oo dhan soo qor:\n"
-        "Liiska daynta\n"
-        "ama\n"
-        "Liiska daynta iyo balamaha"
+        "Si aad u aragto dhammaan deymaha, soo qor:\n"
+        "*Liiska daynta*\n"
+        "Ama si aad u aragto deymaha iyo taariikhaha ballanta, soo qor:\n"
+        "*Liiska daynta iyo balamaha*"
     )
 def _import_parse_date(value):
     if value is None or str(value).strip().lower() in ("", "nan", "nat", "none", "null"):
@@ -921,10 +921,10 @@ def _extract_import_image(image_bytes, mime_type):
 
 def _stage_import(admin_phone, entries):
     total = sum(item["amount"] for item in entries)
-    lines = ["📋 *HORDHAC DEYN LA SOO GELINAYO*", f"Tirada macaamiisha: {len(entries)}", ""]
+    lines = ["📋 *HORDHACA DEYNTA LA DIIWAANGELINAYO*", f"Tirada macaamiisha: {len(entries)}", ""]
     for i, item in enumerate(entries, 1):
         lines.append(f"{i}. {item['name']} — ${item['amount']:.2f} — {item['promised_date']}")
-    lines += ["", f"*Wadarta: ${total:.2f}*", "", "Haddii liisku sax yahay qor *CONFIRM IMPORT*.", "Qor *CANCEL IMPORT* si aad u joojiso.", "Fadlan hubi magacyada iyo lacagaha ka hor xaqiijinta."]
+    lines += ["", f"*Wadarta guud: ${total:.2f}*", "", "Haddii xogtu sax tahay, qor *CONFIRM IMPORT* si loo kaydiyo.", "Haddii aad rabto inaad joojiso, qor *CANCEL IMPORT*.", "Fadlan hubi magacyada iyo lacagaha ka hor intaadan xaqiijin."]
     send_whatsapp(admin_phone, "\n".join(lines))
 
 
@@ -948,22 +948,15 @@ def _commit_import(admin_phone, session):
                "is_paid": False}
         supabase.table("customers").insert(row).execute()
         added += 1
-    send_whatsapp(admin_phone, f"✅ Import waa dhammaaday.\nLa daray: {added}\nLaga booday (deyn isku mid ah oo hore u jirtay): {skipped}\nGanacsiga waxaa lagu kaydiyey ID-ga dukaanka la doortay.")
+    send_whatsapp(admin_phone, f"✅ Diiwaangelinta liiska deynta waa dhammaatay.\nMacaamiil cusub oo la daray: {added}\nDeyn hore u jirtay oo laga booday: {skipped}\nDeymaha waxaa lagu kaydiyey ganacsiga aad dooratay.")
 
 
 @app.post("/webhook")
 async def whatsapp_webhook(request: Request):
     data = await request.json()
+    print(f"📥 Green-API webhook received: type={data.get('typeWebhook')}")
 
     type_webhook = data.get("typeWebhook")
-
-    print(f"📥 Green-API webhook received: type={type_webhook}")
-
-    if type_webhook == "outgoingMessageStatus":
-        print("📦 FULL OUTGOING STATUS WEBHOOK:")
-        print(data)
-
-
 
     # Green-API reports messages typed/sent from the WhatsApp phone
     # as outgoingMessageReceived.
@@ -1151,7 +1144,7 @@ async def whatsapp_webhook(request: Request):
                     return {"status": "import_text_preview_ready", "count": len(entries)}
                 except Exception as exc:
                     print(f"❌ Import text parse error: {type(exc).__name__}: {exc}")
-                    send_whatsapp(sender_phone, "❌ Liiska si kalsooni leh looma akhrin karin. Fadlan caddee magacyada iyo lacagaha, kadib mar kale dir.")
+                    send_whatsapp(sender_phone, "❌ Liiska si sax ah looma akhrin karin. Fadlan caddee magacyada iyo lacagaha, dabadeed mar kale soo dir.")
                     return {"status": "import_text_parse_error"}
 
     # Owner approves/rejects with: APPROVE 252... or REJECT 252...
@@ -1160,7 +1153,7 @@ async def whatsapp_webhook(request: Request):
 
     if sender_phone == owner_phone and command in {"APPROVE", "REJECT"}:
         if len(parts) != 2:
-            send_whatsapp(sender_phone, "Use: APPROVE 252... or REJECT 252...")
+            send_whatsapp(sender_phone, "Isticmaal mid ka mid ah amarradan:\n*APPROVE 252...* — oggolow codsiga.\n*REJECT 252...* — diid codsiga.")
             return {"status": "invalid_approval_command"}
 
         applicant_phone = parts[1].replace("+", "").split("@")[0].strip()
@@ -1175,7 +1168,7 @@ async def whatsapp_webhook(request: Request):
             )
 
             if not applicant.data:
-                send_whatsapp(sender_phone, f"❌ No request found for {applicant_phone}.")
+                send_whatsapp(sender_phone, f"❌ Codsi sugaya lama helin lambarkan: {applicant_phone}.")
                 return {"status": "applicant_not_found"}
 
             (
@@ -1185,18 +1178,19 @@ async def whatsapp_webhook(request: Request):
                 .execute()
             )
 
-            send_whatsapp(sender_phone, f"✅ {applicant_phone} is {new_status}.")
+            decision_so = "waa la oggolaaday" if new_status == "approved" else "waa la diiday"
+            send_whatsapp(sender_phone, f"✅ Codsiga lambarka {applicant_phone} {decision_so}.")
             send_whatsapp(
                 applicant_phone,
-                "✅ Your access is approved."
+                "✅ Codsigaaga waa la oggolaaday. Hadda waad isticmaali kartaa Deynjir."
                 if new_status == "approved"
-                else "❌ Your access request was rejected."
+                else "❌ Waan ka xunnahay, codsigaaga isticmaalka Deynjir waa la diiday."
             )
             return {"status": new_status}
 
         except Exception as approval_err:
             print(f"❌ APPROVAL UPDATE ERROR: {approval_err}")
-            send_whatsapp(sender_phone, "❌ Could not update the request. Check server logs.")
+            send_whatsapp(sender_phone, "❌ Codsiga lama cusboonaysiin. Fadlan mar kale isku day ama la xiriir maamulka.")
             return {"status": "approval_update_error"}
 
     # Find this sender's business user; do NOT auto-create unknown senders here.
@@ -1222,7 +1216,7 @@ async def whatsapp_webhook(request: Request):
         if business_user.get("approval_status") != "approved":
             send_whatsapp(
                 sender_phone,
-                "⏳ Your request is pending approval. Please wait for the owner."
+                "⏳ Codsigaaga weli waa la sugayaa. Fadlan sug inta maamulka ka oggolaanayo."
             )
             return {"status": "not_approved"}
 
@@ -1329,7 +1323,7 @@ async def whatsapp_webhook(request: Request):
             if not eligible:
                 send_whatsapp(
                     sender_phone,
-                    "ℹ️ Macmiilkan ma isticmaalo WhatsApp hubi in numberku saxan yahay."
+                    "ℹ️ Macaamiisha deynta kugu leh midkoodna ma laha lambar WhatsApp oo sax ah. Fadlan hubi lambarada telefoonka."
                 )
                 return {"status": "no_reminder_eligible_customers"}
 
@@ -1788,9 +1782,9 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(
                     sender_phone,
                     "⚠️ Lacagta deynta lama sheegin.\n\n"
-                    "Haddii aad rabto inaad beddesho ballanta deyn hore, qor magaca iyo taariikhda.\n"
+                    "Haddii aad rabto inaad beddesho taariikhda ballanta deyn hore, qor magaca macmiilka iyo taariikhda cusub.\n"
                     "Tusaale: Faarax oct 10\n"
-                    "Deyn cusubna ku qor: Axmed $5 oct 11"
+                    "Deyn cusubna sidan u qor: Axmed $5 oct 11"
                 )
                 failed_inserts.append({"name": name or "Unknown", "reason": "Amount missing for new debt"})
                 continue
@@ -3069,7 +3063,7 @@ async def evening_checkin(request: Request):
             lines.append("")
 
             if not new_debts and not payments:
-                lines.append("Maanta wax deyn cusub ama lacag-bixin ah lama diiwaangelin.")
+                lines.append("Maanta lama diiwaangelin deyn cusub ama lacag-bixin.")
             else:
                 if new_debts:
                     lines.append("🆕 *Deymaha cusub maanta:*")
@@ -3101,7 +3095,7 @@ async def evening_checkin(request: Request):
 
             lines.extend([
                 "",
-                "Fadlan ii soo dir magaca iyo lacagta haddii aad rabto inaad diiwaangeliso deyn cusub ama lacag-bixin."
+                "Si aad u diiwaangeliso deyn cusub ama lacag-bixin, ii soo dir magaca macmiilka iyo lacagta."
             ])
 
             ok = send_whatsapp(phone, "\n".join(lines))
@@ -3164,10 +3158,9 @@ async def inactivity_checkin(request: Request):
 
     message = (
         "🌙 *Xusuusin*\n"
-        "Maanta waxba ma aadan soo gelin.\n"
-        "Ma jiraan deymo kuusoo xarooday ama kuwo cusub oo kaa baxay?\n"
-        "Haddii ay jiraan, fadlan ila wadaag si aan diiwaankaaga deynta "
-        "u cusboonaysiino, xisaabtaaduna u noqoto mid sax ah.\n"
+        "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\n"
+        "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\n"
+        "Haddii ay jiraan, ii soo dir si aan diiwaankaaga u cusboonaysiiyo.\n"
         "Mahadsanid! 🤝"
     )
 
