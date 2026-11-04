@@ -2831,7 +2831,7 @@ async def daily_digest(request: Request):
                     due_today.append(
                         f"• {debt.get('name') or 'Macmiil'}: "
                         f"${_safe_money(debt.get('amount')):.2f} "
-                        f"(ballan: {due_date})"
+                        f"(due_date)"
                     )
 
             if not due_today:
@@ -2847,7 +2847,7 @@ async def daily_digest(request: Request):
             message_lines = [
                 "☀️ *Xasuusin* ☀️",
                 "",
-                "*Balamaha maanta & kuwa dhaafay:*",
+                "*Balamaha maanta & kuwa Balan dhaafka ah:*",
                 *shown,
             ]
             if omitted > 0:
