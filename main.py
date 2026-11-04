@@ -322,46 +322,200 @@ def send_whatsapp_file(to_phone: str, filename: str, content: bytes, mime_type: 
         return False
 
 def build_statement_pdf(customer_name, debts, payments_by_debt, total_paid, total_balance):
-    """Build a compact PDF statement in memory; never writes customer data to disk."""
+    """Create a clean, compact one-page customer statement PDF in memory."""
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
+    from reportlab.platypus import KeepInFrame
+
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=38, leftMargin=38, topMargin=34, bottomMargin=34
+    )
     styles = getSampleStyleSheet()
-    story = [Paragraph(f"{APP_NAME} - Customer Debt Statement", styles["Title"]),
-             Paragraph(f"Customer: {escape(str(customer_name))}", styles["Heading2"]),
-             Spacer(1, 10)]
-    rows = [["Debt #", "Created", "Due date", "Current balance", "Status"]]
-    for idx, debt in enumerate(debts, 1):
+    ink = colors.HexColor("#172B3A")
+    muted = colors.HexColor("#64748B")
+    green = colors.HexColor("#167A55")
+    pale = colors.HexColor("#F1F6F3")
+    line = colors.HexColor("#DCE5E0")
+
+    normal = ParagraphStyle(
+        "StatementNormal", parent=styles["Normal"],
+        fontName="Helvetica", fontSize=8.5, leading=11, textColor=ink
+    )
+    small = ParagraphStyle(
+        "StatementSmall", parent=normal, fontSize=7.5,
+        leading=9, textColor=muted
+    )
+    section = ParagraphStyle(
+        "StatementSection", parent=normal, fontName="Helvetica-Bold",
+        fontSize=9, leading=11, spaceBefore=3, spaceAfter=4
+    )
+    customer_style = ParagraphStyle(
+        "StatementCustomer", parent=styles["Heading1"],
+        fontName="Helvetica-Bold", fontSize=17, leading=20,
+        textColor=ink, spaceAfter=2
+    )
+    balance_style = ParagraphStyle(
+        "StatementBalance", parent=styles["Heading1"],
+        fontName="Helvetica-Bold", fontSize=25, leading=28,
+        textColor=green, alignment=TA_RIGHT
+    )
+    right_small = ParagraphStyle(
+        "StatementRightSmall", parent=small, alignment=TA_RIGHT
+    )
+    center_small = ParagraphStyle(
+        "StatementCenterSmall", parent=small, alignment=TA_CENTER
+    )
+
+    safe_name = escape(str(customer_name or "Customer"))
+    statement_date = today_eat().strftime("%d %b %Y")
+
+    original_total = 0.0
+    calculated_paid = 0.0
+    clean_balance = 0.0
+    payment_items = []
+
+    for index, debt in enumerate(debts, 1):
         balance = max(float(debt.get("amount") or 0), 0.0)
-        status = "Paid" if debt.get("is_paid") is True or balance <= 0 else "Unpaid"
-        rows.append([str(idx), str(debt.get("created_at") or "")[:10] or "Unknown",
-                     str(debt.get("promised_date") or "Not set"), f"${balance:.2f}", status])
-    table = Table(rows, repeatRows=1, colWidths=[42, 85, 85, 100, 70])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF5")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("PADDING", (0, 0), (-1, -1), 6),
+        original = debt.get("original_amount")
+        debt_payments = payments_by_debt.get(str(debt.get("id")), [])
+        paid_for_debt = sum(float(p.get("amount") or 0) for p in debt_payments)
+
+        # Prefer the stored original amount. If it is absent, reconstruct it
+        # from the current balance plus the payment ledger for this debt.
+        if original is None:
+            original = balance + paid_for_debt
+        original = max(float(original or 0), balance)
+
+        original_total += original
+        calculated_paid += paid_for_debt
+        clean_balance += balance
+
+        for payment in debt_payments:
+            payment_items.append((
+                str(payment.get("paid_at") or "")[:10] or "Date unavailable",
+                float(payment.get("amount") or 0),
+                index
+            ))
+
+    # Use the supplied totals from the statement calculation; the original
+    # debt figure is based on original_amount (or balance + ledger fallback).
+    paid_total = float(total_paid or calculated_paid)
+    balance_total = float(total_balance or 0)
+
+    story = []
+    header = Table(
+        [[Paragraph("<b>DEYNJIR</b>", ParagraphStyle(
+            "Brand", parent=normal, fontName="Helvetica-Bold",
+            fontSize=18, leading=20, textColor=green
+        )),
+          Paragraph("CUSTOMER STATEMENT<br/><font size='7' color='#64748B'>Generated " +
+                    escape(statement_date) + "</font>", right_small)]],
+        colWidths=[doc.width * 0.48, doc.width * 0.52]
+    )
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LINEBELOW", (0, 0), (-1, -1), 1, green),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
-    story.extend([table, Spacer(1, 14),
-                  Paragraph(f"Recorded payments: ${total_paid:.2f}", styles["Normal"]),
-                  Paragraph(f"Current outstanding balance: ${total_balance:.2f}", styles["Heading2"]),
-                  Spacer(1, 10), Paragraph("Payment ledger", styles["Heading2"])])
-    payment_rows = [["Debt #", "Payment date", "Amount"]]
-    for idx, debt in enumerate(debts, 1):
-        for payment in payments_by_debt.get(str(debt.get("id")), []):
-            payment_rows.append([str(idx), str(payment.get("paid_at") or "")[:10] or "Unknown",
-                                 f"${float(payment.get('amount') or 0):.2f}"])
-    if len(payment_rows) == 1:
-        payment_rows.append(["-", "No payments recorded", "$0.00"])
-    pay_table = Table(payment_rows, repeatRows=1, colWidths=[70, 150, 100])
-    pay_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF5")),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-        ("PADDING", (0, 0), (-1, -1), 6),
+    story.extend([header, Spacer(1, 14)])
+
+    customer_row = Table(
+        [[Paragraph("CUSTOMER", small), Paragraph("OUTSTANDING BALANCE", right_small)],
+         [Paragraph(safe_name, customer_style),
+          Paragraph(f"${balance_total:,.2f}", balance_style)]],
+        colWidths=[doc.width * 0.55, doc.width * 0.45]
+    )
+    customer_row.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), pale),
+        ("BOX", (0, 0), (-1, -1), 0.6, line),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 11),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 11),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
-    story.append(pay_table)
-    doc.build(story)
+    story.extend([customer_row, Spacer(1, 12)])
+
+    summary = Table(
+        [[Paragraph("ORIGINAL DEBT", small),
+          Paragraph("TOTAL PAID", small),
+          Paragraph("REMAINING", small)],
+         [Paragraph(f"${original_total:,.2f}", section),
+          Paragraph(f"${paid_total:,.2f}", section),
+          Paragraph(f"${balance_total:,.2f}", section)]],
+        colWidths=[doc.width / 3] * 3
+    )
+    summary.setStyle(TableStyle([
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, line),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.extend([summary, Spacer(1, 12), Paragraph("PAYMENT HISTORY", section)])
+
+    payment_items.sort(key=lambda item: item[0], reverse=True)
+    payment_rows = [[
+        Paragraph("<b>Date</b>", normal),
+        Paragraph("<b>Amount paid</b>", right_small),
+        Paragraph("<b>Debt</b>", right_small)
+    ]]
+    for paid_date, amount, debt_number in payment_items[:8]:
+        payment_rows.append([
+            Paragraph(escape(paid_date), normal),
+            Paragraph(f"${amount:,.2f}", right_small),
+            Paragraph(f"#{debt_number}", right_small)
+        ])
+
+    if not payment_items:
+        payment_rows.append([
+            Paragraph("No payments recorded", small),
+            Paragraph("$0.00", right_small),
+            Paragraph("—", right_small)
+        ])
+
+    history = Table(
+        payment_rows,
+        colWidths=[doc.width * 0.48, doc.width * 0.32, doc.width * 0.20],
+        repeatRows=1
+    )
+    history.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), pale),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, line),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.35, line),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(history)
+
+    if len(payment_items) > 8:
+        story.append(Paragraph(
+            f"Showing the latest 8 of {len(payment_items)} recorded payments.",
+            small
+        ))
+
+    story.extend([
+        Spacer(1, 14),
+        Paragraph(
+            "Please contact the shop if you believe any amount is incorrect.",
+            center_small
+        ),
+        Spacer(1, 4),
+        Paragraph("DEYNJIR  •  Clear and reliable debt records", center_small)
+    ])
+
+    # Keep the complete statement to one A4 page, shrinking slightly only if
+    # the customer has many payment rows or a long name.
+    fitted = KeepInFrame(doc.width, doc.height, story, mode="shrink")
+    doc.build([fitted])
     return buffer.getvalue()
 
 OWNER_PHONE = os.getenv("OWNER_PHONE", "").lstrip("+").strip()
