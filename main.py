@@ -456,12 +456,23 @@ def classify_transaction_direction(message_text):
 
 
 def parse_transaction_clarification(message_text):
-    """Recognize a short reply to the pending ADD-vs-PAY question."""
+    """Recognize numbered or written replies to the pending transaction question."""
     text = normalize_customer_name(str(message_text or ""))
+
+    # Numbered WhatsApp choices: 1 = new debt, 2 = payment, 3 = cancel.
+    if re.fullmatch(r"1", text):
+        return "ADD"
+    if re.fullmatch(r"2", text):
+        return "PAY"
+    if re.fullmatch(r"3", text):
+        return "CANCEL"
+
     if re.fullmatch(r"(?:deyn cusub|dayn cusub|deyn cusub oo baxday|lacag baxday|add|new debt|deyn baa baxday)", text, re.I):
         return "ADD"
     if re.fullmatch(r"(?:deyn soo xarootay|lacag soo xarootay|lacag baa soo gashay|lacag la helay|pay|payment|money received|received payment)", text, re.I):
         return "PAY"
+    if re.fullmatch(r"(?:jooji|cancel|baaji)", text, re.I):
+        return "CANCEL"
     return None
 
 
@@ -585,6 +596,37 @@ def local_fallback_parse(message_text):
     if amount is not None and (currency_marked or re.search(r"\b(?:iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|added|add)\b", low)):
         return [{**base, "action": "ADD", "customer_name": name, "amount": amount}]
     return None
+
+
+def is_fuzzy_debt_list_command(message_text):
+    """Recognize clear debt-list commands with small typing mistakes.
+
+    Deliberately limited to read-only LIST commands. It never guesses
+    EDIT, DELETE, ADD, or PAY commands.
+    """
+    raw = str(message_text or "").casefold().strip()
+    raw = unicodedata.normalize("NFKD", raw)
+    raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
+    raw = re.sub(r"[^\\w\\s]", " ", raw)
+    words = raw.split()
+
+    known_commands = [
+        ["liiska", "deynta"],
+        ["liiska", "daynta"],
+        ["liiska", "deynta", "iyo", "balamaha"],
+        ["liiska", "daynta", "iyo", "balamaha"],
+    ]
+
+    for target in known_commands:
+        if len(words) != len(target):
+            continue
+        scores = [
+            difflib.SequenceMatcher(None, typed, expected).ratio()
+            for typed, expected in zip(words, target)
+        ]
+        if min(scores, default=0) >= 0.68 and sum(scores) / len(scores) >= 0.72:
+            return True
+    return False
 
 
 def _edit_distance(left, right):
@@ -1256,7 +1298,22 @@ async def whatsapp_webhook(request: Request):
 
     if pending_clarification:
         clarification_action = parse_transaction_clarification(message_text)
-        if clarification_action:
+        if clarification_action == "CANCEL":
+            try:
+                (
+                    supabase.table("pending_transaction_clarifications")
+                    .delete()
+                    .eq("sender_phone", sender_phone)
+                    .eq("business_user_id", business_user_id)
+                    .execute()
+                )
+            except Exception as pending_err:
+                print(f"❌ Pending clarification cancellation failed: {pending_err}")
+                send_whatsapp(sender_phone, "❌ Joojinta way fashilantay. Fadlan mar kale isku day.")
+                return {"status": "pending_clarification_cancel_error"}
+            send_whatsapp(sender_phone, "Waa la joojiyay. Wax deyn ah lama diiwaangelin.")
+            return {"status": "pending_clarification_cancelled"}
+        elif clarification_action in {"ADD", "PAY"}:
             try:
                 entries = pending_clarification.get("parsed_entries") or []
                 if isinstance(entries, str):
@@ -1271,10 +1328,6 @@ async def whatsapp_webhook(request: Request):
                 print(f"❌ Pending clarification restore failed: {pending_err}")
                 send_whatsapp(sender_phone, "❌ Fariintii hore dib looma soo celin karin. Fadlan mar kale dir.")
                 return {"status": "pending_clarification_restore_error"}
-        elif re.fullmatch(r"\s*(?:jooji|cancel|baaji)\s*", str(message_text), re.I):
-            supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).execute()
-            send_whatsapp(sender_phone, "Waa la joojiyay. Wax deyn ah lama diiwaangelin.")
-            return {"status": "pending_clarification_cancelled"}
         else:
             send_whatsapp(sender_phone, "Fadlan marka hore ka jawaab fariintii sugaysay: *DEYN CUSUB* ama *DEYN SOO XAROOTAY*. Qor *JOOJI* si aad u baajiso.")
             return {"status": "awaiting_transaction_clarification"}
@@ -1511,6 +1564,9 @@ async def whatsapp_webhook(request: Request):
             return {"status": "missing_pdf_customer_name"}
         print(f"📄 PDF-only request detected for {pdf_customer_name!r}")
 
+    # Fast read-only command matching: avoid a Gemini request for debt lists.
+    fuzzy_list_requested = is_fuzzy_debt_list_command(message_text)
+
     today_str = today_eat().isoformat()
     dynamic_system_prompt = f"{SYSTEM_PROMPT}\nToday's date is strictly: {today_str}. Use this to calculate calendar targets or relative days offsets like 'berri'."
     
@@ -1519,6 +1575,15 @@ async def whatsapp_webhook(request: Request):
         print(f"📄 Skipping Gemini for PDF follow-up; using saved customer {pdf_customer_name!r}")
     elif forced_transaction_action:
         print(f"🔁 Using saved entries with confirmed action {forced_transaction_action}")
+    elif fuzzy_list_requested:
+        entries = [{
+            "action": "LIST",
+            "customer_name": None,
+            "amount": None,
+            "filter_date": None,
+            "filter_type": None,
+        }]
+        print(f"⚡ Fuzzy debt-list command recognized locally: {message_text!r}; skipping Gemini")
     else:
         try:
             if not GEMINI_API_KEY:
@@ -1659,10 +1724,12 @@ async def whatsapp_webhook(request: Request):
                 return {"status": "pending_clarification_save_error"}
             send_whatsapp(
                 sender_phone,
-                "Waxaad soo qortay magac iyo tiro keliya.\n\n"
-                "Ma *Deyn cusub oo baxday* baa mise *Deyn soo xarootay*?\n"
-                "Ku jawaab: *DEYN CUSUB* ama *DEYN SOO XAROOTAY*.\n"
-                "Waxba lama diiwaangelinayo ilaa aad caddeyso."
+                "Waxaad soo qortay magac iyo lacag keliya.\\n\\n"
+                "*Maxaad ula jeeddaa?*\\n"
+                "1️⃣ Dayn cusub – Taabo 1\\n"
+                "2️⃣ Dayn bixin – Taabo 2\\n"
+                "3️⃣ JOOJI – Taabo 3\\n\\n"
+                "Waxba lama diiwaangelinayo ilaa aad doorato."
             )
             return {"status": "awaiting_transaction_clarification"}
         elif has_financial_entries and explicit_direction:
