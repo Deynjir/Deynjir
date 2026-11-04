@@ -954,12 +954,16 @@ def _commit_import(admin_phone, session):
 @app.post("/webhook")
 async def whatsapp_webhook(request: Request):
     data = await request.json()
-    print(f"📥 Green-API webhook received: type={data.get('typeWebhook')}")
-    if type_webhook == "outgoingMessageStatus":
-    print("📦 FULL OUTGOING STATUS WEBHOOK:")
-    print(data)
 
     type_webhook = data.get("typeWebhook")
+
+    print(f"📥 Green-API webhook received: type={type_webhook}")
+
+    if type_webhook == "outgoingMessageStatus":
+        print("📦 FULL OUTGOING STATUS WEBHOOK:")
+        print(data)
+
+
 
     # Green-API reports messages typed/sent from the WhatsApp phone
     # as outgoingMessageReceived.
