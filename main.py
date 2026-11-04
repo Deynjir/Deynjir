@@ -321,7 +321,7 @@ def send_whatsapp_file(to_phone: str, filename: str, content: bytes, mime_type: 
         print(f"❌ Could not send WhatsApp file {filename}: {type(exc).__name__}: {exc}")
         return False
 
-def build_statement_pdf(customer_name, debts, payments_by_debt, total_paid, total_balance):
+def build_statement_pdf(customer_name, debts, payments_by_debt, total_paid, total_balance, business_name=None):
     """Create a clean, compact one-page customer statement PDF in memory."""
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
@@ -369,6 +369,7 @@ def build_statement_pdf(customer_name, debts, payments_by_debt, total_paid, tota
     )
 
     safe_name = escape(str(customer_name or "Customer"))
+    safe_business_name = escape(str(business_name or "DEYNJIR"))
     statement_date = today_eat().strftime("%d %b %Y")
 
     original_total = 0.0
@@ -406,9 +407,9 @@ def build_statement_pdf(customer_name, debts, payments_by_debt, total_paid, tota
 
     story = []
     header = Table(
-        [[Paragraph("<b>DEYNJIR</b>", ParagraphStyle(
+        [[Paragraph(f"<b>{safe_business_name}</b>", ParagraphStyle(
             "Brand", parent=normal, fontName="Helvetica-Bold",
-            fontSize=18, leading=20, textColor=green
+            fontSize=16, leading=19, textColor=green
         )),
           Paragraph("CUSTOMER STATEMENT<br/><font size='7' color='#64748B'>Generated " +
                     escape(statement_date) + "</font>", right_small)]],
@@ -505,7 +506,7 @@ def build_statement_pdf(customer_name, debts, payments_by_debt, total_paid, tota
     story.extend([
         Spacer(1, 14),
         Paragraph(
-            "Please contact the shop if you believe any amount is incorrect.",
+            "Waad ila soo xidhiidhi kartaa hadii aad qabto wax su'aal ah.",
             center_small
         ),
         Spacer(1, 4),
@@ -2751,7 +2752,8 @@ async def whatsapp_webhook(request: Request):
                                 history_matches,
                                 payments_by_debt,
                                 total_paid,
-                                total_balance
+                                total_balance,
+                                business_user.get("name")
                             )
 
                             send_whatsapp_file(
