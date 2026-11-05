@@ -3,6 +3,7 @@ import re
 import json
 import csv
 import hmac
+import time
 from zoneinfo import ZoneInfo
 import difflib
 import unicodedata
@@ -1116,6 +1117,38 @@ def _extract_import_text(raw_text, import_mode="debt"):
     return _validate_import_entries(parsed)
 
 
+def _gemini_generate_content(url, payload, timeout=60):
+    """Retry temporary Gemini capacity/server failures before reporting failure."""
+    retryable_statuses = {429, 500, 502, 503, 504}
+    delays = (2, 5)
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                url,
+                headers={"x-goog-api-key": GEMINI_API_KEY,
+                         "Content-Type": "application/json"},
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.RequestException:
+            if attempt < 2:
+                time.sleep(delays[attempt])
+                continue
+            raise RuntimeError("GEMINI_TEMPORARILY_UNAVAILABLE: network error")
+        if response.ok:
+            return response
+        if response.status_code in retryable_statuses:
+            if attempt < 2:
+                print(f"⚠️ Gemini temporary HTTP {response.status_code}; retry {attempt + 1}/2")
+                time.sleep(delays[attempt])
+                continue
+            raise RuntimeError(
+                f"GEMINI_TEMPORARILY_UNAVAILABLE: Gemini HTTP {response.status_code} after retries"
+            )
+        response.raise_for_status()
+    raise RuntimeError("GEMINI_TEMPORARILY_UNAVAILABLE: Gemini unavailable")
+
+
 def _extract_import_image(image_bytes, mime_type, import_mode="debt"):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY lama dejin.")
@@ -1137,8 +1170,7 @@ def _extract_import_image(image_bytes, mime_type, import_mode="debt"):
     payload = {"contents":[{"role":"user","parts":[{"text":prompt},
         {"inline_data":{"mime_type":mime_type,"data":base64.b64encode(image_bytes).decode("ascii")}}]}],
         "generationConfig":{"temperature":0,"responseMimeType":"application/json"}}
-    response = requests.post(url, headers={"x-goog-api-key":GEMINI_API_KEY,"Content-Type":"application/json"}, json=payload, timeout=60)
-    response.raise_for_status()
+    response = _gemini_generate_content(url, payload, timeout=60)
     data=response.json()
     text="".join(x.get("text","") for x in data.get("candidates",[{}])[0].get("content",{}).get("parts",[]))
     return _validate_import_entries(json.loads(text))
@@ -1282,7 +1314,55 @@ def _commit_import(admin_phone, session):
                "is_paid": False}
         supabase.table("customers").insert(row).execute()
         added += 1
-    send_whatsapp(admin_phone, f"✅ Diiwaangelinta liiska deynta waa dhammaatay.\nMacaamiil cusub oo la daray: {added}\nDeyn hore u jirtay oo laga booday: {skipped}\nDeymaha waxaa lagu kaydiyey ganacsiga aad dooratay.")
+    admin_confirmation = (
+        f"✅ Diiwaangelinta liiska deynta waa dhammaatay.\n"
+        f"Macaamiil cusub oo la daray: {added}\n"
+        f"Deyn hore u jirtay oo laga booday: {skipped}\n"
+        "Deymaha waxaa lagu kaydiyey ganacsiga aad dooratay."
+    )
+    send_whatsapp(admin_phone, admin_confirmation)
+
+    # Notify the registered business user when an admin imports debts on
+    # their behalf. Resolve the phone from Supabase, not only session data.
+    shop_phone = ""
+    shop_name = str(session.get("shop_name") or "Dukaankaaga")
+    try:
+        shop_result = (
+            supabase.table("business_users")
+            .select("phone_number, name")
+            .eq("id", business_user_id)
+            .limit(1)
+            .execute()
+        )
+        if shop_result.data:
+            shop_phone = str(shop_result.data[0].get("phone_number") or "")
+            shop_name = str(shop_result.data[0].get("name") or shop_name)
+    except Exception as lookup_exc:
+        print(f"⚠️ Could not look up business user for debt-import notification: {lookup_exc}")
+
+    if not shop_phone:
+        shop_phone = str(session.get("shop_phone") or "")
+    shop_phone = shop_phone.replace("+", "").split("@")[0].strip()
+    admin_clean = str(admin_phone or "").replace("+", "").split("@")[0].strip()
+
+    if shop_phone and shop_phone != admin_clean:
+        business_message = (
+            f"✅ *Deymo cusub waa lagu daray dukaankaaga.*\n\n"
+            f"Dukaan: *{shop_name}*\n"
+            f"Macaamiil cusub: *{added}*\n"
+            f"Deyn hore oo laga booday: *{skipped}*\n\n"
+            "Qor *LIISKA DAYNTA* si aad u aragto deymaha cusub."
+        )
+        notification_sent = send_whatsapp(shop_phone, business_message)
+        print(
+            f"📨 Debt-import business confirmation: "
+            f"shop_phone={shop_phone}, sent={notification_sent}"
+        )
+    else:
+        print(
+            "⚠️ Debt-import business confirmation skipped: "
+            f"shop_phone={shop_phone!r}, admin_phone={admin_clean!r}"
+        )
 
 
 @app.post("/webhook")
@@ -1403,8 +1483,21 @@ async def whatsapp_webhook(request: Request):
             _stage_import(sender_phone, entries, import_mode)
             return {"status": "import_image_preview_ready", "count": len(entries)}
         except Exception as exc:
-            print(f"❌ Import image error: {type(exc).__name__}: {exc}")
-            send_whatsapp(sender_phone, f"❌ Sawirka si sax ah looma akhrin karin: {str(exc)[:250]}")
+            error_text = str(exc)
+            print(f"❌ Import image error: {type(exc).__name__}: {error_text}")
+            if "GEMINI_TEMPORARILY_UNAVAILABLE" in error_text:
+                send_whatsapp(
+                    sender_phone,
+                    "⏳ Adeegga akhrinta sawirrada (Gemini) hadda mashquul ayuu yahay. "
+                    "Tani macnaheedu ma aha in sawirku khaldan yahay. Waxba lama kaydin. "
+                    "Fadlan sug dhowr daqiiqo kadibna isla sawirka mar kale soo dir."
+                )
+                return {"status": "import_image_ai_temporarily_unavailable"}
+            send_whatsapp(
+                sender_phone,
+                "❌ Sawirka lama farsamayn karin. Waxba lama kaydin. "
+                "Fadlan mar kale isku day ama sawirka si cad u soo dir."
+            )
             return {"status": "import_image_error"}
 
     # ✅ HANDLE TEXT MESSAGES
