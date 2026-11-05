@@ -176,7 +176,7 @@ ALWAYS return a JSON array, even for single entries.
 
 Response format (JSON array):
 [
-  {"action": "ADD" or "PAY" or "LIST" or "SEARCH" or "EDIT" or "DELETE" or "HISTORY" or "REPORT" or "EXPORT", "customer_name": "string or null", "amount": number or null, "days_until_due": number or null, "customer_phone": "string or null", "promised_date": "YYYY-MM-DD or null", "filter_date": "YYYY-MM-DD or null", "filter_type": "today" or "tomorrow" or "date" or "week" or "month" or null, "new_amount": number or null, "new_date": "YYYY-MM-DD or null", "new_phone": "string or null", "payment_type": "FULL" or "PARTIAL" or "UNKNOWN" or null}
+  {"action": "ADD" or "PAY" or "LIST" or "SEARCH" or "EDIT" or "DELETE" or "HISTORY" or "REPORT" or "EXPORT", "customer_name": "string or null", "amount": number or null, "days_until_due": number or null, "customer_phone": "string or null", "promised_date": "YYYY-MM-DD or null", "filter_date": "YYYY-MM-DD or null", "filter_type": "today" or "tomorrow" or "date" or "week" or "month" or null, "new_amount": number or null, "new_date": "YYYY-MM-DD or null", "new_name": "string or null", "new_phone": "string or null", "payment_type": "FULL" or "PARTIAL" or "UNKNOWN" or null}
 ]
 
 Examples - ADD:
@@ -200,6 +200,8 @@ Examples - SEARCH:
 'Show Cali debt' -> [{"action": "SEARCH", "customer_name": "Cali", "amount": null, "days_until_due": null, "customer_phone": null, "promised_date": null, "filter_date": null, "filter_type": null, "new_amount": null, "new_date": null, "new_phone": null}]
 
 Examples - EDIT:
+'edit Cali name to Cali Maxamed' -> EDIT, customer_name="Cali", new_name="Cali Maxamed".
+'SAX Cali -> Cali Maxamed' -> EDIT, customer_name="Cali", new_name="Cali Maxamed".
 'edit Cali $50' -> [{"action": "EDIT", "customer_name": "Cali", "amount": 50, "days_until_due": null, "customer_phone": null, "promised_date": null, "filter_date": null, "filter_type": null, "new_amount": 50, "new_date": null, "new_phone": null}]
 'edit Cali oct 20' -> [{"action": "EDIT", "customer_name": "Cali", "amount": null, "days_until_due": null, "customer_phone": null, "promised_date": "2026-10-20", "filter_date": null, "filter_type": null, "new_amount": null, "new_date": "2026-10-20", "new_phone": null}]
 'edit Cali $50 oct 20' -> [{"action": "EDIT", "customer_name": "Cali", "amount": 50, "days_until_due": null, "customer_phone": null, "promised_date": "2026-10-20", "filter_date": null, "filter_type": null, "new_amount": 50, "new_date": "2026-10-20", "new_phone": null}]
@@ -535,6 +537,28 @@ def normalize_customer_name(value):
     return " ".join(value.split())
 
 
+def parse_customer_rename_command(message_text):
+    """Parse an explicit customer rename without relying on AI interpretation.
+
+    Supported examples:
+      SAX Old customer name -> Correct customer name
+      EDIT Old customer name TO Correct customer name
+      SAX Old customer name ku beddel Correct customer name
+    """
+    raw = " ".join(str(message_text or "").strip().split())
+    patterns = [
+        r"^(?:sax|rename|rename\s+customer|edit\s+name|edit|change\s+name)\s+(.+?)\s*(?:->|=>|\bto\b)\s*(.+?)\s*[.!]?$",
+        r"^(?:sax|edit)\s+(.+?)\s+\b(?:ku\s+bedel|u\s+bedel|magaca\s+cusub)\b\s+(.+?)\s*[.!]?$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, raw, flags=re.IGNORECASE)
+        if match:
+            old_name, new_name = (part.strip(" \t,;:-") for part in match.groups())
+            if old_name and new_name and normalize_customer_name(old_name) != normalize_customer_name(new_name):
+                return old_name, new_name
+    return None
+
+
 def message_has_explicit_amount_for_name(message_text, customer_name):
     """Return whether the user's own message states an amount for this name.
 
@@ -775,7 +799,7 @@ def is_fuzzy_debt_list_command(message_text):
     raw = str(message_text or "").casefold().strip()
     raw = unicodedata.normalize("NFKD", raw)
     raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
-    raw = re.sub(r"[^\\w\\s]", " ", raw)
+    raw = re.sub(r"[^\\w\s]", " ", raw)
     words = raw.split()
 
     known_commands = [
@@ -2018,6 +2042,9 @@ async def whatsapp_webhook(request: Request):
             return {"status": "missing_pdf_customer_name"}
         print(f"📄 PDF-only request detected for {pdf_customer_name!r}")
 
+    # Explicit customer rename is parsed locally; it must not depend on Gemini.
+    rename_request = parse_customer_rename_command(message_text)
+
     # Fast read-only command matching: avoid a Gemini request for debt lists.
     fuzzy_list_requested = is_fuzzy_debt_list_command(message_text)
 
@@ -2027,6 +2054,18 @@ async def whatsapp_webhook(request: Request):
     if pdf_only_requested:
         entries = [{"action": "HISTORY", "customer_name": pdf_customer_name}]
         print(f"📄 Skipping Gemini for PDF follow-up; using saved customer {pdf_customer_name!r}")
+    elif rename_request:
+        old_customer_name, new_customer_name = rename_request
+        entries = [{
+            "action": "EDIT",
+            "customer_name": old_customer_name,
+            "new_name": new_customer_name,
+            "amount": None,
+            "new_amount": None,
+            "promised_date": None,
+            "new_date": None,
+        }]
+        print(f"✏️ Explicit customer rename detected: {old_customer_name!r} -> {new_customer_name!r}")
     elif forced_transaction_action:
         print(f"🔁 Using saved entries with confirmed action {forced_transaction_action}")
     elif fuzzy_list_requested:
@@ -2694,6 +2733,58 @@ async def whatsapp_webhook(request: Request):
                 if len(matches) == 0:
                     send_whatsapp(sender_phone, f"❌ Lama helin deynta aan weli la bixin ee {name}.")
                     failed_inserts.append({"name": name, "reason": "Debtor not found"})
+                    continue
+
+                # A name-only EDIT/SAX request renames every debt row belonging
+                # to the same exact stored customer name. It does not alter
+                # amounts, due dates, payment records, or customer IDs.
+                requested_new_name = str(entry.get("new_name") or "").strip()
+                if requested_new_name:
+                    distinct_old_names = {
+                        str(row.get("name") or "").strip() for row in matches
+                    }
+                    if len(distinct_old_names) != 1:
+                        ask_for_full_name(sender_phone, matches, "EDIT")
+                        continue
+                    old_stored_name = next(iter(distinct_old_names))
+                    if not requested_new_name or len(requested_new_name) > 120:
+                        send_whatsapp(sender_phone, "❌ Magaca cusub ma saxna. Fadlan isticmaal magac ka yar 120 xaraf.")
+                        continue
+                    # Do not merge two different customers by overwriting a name
+                    # that is already used by another customer in this shop.
+                    collision = (
+                        supabase.table("customers")
+                        .select("id, name")
+                        .eq("business_user_id", business_user_id)
+                        .eq("name", requested_new_name)
+                        .limit(1)
+                        .execute()
+                    )
+                    if collision.data and normalize_customer_name(collision.data[0].get("name")) != normalize_customer_name(old_stored_name):
+                        send_whatsapp(
+                            sender_phone,
+                            f"⚠️ Magaca *{requested_new_name}* hore ayuu uga diiwaangashan yahay dukaankan. "
+                            "Magacyada lama isku dari karo."
+                        )
+                        continue
+                    renamed = (
+                        supabase.table("customers")
+                        .update({"name": requested_new_name})
+                        .eq("business_user_id", business_user_id)
+                        .eq("name", old_stored_name)
+                        .select("id, name")
+                        .execute()
+                    )
+                    if not renamed.data:
+                        send_whatsapp(sender_phone, "❌ Magaca lama beddelin. Fadlan mar kale isku day.")
+                        failed_inserts.append({"name": old_stored_name, "reason": "Rename returned no rows"})
+                        continue
+                    send_whatsapp(
+                        sender_phone,
+                        f"✅ Magaca macmiilka waa la saxay:\n*{old_stored_name}* → *{requested_new_name}*\n"
+                        f"📁 Diiwaannada deynta ee la cusboonaysiiyay: {len(renamed.data)}"
+                    )
+                    successful_inserts.append(entry)
                     continue
 
                 if date_only_update:
