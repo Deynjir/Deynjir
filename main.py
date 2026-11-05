@@ -1481,36 +1481,52 @@ def _commit_import(admin_phone, session):
     skipped = int(session.get("pre_skipped", 0) or 0)
     for item in entries:
         # Possible duplicates are explicitly resolved by the user before commit.
-        # Choice 2 means the user confirmed that repeated rows are separate debts.
-        if session.get("duplicate_choice") != "2":
-            existing = (supabase.table("customers").select("id")
-                .eq("business_user_id", business_user_id)
-                .eq("name", item["name"]).eq("amount", item["amount"])
-                .eq("is_paid", False).limit(1).execute())
-            if existing.data:
-                skipped += 1
-                continue
-        row = {"business_user_id": business_user_id, "name": item["name"],
-               "amount": item["amount"], "original_amount": item["amount"],
-               "promised_date": item["promised_date"], "phone_number": item["phone_number"],
-               "is_paid": False}
-        supabase.table("customers").insert(row).execute()
-        added += 1
+        # Choice 2 means repeated rows are separate debts.
+        for item in customers_to_import:
+
+            if session.get("duplicate_choice") != "2":
+                existing = (
+                    supabase.table("customers")
+                    .select("id")
+                    .eq("business_user_id", business_user_id)
+                    .eq("name", item["name"])
+                    .eq("amount", item["amount"])
+                    .eq("is_paid", False)
+                    .limit(1)
+                    .execute()
+                )
+
+                if existing.data:
+                    skipped += 1
+                    continue
+
+            row = {
+                "business_user_id": business_user_id,
+                "name": item["name"],
+                "amount": item["amount"],
+                "original_amount": item["amount"],
+                "promised_date": item["promised_date"],
+                "phone_number": item["phone_number"],
+                "is_paid": False
+            }
+
+            supabase.table("customers").insert(row).execute()
+            added += 1
+
         if skipped > 0:
-        admin_confirmation = (
-            f"⚠️ Liiska deynta qayb ahaan ayaa la diiwaangeliyey.\n\n"
-            f"✅ Macaamiisha cusub ee lagu daray: {added}\n"
-            f"⏭️ Macaamiil hore u jiray oo laga booday: {skipped}\n\n"
-            f"Macaamiisha hore laguma darin system-ka mar labaad."
-        )
-    else:
-        admin_confirmation = (
-            f"✅ Waad ku guulaysatay diiwaangelinta deyntan.\n\n"
-            f"👥 Tirada macaamiisha cusub ee lagu daray: {added}"
-        )
+            admin_confirmation = (
+                f"⚠️ Liiska deynta qayb ahaan ayaa la diiwaangeliyey.\n\n"
+                f"✅ Macaamiisha cusub ee lagu daray: {added}\n"
+                f"⏭️ Macaamiil hore u jiray oo laga booday: {skipped}\n\n"
+                f"Macaamiisha hore laguma darin system-ka mar labaad."
+            )
+        else:
+            admin_confirmation = (
+                f"✅ Waad ku guulaysatay diiwaangelinta deyntan.\n\n"
+                f"👥 Tirada macaamiisha cusub ee lagu daray: {added}"
+            )
 
-    send_whatsapp(admin_phone, admin_confirmation)
-
+        send_whatsapp(admin_phone, admin_confirmation)
     # Notify the registered business user when an admin imports debts on
     # their behalf. Resolve the phone from Supabase, not only session data.
     shop_phone = ""
