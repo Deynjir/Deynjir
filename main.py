@@ -1488,7 +1488,7 @@ async def whatsapp_webhook(request: Request):
             if "GEMINI_TEMPORARILY_UNAVAILABLE" in error_text:
                 send_whatsapp(
                     sender_phone,
-                    "⏳ Adeegga akhrinta sawirrada (Gemini) hadda mashquul ayuu yahay. "
+                    "⏳ Adeegga akhrinta sawirradu hadda waa mashquul. "
                     "Tani macnaheedu ma aha in sawirku khaldan yahay. Waxba lama kaydin. "
                     "Fadlan sug dhowr daqiiqo kadibna isla sawirka mar kale soo dir."
                 )
