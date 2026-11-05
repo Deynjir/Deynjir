@@ -1216,13 +1216,53 @@ def _commit_import(admin_phone, session):
                 exc.partial_import = True
             raise
 
-        send_whatsapp(
-            admin_phone,
+        total_paid = sum(float(x["amount"]) for x in entries)
+        admin_confirmation = (
             f"✅ Import-ka lacag-bixinta waa dhammaaday.\n"
             f"Lacag-bixin la diiwaangeliyay: {saved}\n"
-            f"Wadarta lacagta: ${sum(float(x['amount']) for x in entries):.2f}\n"
+            f"Wadarta lacagta: ${total_paid:.2f}\n"
             "Lacagaha waxaa laga jaray deymaha dukaanka la doortay."
         )
+        send_whatsapp(admin_phone, admin_confirmation)
+
+        # Resolve the registered business user's phone from Supabase rather
+        # than relying only on a temporary session value. This ensures an admin
+        # importing on behalf of a shop notifies the correct business user.
+        shop_phone = ""
+        shop_name = str(session.get("shop_name") or "Dukaankaaga")
+        try:
+            shop_result = (
+                supabase.table("business_users")
+                .select("phone_number, name")
+                .eq("id", business_user_id)
+                .limit(1)
+                .execute()
+            )
+            if shop_result.data:
+                shop_phone = str(shop_result.data[0].get("phone_number") or "")
+                shop_name = str(shop_result.data[0].get("name") or shop_name)
+        except Exception as lookup_exc:
+            print(f"⚠️ Could not look up business user for payment-import notification: {lookup_exc}")
+
+        if not shop_phone:
+            shop_phone = str(session.get("shop_phone") or "")
+        shop_phone = shop_phone.replace("+", "").split("@")[0].strip()
+        admin_clean = str(admin_phone or "").replace("+", "").split("@")[0].strip()
+
+        if shop_phone and shop_phone != admin_clean:
+            business_message = (
+                f"✅ *Lacag-bixinnada waa la diiwaangeliyey.*\n\n"
+                f"Dukaan: *{shop_name}*\n"
+                f"Tirada lacag-bixinnada: *{saved}*\n"
+                f"Wadarta lacagta: *${total_paid:.2f}*\n\n"
+                "Lacagahan waxaa laga jaray deymaha macaamiisha ee dukaankaaga.\n"
+                "Qor *LIISKA DAYNTA* si aad u aragto haraaga cusub."
+            )
+            notification_sent = send_whatsapp(shop_phone, business_message)
+            print(
+                f"📨 Payment-import business confirmation: "
+                f"shop_phone={shop_phone}, sent={notification_sent}"
+            )
         return
 
     added = 0
