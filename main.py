@@ -1083,7 +1083,7 @@ def send_due_list_followup(phone):
         phone,
         "Si aad u aragto dhammaan deymaha, soo qor:\n"
         "*Liiska daynta*\n"
-        "Ama si aad u aragto deymaha iyo taariikhaha ballanta, soo qor:\n"
+        "Ama\n"
         "*Liiska daynta iyo balamaha*"
     )
 def _import_parse_date(value):
@@ -1624,7 +1624,25 @@ async def whatsapp_webhook(request: Request):
     # additionally select another approved shop using IMPORT +252... .
     import_text = str(message_text or "").strip()
     is_import_command = bool(re.fullmatch(r"\s*IMPORT(?:\s+\+?\d{8,15})?\s*", import_text, re.I))
-    if sender_phone == owner_phone or sender_phone in IMPORT_SESSIONS or is_import_command:
+    payment_month_words = (
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?"
+    )
+    payment_date_token = (
+        r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|"
+        r"\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?)"
+    )
+    is_payment_report_command = bool(re.fullmatch(
+        rf"\s*(?:liiska\s+)?lacag\s*bixinta(?:\s+(?:"
+        rf"{payment_date_token}\s*(?:-|ilaa|to)\s*{payment_date_token}|"
+        rf"{payment_month_words}"
+        rf"))?\s*",
+        import_text, re.I
+    ))
+    if (sender_phone == owner_phone or sender_phone in IMPORT_SESSIONS or is_import_command) and not (
+        is_payment_report_command or sender_phone in PAYMENT_EXPORT_SESSIONS
+    ):
         if re.fullmatch(r"\s*CANCEL\s*", import_text, re.I) and sender_phone in IMPORT_SESSIONS:
             IMPORT_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, "✅ Import waa la joojiyey. Waxba lama kaydin.")
@@ -1904,13 +1922,29 @@ async def whatsapp_webhook(request: Request):
 
     # Command: LIISKA LACAG BIXINTA [03/11/2026 - 07/11/2026]
     payment_list_match = re.fullmatch(
-        r"\s*(?:liiska\s+)?lacag\s*bixinta(?:\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?)\s*(?:-|ilaa|to)\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?))?\s*",
+        rf"\s*(?:liiska\s+)?lacag\s*bixinta(?:\s+("
+        rf"(\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}}|\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}\s+[A-Za-z]+(?:\s+\d{{4}})?)"
+        rf"\s*(?:-|ilaa|to)\s*"
+        rf"(\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}}|\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}\s+[A-Za-z]+(?:\s+\d{{4}})?)"
+        rf"|({payment_month_words})))?\s*",
         payment_text, re.I)
     if payment_list_match:
         try:
-            if payment_list_match.group(1):
-                start_date = _parse_payment_report_date(payment_list_match.group(1))
-                end_date = _parse_payment_report_date(payment_list_match.group(2), start_date.year)
+            if payment_list_match.group(4):
+                month_names = {"jan":1,"january":1,"feb":2,"february":2,"mar":3,"march":3,
+                    "apr":4,"april":4,"may":5,"jun":6,"june":6,"jul":7,"july":7,
+                    "aug":8,"august":8,"sep":9,"sept":9,"september":9,"oct":10,
+                    "october":10,"nov":11,"november":11,"dec":12,"december":12}
+                month_number = month_names[payment_list_match.group(4).lower()]
+                year = today_eat().year
+                start_date = datetime(year, month_number, 1).date()
+                if month_number == 12:
+                    end_date = datetime(year + 1, 1, 1).date() - timedelta(days=1)
+                else:
+                    end_date = datetime(year, month_number + 1, 1).date() - timedelta(days=1)
+            elif payment_list_match.group(1):
+                start_date = _parse_payment_report_date(payment_list_match.group(2))
+                end_date = _parse_payment_report_date(payment_list_match.group(3), start_date.year)
                 if end_date < start_date:
                     raise ValueError("Taariikhda dhammaadka ayaa ka horreysa bilowga")
                 PAYMENT_EXPORT_SESSIONS[sender_phone] = {
