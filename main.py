@@ -4575,6 +4575,60 @@ async def inactivity_checkin(request: Request):
         "date": today.isoformat(),
     }
 
+
+@app.get("/cron/all-scheduled")
+async def all_scheduled_tasks(request: Request):
+    """Single scheduler entry point for all existing Deynjir cron tasks.
+
+    Call this endpoint at 04:00, 15:00 and 17:00 UTC (07:00, 18:00 and
+    20:00 Somalia time). Keeping one Render Cron Job service avoids creating
+    separate paid Cron Job services for each task.
+    """
+    if not cron_authorized(request):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Unauthorized cron request")
+
+    now = now_eat()
+    hour = now.hour
+    results = {"status": "done", "somalia_time": now.isoformat(), "tasks": {}}
+
+    # 07:00 Somalia time — daily due/overdue customer digest.
+    if hour == 7:
+        print("🕖 SCHEDULER: running daily digest")
+        try:
+            results["tasks"]["daily_digest"] = await daily_digest(request)
+        except Exception as exc:
+            print(f"❌ SCHEDULER daily digest failed: {type(exc).__name__}: {exc}")
+            results["tasks"]["daily_digest"] = {"status": "error", "detail": str(exc)}
+
+    # 18:00 Somalia time — inactivity reminder (only shops with no activity).
+    elif hour == 18:
+        print("🕕 SCHEDULER: running inactivity check-in")
+        try:
+            results["tasks"]["inactivity_checkin"] = await inactivity_checkin(request)
+        except Exception as exc:
+            print(f"❌ SCHEDULER inactivity check-in failed: {type(exc).__name__}: {exc}")
+            results["tasks"]["inactivity_checkin"] = {"status": "error", "detail": str(exc)}
+
+    # 20:00 Somalia time — daily report, plus Friday/month-end reports.
+    elif hour == 20:
+        print("🕗 SCHEDULER: running daily and periodic reports")
+        try:
+            results["tasks"]["daily_report"] = await evening_checkin(request)
+        except Exception as exc:
+            print(f"❌ SCHEDULER daily report failed: {type(exc).__name__}: {exc}")
+            results["tasks"]["daily_report"] = {"status": "error", "detail": str(exc)}
+        try:
+            results["tasks"]["periodic_reports"] = await periodic_reports(request)
+        except Exception as exc:
+            print(f"❌ SCHEDULER periodic reports failed: {type(exc).__name__}: {exc}")
+            results["tasks"]["periodic_reports"] = {"status": "error", "detail": str(exc)}
+    else:
+        results["status"] = "no_task_for_this_hour"
+        results["message"] = "Run this endpoint at 07:00, 18:00 or 20:00 Somalia time."
+
+    return results
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
