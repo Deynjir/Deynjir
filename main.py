@@ -1038,7 +1038,7 @@ def ask_for_full_name(sender_phone, matches, action):
     message = "⚠️ Waxaan helay macaamiil isku magac ah:\n\n"
 
     for number, debtor in enumerate(matches, start=1):
-        due_date = debtor.get("promised_date") or "lama gelin"
+        due_date = debtor.get("promised_date") or ""
         message += (
             f"{number}. {debtor['name']} — "
             f"${debtor['amount']} — Ballan: {due_date}\n"
