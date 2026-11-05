@@ -50,6 +50,67 @@ REMINDER_SESSION_TTL = timedelta(minutes=15)
 IMPORT_SESSIONS = {}
 PAYMENT_EXPORT_SESSIONS = {}
 IMPORT_SESSION_TTL = timedelta(minutes=30)
+# Short, guided WhatsApp conversations for users who do not remember commands.
+GUIDED_SESSIONS = {}
+GUIDED_SESSION_TTL = timedelta(minutes=15)
+
+
+def deynjir_main_menu():
+    return (
+        "👋 *Ku soo dhowow Deynjir!*\n\n"
+        "Waxaan kaa caawinayaa la socodka daymaha iyo lacagaha laguu soo celiyo.\n\n"
+        "*Maxaad rabtaa inaad samayso?*\n\n"
+        "1️⃣ Deyn cusub ku dar\n"
+        "2️⃣ Lacag bixin diiwaangeli\n"
+        "3️⃣ Eeg liiska daynta\n"
+        "4️⃣ Raadi qof\n"
+        "5️⃣ Eeg ballamaha maanta\n"
+        "6️⃣ Caawimaad\n\n"
+        "Dooro lambar ama si caadi ah iigu sheeg waxa aad rabto."
+    )
+
+
+def deynjir_help_message():
+    return (
+        "ℹ️ *Sida Deynjir loo isticmaalo*\n\n"
+        "• Deyn cusub: qor *ADD Cali $50*\n"
+        "• Lacag bixin: qor *Lacag bixin Cali $20*\n"
+        "• Liiska daynta: qor *LIISKA DAYNTA*\n"
+        "• Raadi qof: qor *Raadi Cali*\n"
+        "• Ballamaha: qor *Balamaha Maanta* ama *Balamaha Berri*\n"
+        "• Soo geli sawir/Excel: qor *IMPORT*\n\n"
+        "Ama qor *MENU* si aan kuu hago."
+    )
+
+
+def normalize_easy_command(value):
+    """Normalize a small, explicit set of common Somali typing mistakes."""
+    raw = " ".join(str(value or "").strip().split())
+    folded = raw.casefold().strip(" .!؟?")
+    aliases = {
+        "inbort": "IMPORT", "inport": "IMPORT", "importi": "IMPORT",
+        "menyu": "MENU", "caawi": "HELP", "caawimaad": "HELP",
+        "help me": "HELP", "salaan": "MENU", "asc": "MENU",
+        "assalamu alaikum": "MENU", "asalaamu calaykum": "MENU",
+        "lacag bixn": "GUIDED_PAYMENT",
+        "lacag bixinta": "LIISKA LACAG BIXINTA",
+        "ku dar deyn": "GUIDED_DEBT", "ku dar dayn": "GUIDED_DEBT",
+        "balanta beri": "BALAMAHA BERRI", "ballanta beri": "BALAMAHA BERRI",
+        "balamaha beri": "BALAMAHA BERRI", "ballamaha beri": "BALAMAHA BERRI",
+    }
+    return aliases.get(folded, raw)
+
+
+def _guided_amount(text):
+    raw = str(text or "").strip().replace(",", ".")
+    match = re.fullmatch(r"(?:\$\s*)?(\d+(?:\.\d{1,2})?)(?:\s*(?:usd|dollar|dollars))?", raw, re.I)
+    if not match:
+        return None
+    try:
+        amount = float(match.group(1))
+        return amount if amount > 0 else None
+    except (TypeError, ValueError):
+        return None
 
 # Payment-report commands are handled locally; they must never enter import,
 # Gemini, or the generic debt fallback parser.
@@ -1538,7 +1599,7 @@ async def whatsapp_webhook(request: Request):
     # import session. Nothing is saved before the sender confirms with OK.
     if type_message == "documentMessage":
         if sender_phone not in IMPORT_SESSIONS:
-            send_whatsapp(sender_phone, "Marka hore dir *IMPORT* si aad u bilowdo soo gelinta liiska.")
+            send_whatsapp(sender_phone, "Waxaan arkay faylkaaga. Si aan u akhriyo, marka hore qor *IMPORT*, dooro *DEYN* ama *LACAG BIXIN*, kadibna mar kale soo dir faylka. Waxba lama kaydin.")
             return {"status": "import_session_required"}
         if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
             send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
@@ -1587,7 +1648,7 @@ async def whatsapp_webhook(request: Request):
 
     if type_message == "imageMessage":
         if sender_phone not in IMPORT_SESSIONS:
-            send_whatsapp(sender_phone, "Marka hore dir *IMPORT* si aad u bilowdo soo gelinta sawirka.")
+            send_whatsapp(sender_phone, "Waxaan arkay sawirkaaga. Si aan u akhriyo, marka hore qor *IMPORT*, dooro *DEYN* ama *LACAG BIXIN*, kadibna mar kale soo dir sawirka. Waxba lama kaydin.")
             return {"status": "import_session_required"}
         if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
             send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
@@ -1640,7 +1701,10 @@ async def whatsapp_webhook(request: Request):
         
     if not message_text:
         return {"status": "empty_text"}
-    
+
+    # Help users who misspell common commands without changing free-form messages.
+    message_text = normalize_easy_command(message_text)
+
     # Normalize sender; GREEN-API chat IDs may include "@c.us".
     sender_phone = str(sender_phone).replace("+", "").split("@")[0].strip()
     owner_phone = str(OWNER_PHONE).replace("+", "").split("@")[0].strip()
@@ -1842,7 +1906,8 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, f"✅ Codsiga lambarka {applicant_phone} {decision_so}.")
             send_whatsapp(
                 applicant_phone,
-                "✅ Codsigaaga waa la oggolaaday. Hadda waad isticmaali kartaa Deynjir."
+                "✅ Codsigaaga waa la oggolaaday. Ku soo dhowow Deynjir!\n\n"
+                "Qor *MENU* si aan tallaabo tallaabo kuugu hago, ama si toos ah u qor waxa aad rabto."
                 if new_status == "approved"
                 else "❌ Waan ka xunnahay, codsigaaga isticmaalka Deynjir waa la diiday."
             )
@@ -1885,6 +1950,134 @@ async def whatsapp_webhook(request: Request):
     except Exception as db_err:
         print(f"❌ DATABASE ERROR (Business User Lookup): {db_err}")
         return {"status": "business_user_db_error"}
+
+    # Friendly onboarding and guided actions. Numeric choices are interpreted
+    # only while a menu session is active, so ordinary numbers remain untouched.
+    guided_text = str(message_text or "").strip()
+    guided = GUIDED_SESSIONS.get(sender_phone)
+    if guided:
+        expires_at = guided.get("expires_at")
+        if not expires_at or datetime.now(timezone.utc) > expires_at:
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            guided = None
+
+    menu_words = {"menu", "start", "hello", "hi", "hey", "help", "caawi", "caawimaad", "bilow"}
+    if guided_text.casefold() in menu_words:
+        GUIDED_SESSIONS[sender_phone] = {
+            "stage": "menu",
+            "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+        }
+        send_whatsapp(sender_phone, deynjir_main_menu())
+        return {"status": "main_menu_sent"}
+
+    if guided_text in {"GUIDED_DEBT", "GUIDED_PAYMENT"}:
+        action = "debt" if guided_text == "GUIDED_DEBT" else "payment"
+        GUIDED_SESSIONS[sender_phone] = {
+            "stage": f"{action}_name",
+            "transaction_type": action,
+            "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+        }
+        prompt = "Magaca qofka daynta qaatay?" if action == "debt" else "Magaca qofka lacagta bixiyey?"
+        send_whatsapp(sender_phone, prompt + "\n\nQor *JOOJI* haddii aad rabto inaad ka baxdo.")
+        return {"status": f"guided_{action}_started"}
+
+    if guided and re.fullmatch(r"\s*(?:jooji|cancel|baaji)\s*", guided_text, re.I):
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        send_whatsapp(sender_phone, "Waa la joojiyey. Waxba lama beddelin. Qor *MENU* haddii aad caawimaad rabto.")
+        return {"status": "guided_action_cancelled"}
+
+    if guided and guided.get("stage") == "menu":
+        choice = guided_text.strip()
+        if choice == "1":
+            guided["stage"] = "debt_name"
+            guided["transaction_type"] = "debt"
+            guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+            send_whatsapp(sender_phone, "Magaca qofka daynta qaatay?\n\nQor *JOOJI* si aad uga baxdo.")
+            return {"status": "guided_debt_name_requested"}
+        if choice == "2":
+            guided["stage"] = "payment_name"
+            guided["transaction_type"] = "payment"
+            guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+            send_whatsapp(sender_phone, "Magaca qofka lacagta bixiyey?\n\nQor *JOOJI* si aad uga baxdo.")
+            return {"status": "guided_payment_name_requested"}
+        if choice == "3":
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            message_text = "LIISKA DAYNTA"
+        elif choice == "4":
+            guided["stage"] = "search_name"
+            guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+            send_whatsapp(sender_phone, "Qor magaca qofka aad raadinayso.")
+            return {"status": "guided_search_name_requested"}
+        elif choice == "5":
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            message_text = "Balamaha Maanta"
+        elif choice == "6":
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, deynjir_help_message())
+            return {"status": "help_sent"}
+        else:
+            send_whatsapp(sender_phone, "Ma fahmin doorashadaas. Fadlan dooro 1 ilaa 6.\n\n" + deynjir_main_menu())
+            return {"status": "invalid_menu_choice"}
+
+    if guided and guided.get("stage") in {"debt_name", "payment_name"}:
+        if len(guided_text) < 2 or len(guided_text) > 100 or re.search(r"\d", guided_text):
+            send_whatsapp(sender_phone, "Fadlan qor magaca qofka oo keliya. Tusaale: *Cali Xasan*.")
+            return {"status": "guided_invalid_name"}
+        guided["customer_name"] = guided_text.strip()
+        guided["stage"] = "debt_amount" if guided.get("stage") == "debt_name" else "payment_amount"
+        guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+        send_whatsapp(sender_phone, f"Immisa dollar?\n\nQofka: *{guided['customer_name']}*\nTusaale: *50* ama *$50*.")
+        return {"status": "guided_amount_requested"}
+
+    if guided and guided.get("stage") in {"debt_amount", "payment_amount"}:
+        amount = _guided_amount(guided_text)
+        if amount is None:
+            send_whatsapp(sender_phone, "Fadlan qor lacag sax ah. Tusaale: *50* ama *$50*. Waxba lama kaydin.")
+            return {"status": "guided_invalid_amount"}
+        guided["amount"] = amount
+        guided["stage"] = "confirm"
+        guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+        transaction_label = "Deyn cusub" if guided.get("transaction_type") == "debt" else "Lacag bixin"
+        send_whatsapp(sender_phone,
+            f"*Hubi xogta:*\n\nNooc: {transaction_label}\nMagac: *{guided['customer_name']}*\nLacag: *${amount:,.2f}*\n\n"
+            "Ma sax baa?\n1️⃣ Haa, kaydi\n2️⃣ Maya, jooji")
+        return {"status": "guided_transaction_confirmation_requested"}
+
+    if guided and guided.get("stage") == "confirm":
+        answer = guided_text.casefold().strip()
+        if answer in {"1", "haa", "h", "yes", "ok", "sax"}:
+            name = guided.get("customer_name")
+            amount = guided.get("amount")
+            transaction_type = guided.get("transaction_type")
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            if not name or not amount or transaction_type not in {"debt", "payment"}:
+                send_whatsapp(sender_phone, "Wadahadalkii wuu khaldamay. Fadlan mar kale ka bilow *MENU*.")
+                return {"status": "guided_session_invalid"}
+            # Use natural Somali transaction wording already supported by the
+            # deterministic ADD/PAY classifier and local parser.
+            message_text = (f"{name} ${amount} ayuu iga qaatay" if transaction_type == "debt"
+                            else f"{name} ${amount} ayuu bixiyay")
+            print(f"✅ Guided transaction confirmed: type={transaction_type}, name={name!r}, amount={amount}")
+        elif answer in {"2", "maya", "no", "cancel", "jooji"}:
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "Waa la joojiyey. Waxba lama kaydin. Qor *MENU* haddii aad caawimaad rabto.")
+            return {"status": "guided_transaction_cancelled"}
+        else:
+            send_whatsapp(sender_phone, "Fadlan dooro *1* si aad u kaydiso ama *2* si aad u joojiso.")
+            return {"status": "guided_confirmation_pending"}
+
+    if guided and guided.get("stage") == "search_name":
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        message_text = f"search {guided_text.strip()}"
+
+    # Helpful handling for a bare typo/unknown command, rather than a technical error.
+    if guided_text.casefold().strip() in {"guid", "inbort", "inport", "lacag bixn"}:
+        GUIDED_SESSIONS[sender_phone] = {
+            "stage": "menu",
+            "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+        }
+        send_whatsapp(sender_phone, "Waxaan kuu fududayn karaa isticmaalka Deynjir.\n\n" + deynjir_main_menu())
+        return {"status": "friendly_guidance_sent"}
 
     # Shop-wide payment history and date-range Excel/PDF exports.
     payment_text = str(message_text or "").strip()
@@ -2505,20 +2698,23 @@ async def whatsapp_webhook(request: Request):
                         entries = [{"action": "SEARCH", "customer_name": raw_query}]
                         print(f"🛟 Local fallback routing known customer name to SEARCH: {raw_query!r}")
             if not entries:
+                GUIDED_SESSIONS[sender_phone] = {
+                    "stage": "menu",
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                }
                 if is_rate_limited:
-                    reply = (
-                        "⏳ AI-gu wuxuu gaaray xadka isticmaalka.\n\n"
-                        "Fadlan isticmaal qaab kale sida: Deyn cusub: MAGACA $lacagta, waxka bedelka: edit MAGACA $lacagta, "
-                        "delete MAGACA, ama search MAGACA."
+                    send_whatsapp(
+                        sender_phone,
+                        "⏳ Adeegga fahamka fariinta hadda waa mashquul. Waxba lama beddelin.\n\n"
+                        "Waxaad dooran kartaa mid ka mid ah hawlahan: \n" + deynjir_main_menu()
                     )
-                    send_whatsapp(sender_phone, reply)
-                    return {"status": "gemini_rate_limited_unparsed"}
+                    return {"status": "gemini_rate_limited_guidance_sent"}
                 send_whatsapp(
                     sender_phone,
-                    "⚠️ AI-gu hadda ma shaqaynayo. "
-                    "Fadlan isticmaal tusaalayaashan MAGACA $ lacagta ama search MAGACA."
+                    "Waan ka xumahay, fariinta si fiican uma fahmin. Waxba lama beddelin.\n\n"
+                    "Waxaan kaa caawin karaa sidan: \n" + deynjir_main_menu()
                 )
-                return {"status": "gemini_error_unparsed"}
+                return {"status": "friendly_fallback_sent"}
 
     # If the user answered the pending question, apply that answer to every
     # entry extracted from the saved original message. Otherwise require an
