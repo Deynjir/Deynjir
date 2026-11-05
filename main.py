@@ -1496,18 +1496,19 @@ def _commit_import(admin_phone, session):
                "is_paid": False}
         supabase.table("customers").insert(row).execute()
         added += 1
-    if skipped > 0:
-    admin_confirmation = (
-        f"⚠️ Liiska deynta qayb ahaan ayaa la diiwaangeliyey.\n\n"
-        f"✅ Macaamiisha cusub ee lagu daray: {added}\n"
-        f"⏭️ Macaamiil hore u jirtay oo laga booday: {skipped}\n\n"
-        f"Macaamiisha hore laguma darin system-ka mar labaad."
-    )
-else:
-    admin_confirmation = (
-        f"✅ Waad ku Guulaysatay Diwaangelinta Deyntan.\n\n"
-        f"👥 Tirada Macaamiisha cusub ee lagu daray: {added}"
-    )
+        if skipped > 0:
+        admin_confirmation = (
+            f"⚠️ Liiska deynta qayb ahaan ayaa la diiwaangeliyey.\n\n"
+            f"✅ Macaamiisha cusub ee lagu daray: {added}\n"
+            f"⏭️ Macaamiil hore u jiray oo laga booday: {skipped}\n\n"
+            f"Macaamiisha hore laguma darin system-ka mar labaad."
+        )
+    else:
+        admin_confirmation = (
+            f"✅ Waad ku guulaysatay diiwaangelinta deyntan.\n\n"
+            f"👥 Tirada macaamiisha cusub ee lagu daray: {added}"
+        )
+
     send_whatsapp(admin_phone, admin_confirmation)
 
     # Notify the registered business user when an admin imports debts on
