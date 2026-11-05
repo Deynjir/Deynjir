@@ -50,6 +50,27 @@ REMINDER_SESSION_TTL = timedelta(minutes=15)
 IMPORT_SESSIONS = {}
 PAYMENT_EXPORT_SESSIONS = {}
 IMPORT_SESSION_TTL = timedelta(minutes=30)
+
+# Payment-report commands are handled locally; they must never enter import,
+# Gemini, or the generic debt fallback parser.
+PAYMENT_REPORT_MONTH_PATTERN = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+    r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+    r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+PAYMENT_REPORT_DATE_PATTERN = (
+    r"\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|"
+    r"\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?"
+)
+
+def is_payment_report_command(value):
+    """Recognize shop-wide payment reports before any import/AI parser runs."""
+    text = " ".join(str(value or "").strip().split())
+    return bool(re.fullmatch(
+        rf"(?:liiska\s+)?lacag\s*bixinta(?:\s+(?:{PAYMENT_REPORT_MONTH_PATTERN}|"
+        rf"{PAYMENT_REPORT_DATE_PATTERN}\s*(?:-|ilaa|to)\s*{PAYMENT_REPORT_DATE_PATTERN}))?",
+        text, re.I
+    ))
 DEFAULT_COUNTRY_CODE = re.sub(r"\D", "", os.getenv("DEFAULT_COUNTRY_CODE", ""))
 
 
@@ -682,6 +703,9 @@ def local_fallback_parse(message_text):
     if not raw:
         return None
     low = raw.casefold()
+
+    if is_payment_report_command(raw):
+        return None
 
     base = {
         "customer_name": None, "amount": None, "days_until_due": None,
@@ -1624,24 +1648,8 @@ async def whatsapp_webhook(request: Request):
     # additionally select another approved shop using IMPORT +252... .
     import_text = str(message_text or "").strip()
     is_import_command = bool(re.fullmatch(r"\s*IMPORT(?:\s+\+?\d{8,15})?\s*", import_text, re.I))
-    payment_month_words = (
-        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
-        r"nov(?:ember)?|dec(?:ember)?"
-    )
-    payment_date_token = (
-        r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|"
-        r"\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?)"
-    )
-    is_payment_report_command = bool(re.fullmatch(
-        rf"\s*(?:liiska\s+)?lacag\s*bixinta(?:\s+(?:"
-        rf"{payment_date_token}\s*(?:-|ilaa|to)\s*{payment_date_token}|"
-        rf"{payment_month_words}"
-        rf"))?\s*",
-        import_text, re.I
-    ))
     if (sender_phone == owner_phone or sender_phone in IMPORT_SESSIONS or is_import_command) and not (
-        is_payment_report_command or sender_phone in PAYMENT_EXPORT_SESSIONS
+        is_payment_report_command(import_text) or sender_phone in PAYMENT_EXPORT_SESSIONS
     ):
         if re.fullmatch(r"\s*CANCEL\s*", import_text, re.I) and sender_phone in IMPORT_SESSIONS:
             IMPORT_SESSIONS.pop(sender_phone, None)
@@ -1920,33 +1928,40 @@ async def whatsapp_webhook(request: Request):
         send_whatsapp(sender_phone, "Dooro *EXCEL* ama *PDF*. Qor *CANCEL* si aad u joojiso.")
         return {"status": "payment_export_waiting_format"}
 
-    # Command: LIISKA LACAG BIXINTA [03/11/2026 - 07/11/2026]
+    # Command: LIISKA LACAG BIXINTA [NOV | 03/11/2026 - 07/11/2026]
     payment_list_match = re.fullmatch(
-        rf"\s*(?:liiska\s+)?lacag\s*bixinta(?:\s+("
-        rf"(\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}}|\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}\s+[A-Za-z]+(?:\s+\d{{4}})?)"
-        rf"\s*(?:-|ilaa|to)\s*"
-        rf"(\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}}|\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}\s+[A-Za-z]+(?:\s+\d{{4}})?)"
-        rf"|({payment_month_words})))?\s*",
+        rf"\s*(?:liiska\s+)?lacag\s*bixinta(?:\s+({PAYMENT_REPORT_MONTH_PATTERN}|"
+        rf"({PAYMENT_REPORT_DATE_PATTERN})\s*(?:-|ilaa|to)\s*({PAYMENT_REPORT_DATE_PATTERN})))?\s*",
         payment_text, re.I)
     if payment_list_match:
         try:
-            if payment_list_match.group(4):
-                month_names = {"jan":1,"january":1,"feb":2,"february":2,"mar":3,"march":3,
-                    "apr":4,"april":4,"may":5,"jun":6,"june":6,"jul":7,"july":7,
-                    "aug":8,"august":8,"sep":9,"sept":9,"september":9,"oct":10,
-                    "october":10,"nov":11,"november":11,"dec":12,"december":12}
-                month_number = month_names[payment_list_match.group(4).lower()]
-                year = today_eat().year
-                start_date = datetime(year, month_number, 1).date()
+            month_token = payment_list_match.group(1)
+            range_start = payment_list_match.group(2)
+            range_end = payment_list_match.group(3)
+            if month_token and not range_start:
+                month_number = {
+                    "jan": 1, "january": 1, "feb": 2, "february": 2,
+                    "mar": 3, "march": 3, "apr": 4, "april": 4,
+                    "may": 5, "jun": 6, "june": 6, "jul": 7,
+                    "july": 7, "aug": 8, "august": 8, "sep": 9,
+                    "sept": 9, "september": 9, "oct": 10, "october": 10,
+                    "nov": 11, "november": 11, "dec": 12, "december": 12,
+                }[month_token.lower()]
+                report_year = today_eat().year
+                start_date = datetime(report_year, month_number, 1).date()
                 if month_number == 12:
-                    end_date = datetime(year + 1, 1, 1).date() - timedelta(days=1)
+                    end_date = datetime(report_year + 1, 1, 1).date() - timedelta(days=1)
                 else:
-                    end_date = datetime(year, month_number + 1, 1).date() - timedelta(days=1)
-            elif payment_list_match.group(1):
-                start_date = _parse_payment_report_date(payment_list_match.group(2))
-                end_date = _parse_payment_report_date(payment_list_match.group(3), start_date.year)
+                    end_date = datetime(report_year, month_number + 1, 1).date() - timedelta(days=1)
+            elif range_start:
+                start_date = _parse_payment_report_date(range_start)
+                end_date = _parse_payment_report_date(range_end, start_date.year)
                 if end_date < start_date:
                     raise ValueError("Taariikhda dhammaadka ayaa ka horreysa bilowga")
+            else:
+                start_date = end_date = None
+
+            if start_date and end_date:
                 PAYMENT_EXPORT_SESSIONS[sender_phone] = {
                     "business_user_id": business_user_id,
                     "start_date": start_date,
@@ -1956,6 +1971,7 @@ async def whatsapp_webhook(request: Request):
                     f"💵 *LIISKA LACAG BIXINTA*\n📅 {start_date:%d/%m/%Y} – {end_date:%d/%m/%Y}\n\n"
                     "Dooro nooca faylka: *EXCEL* ama *PDF*.\nQor *CANCEL* si aad u joojiso.")
                 return {"status": "payment_export_format_requested"}
+
             records = _load_shop_payments(business_user_id)
             if not records:
                 send_whatsapp(sender_phone, "✅ Weli ma jiraan lacag-bixinno la diiwaangeliyay.")
@@ -1968,7 +1984,7 @@ async def whatsapp_webhook(request: Request):
             return {"status": "shop_payment_list_sent", "count": len(records)}
         except Exception as exc:
             print(f"❌ Shop payment list error: {type(exc).__name__}: {exc}")
-            send_whatsapp(sender_phone, "❌ Taariikhda lama fahmin. Tusaale: LIISKA LACAG BIXINTA 03/11/2026 - 07/11/2026")
+            send_whatsapp(sender_phone, "❌ Taariikhda lama fahmin. Tusaale: LIISKA LACAG BIXINTA NOV ama LIISKA LACAG BIXINTA 03/11/2026 - 07/11/2026")
             return {"status": "shop_payment_list_error"}
 
     # Two-step SAX flow. Explicit "SAX old -> new" continues through the
