@@ -4355,7 +4355,6 @@ def _format_business_activity_report(report_type, start_date, end_date, data, sh
         f"🆕 Deyn cusub: *${data['new_debt_total']:.2f}* ({data['new_debt_count']} diiwaan)",
         f"👥 Macaamiil deyn cusub qaatay: *{data['new_customer_count']}*",
         f"💵 Lacag la bixiyey: *${data['payment_total']:.2f}* ({data['payment_count']} lacag-bixin)",
-        f"📈 Farqiga: *{'+' if data['net_change'] >= 0 else '-'}${abs(data['net_change']):.2f}*",
         "",
         f"📒 Daynta hadda taagan: *${data['outstanding_total']:.2f}*",
         f"👤 Macaamiisha weli lagu leeyahay: *{data['outstanding_count']}*",
