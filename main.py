@@ -2739,7 +2739,7 @@ async def whatsapp_webhook(request: Request):
                     return {"status": "gemini_rate_limited_guidance_sent"}
                 send_whatsapp(
                     sender_phone,
-                    "Ku Ma fahmin.\n\n"
+                    "Ku ma fahmin.\n\n"
                     "Fadlan raac tilmaamahan: \n" + deynjir_main_menu()
                 )
                 return {"status": "friendly_fallback_sent"}
