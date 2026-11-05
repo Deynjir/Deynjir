@@ -1088,15 +1088,23 @@ def _validate_import_entries(entries):
     return clean
 
 
-def _extract_import_text(raw_text):
+def _extract_import_text(raw_text, import_mode="debt"):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY lama dejin.")
-    prompt = (
-        "Extract every customer debt from the following text. Return ONLY a JSON array. "
-        "Each item must have name, amount (number), promised_date (YYYY-MM-DD or null), "
-        "phone_number (string or null). Do not guess unclear names or amounts; use null "
-        "for unclear values. Today's date is " + today_eat().isoformat() + ".\n\nTEXT:\n" + raw_text
-    )
+    if import_mode == "payment":
+        task = (
+            "Extract every customer PAYMENT received from the following text. Return ONLY a JSON array. "
+            "Each item must have name and amount (number). Do not guess unclear names or amounts; "
+            "use null for unclear values. Do not interpret these rows as new debts."
+        )
+    else:
+        task = (
+            "Extract every customer NEW DEBT from the following text. Return ONLY a JSON array. "
+            "Each item must have name, amount (number), promised_date (YYYY-MM-DD or null), "
+            "phone_number (string or null). Do not guess unclear names or amounts; use null "
+            "for unclear values. Today's date is " + today_eat().isoformat() + "."
+        )
+    prompt = task + "\n\nTEXT:\n" + raw_text
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     response = requests.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
         json={"contents":[{"role":"user","parts":[{"text":prompt}]}],
@@ -1108,15 +1116,23 @@ def _extract_import_text(raw_text):
     return _validate_import_entries(parsed)
 
 
-def _extract_import_image(image_bytes, mime_type):
+def _extract_import_image(image_bytes, mime_type, import_mode="debt"):
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY lama dejin.")
     import base64
-    prompt = (
-        "Read this handwritten or printed debt list. Extract ALL rows. Return ONLY a JSON array "
-        "with name, amount (number), promised_date (YYYY-MM-DD or null), phone_number (string or null). "
-        "Do not guess unclear names or amounts; use null for unclear values. Today's date is " + today_eat().isoformat()
-    )
+    if import_mode == "payment":
+        prompt = (
+            "Read this handwritten or printed list of customer PAYMENTS RECEIVED. Extract ALL rows. "
+            "Return ONLY a JSON array with name and amount (number). Do not guess unclear names "
+            "or amounts; use null for unclear values. These are payments against existing debts, "
+            "not new debts."
+        )
+    else:
+        prompt = (
+            "Read this handwritten or printed debt list. Extract ALL rows. Return ONLY a JSON array "
+            "with name, amount (number), promised_date (YYYY-MM-DD or null), phone_number (string or null). "
+            "Do not guess unclear names or amounts; use null for unclear values. Today's date is " + today_eat().isoformat()
+        )
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     payload = {"contents":[{"role":"user","parts":[{"text":prompt},
         {"inline_data":{"mime_type":mime_type,"data":base64.b64encode(image_bytes).decode("ascii")}}]}],
@@ -1128,18 +1144,87 @@ def _extract_import_image(image_bytes, mime_type):
     return _validate_import_entries(json.loads(text))
 
 
-def _stage_import(admin_phone, entries):
+def _stage_import(admin_phone, entries, import_mode="debt"):
     total = sum(item["amount"] for item in entries)
-    lines = ["📋 *HORDHACA DEYNTA LA DIIWAANGELINAYO*", f"Tirada macaamiisha: {len(entries)}", ""]
-    for i, item in enumerate(entries, 1):
-        lines.append(f"{i}. {item['name']} — ${item['amount']:.2f} — {item['promised_date']}")
-    lines += ["", f"*Wadarta guud: ${total:.2f}*", "", "Hubi magacyada iyo lacagaha.", "Haddii ay sax yihiin, soo qor *OK* si loo kaydiyo.", "Haddii kale, soo qor *CANCEL* si loo joojiyo."]
+    if import_mode == "payment":
+        lines = ["📋 *HORDHACA LACAG-BIXINTA*", f"Tirada lacag-bixinnada: {len(entries)}", ""]
+        for i, item in enumerate(entries, 1):
+            lines.append(f"{i}. {item['name']} — ${item['amount']:.2f}")
+        lines += ["", f"*Wadarta lacagta: ${total:.2f}*", "", "Hubi magacyada iyo lacagaha.",
+                  "Haddii ay sax yihiin, soo qor *OK* si lacag-bixinnada loo diiwaangeliyo.",
+                  "Haddii kale, soo qor *CANCEL* si loo joojiyo.",
+                  "", "Lacagaha waxaa laga jarayaa deymaha hadda jira."]
+    else:
+        lines = ["📋 *HORDHACA DEYNTA LA DIIWAANGELINAYO*", f"Tirada macaamiisha: {len(entries)}", ""]
+        for i, item in enumerate(entries, 1):
+            lines.append(f"{i}. {item['name']} — ${item['amount']:.2f} — {item['promised_date']}")
+        lines += ["", f"*Wadarta guud: ${total:.2f}*", "", "Hubi magacyada iyo lacagaha.",
+                  "Haddii ay sax yihiin, soo qor *OK* si loo kaydiyo.",
+                  "Haddii kale, soo qor *CANCEL* si loo joojiyo."]
     send_whatsapp(admin_phone, "\n".join(lines))
 
 
 def _commit_import(admin_phone, session):
     entries = session["entries"]
     business_user_id = session["business_user_id"]
+    import_mode = session.get("mode", "debt")
+
+    if import_mode == "payment":
+        # Validate every row before making any changes. A name must resolve to
+        # exactly one unpaid debt, and cumulative imported payments cannot exceed it.
+        prepared = []
+        cumulative = {}
+        debt_cache = {}
+        for item in entries:
+            matches = find_debtor_matches(business_user_id, item["name"])
+            unpaid = [m for m in matches if not m.get("is_paid") and _safe_money(m.get("amount")) > 0]
+            if len(unpaid) != 1:
+                reason = "lama helin deyn aan la bixin" if not unpaid else "waxaa jira deymo badan oo magacaas leh"
+                raise ValueError(f"{item['name']}: {reason}. Hubi magaca ama kala saar deymaha.")
+            debtor = unpaid[0]
+            debt_id = str(debtor["id"])
+            debt_cache[debt_id] = debtor
+            cumulative[debt_id] = cumulative.get(debt_id, 0.0) + float(item["amount"])
+            if cumulative[debt_id] - _safe_money(debtor.get("amount")) > 0.009:
+                raise ValueError(
+                    f"{item['name']}: lacagta la soo gelinayo (${cumulative[debt_id]:.2f}) "
+                    f"waxay ka badan tahay haraaga (${_safe_money(debtor.get('amount')):.2f})."
+                )
+            prepared.append((item, debtor))
+
+        saved = 0
+        try:
+            for item, debtor in prepared:
+                rpc_result = supabase.rpc("record_debt_payment", {
+                    "p_customer_id": str(debtor["id"]),
+                    "p_business_user_id": str(business_user_id),
+                    "p_amount": round(float(item["amount"]), 2),
+                }).execute()
+                rpc_data = rpc_result.data
+                if isinstance(rpc_data, list):
+                    rpc_data = rpc_data[0] if rpc_data else None
+                if not isinstance(rpc_data, dict) or not rpc_data.get("id"):
+                    raise RuntimeError("record_debt_payment ma xaqiijin lacag-bixinta. Hubi Supabase.")
+                saved += 1
+        except Exception as exc:
+            if saved:
+                send_whatsapp(
+                    admin_phone,
+                    f"⚠️ Import-ku qayb ayuu u dhacay: {saved} lacag-bixin waa la kaydiyey, "
+                    "inta kale way fashilantay. Ha ku celin isla liiska; marka hore hubi xisaabta."
+                )
+                exc.partial_import = True
+            raise
+
+        send_whatsapp(
+            admin_phone,
+            f"✅ Import-ka lacag-bixinta waa dhammaaday.\n"
+            f"Lacag-bixin la diiwaangeliyay: {saved}\n"
+            f"Wadarta lacagta: ${sum(float(x['amount']) for x in entries):.2f}\n"
+            "Lacagaha waxaa laga jaray deymaha dukaanka la doortay."
+        )
+        return
+
     added = 0
     skipped = 0
     for item in entries:
@@ -1214,6 +1299,9 @@ async def whatsapp_webhook(request: Request):
         if sender_phone != str(OWNER_PHONE).replace("+", "").strip() or sender_phone not in IMPORT_SESSIONS:
             send_whatsapp(sender_phone, "Faylkan lama soo gelin karo ilaa aad marka hore dirto *IMPORT 252...*.")
             return {"status": "import_session_required"}
+        if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
+            send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
+            return {"status": "import_mode_required"}
         try:
             doc = message_data.get("fileMessageData", {})
             filename = str(doc.get("fileName") or "")
@@ -1229,7 +1317,11 @@ async def whatsapp_webhook(request: Request):
                 frame = pd.read_excel(BytesIO(response.content))
             columns = {str(c).strip().lower(): c for c in frame.columns}
             name_col = columns.get("name") or columns.get("customer") or columns.get("customer name")
-            amount_col = columns.get("amount") or columns.get("debt")
+            amount_col = (
+                columns.get("amount") or columns.get("debt")
+                or columns.get("payment") or columns.get("paid amount")
+                or columns.get("paid_amount")
+            )
             if not name_col or not amount_col:
                 raise ValueError("Faylku waa inuu leeyahay Name iyo Amount columns.")
             due_col = next((columns[k] for k in ("due", "due date", "due_date", "promised_date") if k in columns), None)
@@ -1242,7 +1334,7 @@ async def whatsapp_webhook(request: Request):
             entries = _validate_import_entries(raw)
             IMPORT_SESSIONS[sender_phone]["entries"] = entries
             IMPORT_SESSIONS[sender_phone]["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
-            _stage_import(sender_phone, entries)
+            _stage_import(sender_phone, entries, IMPORT_SESSIONS[sender_phone].get("mode", "debt"))
             return {"status": "import_preview_ready", "count": len(entries)}
         except Exception as exc:
             print(f"❌ Import document error: {type(exc).__name__}: {exc}")
@@ -1251,8 +1343,11 @@ async def whatsapp_webhook(request: Request):
 
     if type_message == "imageMessage":
         if sender_phone != str(OWNER_PHONE).replace("+", "").strip() or sender_phone not in IMPORT_SESSIONS:
-            send_whatsapp(sender_phone, "Sawir liis deyn ah soo geli kadib marka aad dirto *IMPORT 252...*.")
+            send_whatsapp(sender_phone, "Sawir liis ah soo geli kadib marka aad dirto *IMPORT 252...*.")
             return {"status": "import_session_required"}
+        if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
+            send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
+            return {"status": "import_mode_required"}
         try:
             image_data = message_data.get("imageMessageData") or message_data.get("fileMessageData", {})
             download_url = image_data.get("downloadUrl")
@@ -1261,10 +1356,11 @@ async def whatsapp_webhook(request: Request):
             image_response = requests.get(download_url, timeout=30)
             image_response.raise_for_status()
             mime = image_data.get("mimeType") or "image/jpeg"
-            entries = _extract_import_image(image_response.content, mime)
+            import_mode = IMPORT_SESSIONS[sender_phone].get("mode", "debt")
+            entries = _extract_import_image(image_response.content, mime, import_mode)
             IMPORT_SESSIONS[sender_phone]["entries"] = entries
             IMPORT_SESSIONS[sender_phone]["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
-            _stage_import(sender_phone, entries)
+            _stage_import(sender_phone, entries, import_mode)
             return {"status": "import_image_preview_ready", "count": len(entries)}
         except Exception as exc:
             print(f"❌ Import image error: {type(exc).__name__}: {exc}")
@@ -1311,7 +1407,11 @@ async def whatsapp_webhook(request: Request):
                 return {"status": "import_confirmed"}
             except Exception as exc:
                 print(f"❌ Import commit error: {type(exc).__name__}: {exc}")
-                send_whatsapp(sender_phone, "❌ Kaydintu way fashilantay. Waxba ha ku celin ilaa la hubiyo Supabase logs.")
+                if getattr(exc, "partial_import", False):
+                    IMPORT_SESSIONS.pop(sender_phone, None)
+                    send_whatsapp(sender_phone, "❌ Qayb ka mid ah import-ka waa la kaydiyey. Fadlan hubi liiska deymaha iyo lacag-bixinnada ka hor intaadan mar kale soo gelin.")
+                else:
+                    send_whatsapp(sender_phone, f"❌ Import lama dhammeystirin: {str(exc)[:250]}\nWaxba lama beddelin haddii khaladku dhacay intaan kaydintu bilaaban. Sax liiska ama qor *CANCEL*.")
                 return {"status": "import_commit_error"}
         match = re.fullmatch(r"\s*IMPORT\s+(\+?\d{8,15})\s*", import_text, re.I)
         if match:
@@ -1328,9 +1428,9 @@ async def whatsapp_webhook(request: Request):
                     send_whatsapp(sender_phone, "❌ Dukaankan lama ansixin. Import lama bilaabi karo.")
                     return {"status": "import_shop_not_approved"}
                 IMPORT_SESSIONS[sender_phone] = {"business_user_id": shop["id"], "shop_phone": target_phone,
-                    "shop_name": shop.get("name") or target_phone, "entries": None,
+                    "shop_name": shop.get("name") or target_phone, "entries": None, "mode": None,
                     "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL}
-                send_whatsapp(sender_phone, f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\nHadda ii soo dir hal ama dhowr deyn oo qoraal ah, Excel/CSV, ama sawirka liiska.\nMarkaad hubiso liiska, soo qor *OK* si loo kaydiyo.\nHaddii aad rabto inaad joojiso, soo qor *CANCEL*.")
+                send_whatsapp(sender_phone, f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\n\nMaxaad rabtaa inaad soo geliso?\n*DEYN* — deymo cusub.\n*LACAG BIXIN* — lacagaha laga bixiyay deymaha jira.\n\nKadib ii soo dir qoraal, Excel/CSV ama sawir.\nHubi hordhaca, kadib qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
                 return {"status": "import_shop_selected"}
             except Exception as exc:
                 print(f"❌ Import shop lookup error: {exc}")
@@ -1342,15 +1442,31 @@ async def whatsapp_webhook(request: Request):
                 IMPORT_SESSIONS.pop(sender_phone, None)
                 send_whatsapp(sender_phone, "Waqtigii import-ka wuu dhammaaday. Bilow mar kale: IMPORT 252...")
                 return {"status": "import_expired"}
+            mode_choice = normalize_customer_name(import_text)
+            if mode_choice in {"deyn", "dayn", "deyn cusub", "dayn cusub"}:
+                active_import["mode"] = "debt"
+                active_import["entries"] = None
+                active_import["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
+                send_whatsapp(sender_phone, "✅ Waxaad dooratay *DEYN*. Hadda soo dir liiska deynta qoraal ahaan, Excel/CSV ama sawir ahaan.")
+                return {"status": "import_mode_debt_selected"}
+            if mode_choice in {"lacag bixin", "lacag bixinta", "payment", "payments", "bixin"}:
+                active_import["mode"] = "payment"
+                active_import["entries"] = None
+                active_import["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
+                send_whatsapp(sender_phone, "✅ Waxaad dooratay *LACAG BIXIN*. Soo dir magacyada macaamiisha iyo lacagta ay bixiyeen, qoraal ahaan, Excel/CSV ama sawir ahaan. Lacagtu waxay ka go'aysaa deynta hadda u furan.")
+                return {"status": "import_mode_payment_selected"}
+            if active_import.get("mode") not in {"debt", "payment"}:
+                send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
+                return {"status": "import_mode_required"}
             if re.fullmatch(r"\s*OK\s*", import_text, re.I):
                 pass
             else:
                 try:
-                    entries = _extract_import_text(import_text)
+                    entries = _extract_import_text(import_text, active_import.get("mode", "debt"))
                     active_import["entries"] = entries
                     active_import["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
-                    _stage_import(sender_phone, entries)
-                    return {"status": "import_text_preview_ready", "count": len(entries)}
+                    _stage_import(sender_phone, entries, active_import.get("mode", "debt"))
+                    return {"status": "import_text_preview_ready", "count": len(entries), "mode": active_import.get("mode", "debt")}
                 except Exception as exc:
                     print(f"❌ Import text parse error: {type(exc).__name__}: {exc}")
                     send_whatsapp(sender_phone, "❌ Liiska si sax ah looma akhrin karin. Fadlan caddee magacyada iyo lacagaha, dabadeed mar kale soo dir.")
@@ -3292,14 +3408,19 @@ async def evening_checkin(request: Request):
             )
             payments = payments_result.data or []
 
+            # Inactivity has its own separate reminder. Do not send an empty
+            # evening report as well, otherwise the user receives two messages.
+            if not new_debts and not payments:
+                skipped_count += 1
+                print(f"⏭️ Evening report skipped: no activity for user={business_user_id}")
+                continue
+
             lines = ["🌙 *Natiijada maanta*"]
             if name:
                 lines.append(f"👤 *{name}*")
             lines.append("")
 
-            if not new_debts and not payments:
-                lines.append("Maanta lama diiwaangelin deyn cusub ama lacag-bixin.")
-            else:
+            if new_debts or payments:
                 if new_debts:
                     lines.append("🆕 *Deymaha cusub maanta:*")
                     for debt in new_debts[:40]:
@@ -3392,10 +3513,10 @@ async def inactivity_checkin(request: Request):
         return {"status": "database_error"}
 
     message = (
-        "🌙 *Xusuusin*\n"
-        "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\n"
-        "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\n"
-        "Haddii ay jiraan, ii soo dir si aan diiwaankaaga u cusboonaysiiyo.\n"
+        "🌙 *Xusuusin*\n\n"
+        "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\n\n"
+        "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\n\n"
+        "Haddii ay jiraan, ii soo dir si aan diiwaankaaga u cusboonaysiiyo.\n\n"
         "Mahadsanid! 🤝"
     )
 
