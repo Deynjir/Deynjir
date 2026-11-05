@@ -43,6 +43,8 @@ LAST_HISTORY_REQUESTS = {}
 # Temporary manual reminder workflow. Sessions expire after 15 minutes and are
 # cleared before sending so a repeated "HAA DIR" cannot resend the same batch.
 REMINDER_SESSIONS = {}
+# Two-step customer-name correction sessions (sender -> shop/name/stage).
+RENAME_SESSIONS = {}
 REMINDER_SESSION_TTL = timedelta(minutes=15)
 # Admin-assisted imports are staged for preview and explicit confirmation.
 IMPORT_SESSIONS = {}
@@ -131,29 +133,32 @@ def format_reminder_list(customers, missing_phone_count=0):
             f"ℹ️ {missing_phone_count} Lanbarkan ma saxna ama laguma isticmaalo WhatsApp.",
         ])
     return "\n".join(lines)
-def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone):
+def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone, is_repeat=False):
     name = str(debtor.get("name") or "Macmiil").strip()
     balance = float(debtor.get("amount") or 0)
 
+    # First reminder keeps the original wording. Second and later reminders
+    # use the shorter message and the current outstanding balance.
+    if is_repeat:
+        return (
+            f"Asc {name},\n\n"
+            f"Waxaad weli lagugu leeyahay *${balance:.2f}*.\n\n"
+            "Fadlan soo bixi lacagta. Mahadsanid."
+        )
+
     shopkeeper_name = str(shopkeeper_name or "").strip()
     shopkeeper_phone = str(shopkeeper_phone or "").strip()
-
     sender = (
         f"{shopkeeper_name} (+{shopkeeper_phone})"
-        if shopkeeper_name
-        else f"+{shopkeeper_phone}"
+        if shopkeeper_name else f"+{shopkeeper_phone}"
     )
-
     return (
-    f"Asc {name},\n\n"
-
-    f"Waxaan si xushmad leh kuu xusuusinayaa in aad soo bixiso "
-    f"lacagtii daynta ahayd oo dhan: *${balance:.2f}*.\n\n"
-
-    f"Fariintan waxaa kuu soo diray *{sender}*.\n\n"
-
-    f"Fadlan sida ugu dhakhsaha badan u bixi lacagta.  Mahadsanid."
-)
+        f"Asc {name},\n\n"
+        f"Waxaan si xushmad leh kuu xusuusinayaa in aad soo bixiso "
+        f"lacagtii daynta ahayd oo dhan: *${balance:.2f}*.\n\n"
+        f"Fariintan waxaa kuu soo diray *{sender}*.\n\n"
+        "Fadlan sida ugu dhakhsaha badan u bixi lacagta.  Mahadsanid."
+    )
 
 
 # Securely load credentials from Render's Environment panel variables
@@ -559,6 +564,16 @@ def parse_customer_rename_command(message_text):
     return None
 
 
+def parse_sax_name_only(message_text):
+    """Return the old customer name for a two-step SAX command, if supplied."""
+    raw = " ".join(str(message_text or "").strip().split())
+    match = re.match(r"^(?:sax|edit\s+name)\s+(.+?)\s*[.!]?$", raw, re.IGNORECASE)
+    if not match or re.search(r"(?:->|=>|\bto\b|\bku\s+bedel\b|\bu\s+bedel\b)", raw, re.I):
+        return None
+    old_name = match.group(1).strip(" \t,;:-")
+    return old_name or None
+
+
 def message_has_explicit_amount_for_name(message_text, customer_name):
     """Return whether the user's own message states an amount for this name.
 
@@ -799,7 +814,7 @@ def is_fuzzy_debt_list_command(message_text):
     raw = str(message_text or "").casefold().strip()
     raw = unicodedata.normalize("NFKD", raw)
     raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
-    raw = re.sub(r"[^\\w\s]", " ", raw)
+    raw = re.sub(r"[^\w\s]", " ", raw)
     words = raw.split()
 
     known_commands = [
@@ -1038,7 +1053,7 @@ def ask_for_full_name(sender_phone, matches, action):
     message = "⚠️ Waxaan helay macaamiil isku magac ah:\n\n"
 
     for number, debtor in enumerate(matches, start=1):
-        due_date = debtor.get("promised_date") or ""
+        due_date = debtor.get("promised_date") or "lama gelin"
         message += (
             f"{number}. {debtor['name']} — "
             f"${debtor['amount']} — Ballan: {due_date}\n"
@@ -1220,6 +1235,60 @@ def _stage_import(admin_phone, entries, import_mode="debt"):
     send_whatsapp(admin_phone, "\n".join(lines))
 
 
+def _import_duplicate_groups(business_user_id, entries):
+    """Find possible repeated unpaid debts, ignoring due date by design.
+
+    The user decides whether same-name/same-amount rows are one debt or
+    separate debts. Existing unpaid rows are included in the same check.
+    """
+    groups = {}
+    for index, item in enumerate(entries):
+        key = (normalize_customer_name(item.get("name")), round(float(item.get("amount") or 0), 2))
+        groups.setdefault(key, []).append(index)
+
+    existing_result = (supabase.table("customers")
+        .select("id, name, amount, promised_date")
+        .eq("business_user_id", business_user_id)
+        .eq("is_paid", False).execute())
+    existing_rows = existing_result.data or []
+    duplicates = []
+    for key, indexes in groups.items():
+        existing_matches = [row for row in existing_rows
+            if normalize_customer_name(row.get("name")) == key[0]
+            and round(float(row.get("amount") or 0), 2) == key[1]]
+        if len(indexes) > 1 or existing_matches:
+            duplicates.append({
+                "key": key,
+                "indexes": indexes,
+                "existing": existing_matches,
+                "name": entries[indexes[0]]["name"],
+                "amount": float(entries[indexes[0]]["amount"]),
+            })
+    return duplicates
+
+
+def _apply_import_duplicate_choice(session, choice):
+    """Apply 1=keep one / 2=save all possible duplicates."""
+    entries = list(session.get("entries") or [])
+    groups = session.get("duplicate_groups") or []
+    if choice == "2":
+        session["duplicate_choice"] = "2"
+        return
+
+    drop_indexes = set()
+    for group in groups:
+        indexes = group.get("indexes") or []
+        # If an identical unpaid debt already exists, keep that existing row
+        # and do not add another import row for this duplicate group.
+        if group.get("existing"):
+            drop_indexes.update(indexes)
+        elif len(indexes) > 1:
+            drop_indexes.update(indexes[1:])
+    session["entries"] = [item for i, item in enumerate(entries) if i not in drop_indexes]
+    session["pre_skipped"] = len(drop_indexes)
+    session["duplicate_choice"] = "1"
+
+
 def _commit_import(admin_phone, session):
     entries = session["entries"]
     business_user_id = session["business_user_id"]
@@ -1322,16 +1391,18 @@ def _commit_import(admin_phone, session):
         return
 
     added = 0
-    skipped = 0
+    skipped = int(session.get("pre_skipped", 0) or 0)
     for item in entries:
-        # Conservative duplicate guard: don't re-add an identical unpaid debt for the same shop.
-        existing = (supabase.table("customers").select("id")
-            .eq("business_user_id", business_user_id)
-            .eq("name", item["name"]).eq("amount", item["amount"])
-            .eq("is_paid", False).limit(1).execute())
-        if existing.data:
-            skipped += 1
-            continue
+        # Possible duplicates are explicitly resolved by the user before commit.
+        # Choice 2 means the user confirmed that repeated rows are separate debts.
+        if session.get("duplicate_choice") != "2":
+            existing = (supabase.table("customers").select("id")
+                .eq("business_user_id", business_user_id)
+                .eq("name", item["name"]).eq("amount", item["amount"])
+                .eq("is_paid", False).limit(1).execute())
+            if existing.data:
+                skipped += 1
+                continue
         row = {"business_user_id": business_user_id, "name": item["name"],
                "amount": item["amount"], "original_amount": item["amount"],
                "promised_date": item["promised_date"], "phone_number": item["phone_number"],
@@ -1477,6 +1548,9 @@ async def whatsapp_webhook(request: Request):
                     "phone_number": row[phone_col] if phone_col else None})
             entries = _validate_import_entries(raw)
             IMPORT_SESSIONS[sender_phone]["entries"] = entries
+            IMPORT_SESSIONS[sender_phone].pop("duplicate_choice", None)
+            IMPORT_SESSIONS[sender_phone].pop("duplicate_groups", None)
+            IMPORT_SESSIONS[sender_phone]["stage"] = "ready"
             IMPORT_SESSIONS[sender_phone]["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
             _stage_import(sender_phone, entries, IMPORT_SESSIONS[sender_phone].get("mode", "debt"))
             return {"status": "import_preview_ready", "count": len(entries)}
@@ -1503,6 +1577,9 @@ async def whatsapp_webhook(request: Request):
             import_mode = IMPORT_SESSIONS[sender_phone].get("mode", "debt")
             entries = _extract_import_image(image_response.content, mime, import_mode)
             IMPORT_SESSIONS[sender_phone]["entries"] = entries
+            IMPORT_SESSIONS[sender_phone].pop("duplicate_choice", None)
+            IMPORT_SESSIONS[sender_phone].pop("duplicate_groups", None)
+            IMPORT_SESSIONS[sender_phone]["stage"] = "ready"
             IMPORT_SESSIONS[sender_phone]["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
             _stage_import(sender_phone, entries, import_mode)
             return {"status": "import_image_preview_ready", "count": len(entries)}
@@ -1551,6 +1628,21 @@ async def whatsapp_webhook(request: Request):
             IMPORT_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, "✅ Import waa la joojiyey. Waxba lama kaydin.")
             return {"status": "import_cancelled"}
+        session_for_choice = IMPORT_SESSIONS.get(sender_phone)
+        if session_for_choice and session_for_choice.get("stage") == "duplicate_choice":
+            if re.fullmatch(r"\s*2\s*", import_text):
+                _apply_import_duplicate_choice(session_for_choice, "2")
+                session_for_choice["stage"] = "ready"
+                send_whatsapp(sender_phone, "✅ Labada deyn waa la kala gelinayaa. Hadda qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
+                return {"status": "import_duplicates_confirmed_separate"}
+            if re.fullmatch(r"\s*1\s*", import_text):
+                _apply_import_duplicate_choice(session_for_choice, "1")
+                session_for_choice["stage"] = "ready"
+                send_whatsapp(sender_phone, "✅ Hal deyn oo keliya ayaa la haynayaa. Hadda qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
+                return {"status": "import_duplicates_confirmed_single"}
+            send_whatsapp(sender_phone, "Jawaab *2* si labada deyn loo geliyo, ama *1* si hal keliya loo hayo. *CANCEL* si loo joojiyo.")
+            return {"status": "awaiting_import_duplicate_choice"}
+
         if re.fullmatch(r"\s*OK\s*", import_text, re.I):
             session = IMPORT_SESSIONS.get(sender_phone)
             if not session or not session.get("entries"):
@@ -1561,6 +1653,23 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(sender_phone, "Waqtigii import-ka wuu dhammaaday. Bilow mar kale: IMPORT 252...")
                 return {"status": "import_expired"}
             try:
+                if session.get("mode", "debt") == "debt" and session.get("duplicate_choice") is None:
+                    duplicate_groups = _import_duplicate_groups(session["business_user_id"], session["entries"])
+                    if duplicate_groups:
+                        session["duplicate_groups"] = duplicate_groups
+                        session["stage"] = "duplicate_choice"
+                        session["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
+                        lines = ["⚠️ *Deyn isku mid ah ayaa la helay:*", ""]
+                        for group in duplicate_groups[:8]:
+                            lines.append(f"• {group['name']} — ${group['amount']:.2f}")
+                            for idx in group["indexes"][:4]:
+                                item = session["entries"][idx]
+                                lines.append(f"  Taariikh: {item.get('promised_date') or 'Lama sheegin'}")
+                            if group.get("existing"):
+                                lines.append("  Deyn noocan ah hore ayay dukaanka ugu jirtaa.")
+                        lines.extend(["", "*2* — Deymaha kala duwan labadaba geli.", "*1* — Hal deyn keliya hay.", "*CANCEL* — Jooji import-ka."])
+                        send_whatsapp(sender_phone, "\n".join(lines))
+                        return {"status": "import_duplicate_choice_required", "groups": len(duplicate_groups)}
                 _commit_import(sender_phone, session)
                 IMPORT_SESSIONS.pop(sender_phone, None)
                 return {"status": "import_confirmed"}
@@ -1659,6 +1768,9 @@ async def whatsapp_webhook(request: Request):
                 try:
                     entries = _extract_import_text(import_text, active_import.get("mode", "debt"))
                     active_import["entries"] = entries
+                    active_import.pop("duplicate_choice", None)
+                    active_import.pop("duplicate_groups", None)
+                    active_import["stage"] = "ready"
                     active_import["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
                     _stage_import(sender_phone, entries, active_import.get("mode", "debt"))
                     return {"status": "import_text_preview_ready", "count": len(entries), "mode": active_import.get("mode", "debt")}
@@ -1745,6 +1857,78 @@ async def whatsapp_webhook(request: Request):
     except Exception as db_err:
         print(f"❌ DATABASE ERROR (Business User Lookup): {db_err}")
         return {"status": "business_user_db_error"}
+
+    # Two-step SAX flow. Explicit "SAX old -> new" continues through the
+    # existing immediate-rename path; "SAX old" asks for the corrected name.
+    rename_state = RENAME_SESSIONS.get(sender_phone)
+    if rename_state and rename_state.get("business_user_id") == business_user_id:
+        if datetime.now(timezone.utc) > rename_state.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
+            RENAME_SESSIONS.pop(sender_phone, None)
+            rename_state = None
+        elif re.fullmatch(r"\s*(?:cancel|jooji)\s*", str(message_text or ""), re.I):
+            RENAME_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "✅ Saxidda magaca waa la joojiyey.")
+            return {"status": "rename_cancelled"}
+        elif rename_state.get("stage") == "new_name":
+            proposed = str(message_text or "").strip()
+            if len(proposed) < 2 or len(proposed) > 120:
+                send_whatsapp(sender_phone, "Magaca cusub si sax ah u qor, ama CANCEL.")
+                return {"status": "rename_new_name_invalid"}
+            rename_state["new_name"] = proposed
+            rename_state["stage"] = "confirm"
+            rename_state["expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=10)
+            send_whatsapp(sender_phone, f"Hubi magaca cusub:\n\nHore: *{rename_state['old_name']}*\nCusub: *{proposed}*\n\nQor *OK* si loo beddelo ama *CANCEL* si loo joojiyo.")
+            return {"status": "rename_confirmation_required"}
+        elif rename_state.get("stage") == "confirm":
+            if re.fullmatch(r"\s*OK\s*", str(message_text or ""), re.I):
+                old_name = rename_state["old_name"]
+                new_name = rename_state["new_name"]
+                try:
+                    collision = (supabase.table("customers").select("id, name")
+                        .eq("business_user_id", business_user_id).eq("name", new_name).limit(1).execute())
+                    if collision.data and normalize_customer_name(collision.data[0].get("name")) != normalize_customer_name(old_name):
+                        send_whatsapp(sender_phone, f"⚠️ Magaca *{new_name}* hore ayuu dukaanka uga jiraa. Magaca lama beddelin.")
+                        RENAME_SESSIONS.pop(sender_phone, None)
+                        return {"status": "rename_name_collision"}
+                    updated = (supabase.table("customers").update({"name": new_name})
+                        .eq("business_user_id", business_user_id).eq("name", old_name).select("id").execute())
+                    RENAME_SESSIONS.pop(sender_phone, None)
+                    if not updated.data:
+                        send_whatsapp(sender_phone, "❌ Magaca lama helin ama lama beddelin.")
+                        return {"status": "rename_no_rows"}
+                    send_whatsapp(sender_phone, f"✅ Magaca waa la saxay: *{old_name}* → *{new_name}*\nDiiwaannada la cusboonaysiiyay: {len(updated.data)}")
+                    return {"status": "rename_confirmed", "updated": len(updated.data)}
+                except Exception as exc:
+                    print(f"❌ Two-step rename failed: {exc}")
+                    send_whatsapp(sender_phone, "❌ Magaca lama beddelin. Mar kale isku day.")
+                    return {"status": "rename_error"}
+            send_whatsapp(sender_phone, "Qor *OK* si loo beddelo ama *CANCEL* si loo joojiyo.")
+            return {"status": "rename_waiting_confirmation"}
+
+    sax_old_name = parse_sax_name_only(message_text)
+    if sax_old_name:
+        try:
+            sax_matches = find_debtor_matches(business_user_id, sax_old_name)
+            if not sax_matches:
+                send_whatsapp(sender_phone, f"❌ Lama helin qofka *{sax_old_name}*. Hubi magaca.")
+                return {"status": "rename_customer_not_found"}
+            distinct = {str(row.get("name") or "").strip() for row in sax_matches}
+            if len(distinct) != 1:
+                send_whatsapp(sender_phone, "Magaca si cad looma kala saari karin. Fadlan qor magaca oo buuxa.")
+                return {"status": "rename_name_ambiguous"}
+            old_stored_name = next(iter(distinct))
+            RENAME_SESSIONS[sender_phone] = {
+                "business_user_id": business_user_id,
+                "old_name": old_stored_name,
+                "stage": "new_name",
+                "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+            }
+            send_whatsapp(sender_phone, f"Magaca cusub ee *{old_stored_name}* waa maxay?\nQor magaca cusub ama *CANCEL*.")
+            return {"status": "rename_new_name_requested"}
+        except Exception as exc:
+            print(f"❌ SAX lookup failed: {exc}")
+            send_whatsapp(sender_phone, "❌ Magaca lama hubin karin. Mar kale isku day.")
+            return {"status": "rename_lookup_error"}
 
     # A pending transaction clarification is persisted in Supabase so it survives
     # Render restarts. The original message is replayed only after a clear answer.
@@ -1972,12 +2156,27 @@ async def whatsapp_webhook(request: Request):
                                     "(deyn la bixiyay/lambar maqan)."
                                 )
                             else:
+                                # Persistent reminder history distinguishes first from repeat reminders.
+                                # Requires the customer_reminder_history table documented in the deployment notes.
+                                reminder_count = 0
+                                try:
+                                    history_result = (supabase.table("customer_reminder_history")
+                                        .select("id", count="exact")
+                                        .eq("business_user_id", business_user_id)
+                                        .eq("customer_key", normalize_customer_name(fresh.get("name")))
+                                        .execute())
+                                    reminder_count = int(getattr(history_result, "count", 0) or len(history_result.data or []))
+                                except Exception as history_err:
+                                    print(f"❌ Reminder history lookup failed for customer {fresh.get('id')}: {history_err}")
+                                    raise RuntimeError("customer_reminder_history table is missing or unavailable")
+
                                 send_ok = send_whatsapp(
                                     target_phone,
                                     build_debt_reminder(
                                         fresh,
                                         business_user.get("name"),
                                         business_user.get("phone_number") or sender_phone,
+                                        is_repeat=(reminder_count >= 1),
                                     ),
                                 )
 
@@ -1985,6 +2184,10 @@ async def whatsapp_webhook(request: Request):
                                     failed_count += 1
                                     status_message = "Xusuusintan lama dirin."
                                 else:
+                                    supabase.table("customer_reminder_history").insert({
+                                        "business_user_id": business_user_id,
+                                        "customer_key": normalize_customer_name(fresh.get("name")),
+                                    }).execute()
                                     sent_count += 1
                                     status_message = "Fariinta xusuusinta waa la diray."
 
