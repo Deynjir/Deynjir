@@ -2099,8 +2099,14 @@ async def whatsapp_webhook(request: Request):
                 end_date = pending_payment_export["end_date"]
                 records = _load_shop_payments(business_user_id, start_date, end_date)
                 if not records:
-                    send_whatsapp(sender_phone, "Ma jiraan lacag-bixinno muddadaas.")
+                    export_status = "no_payments_for_period"
+                    period_label = pending_payment_export.get("period_label") or (
+                        start_date.strftime("%d/%m/%Y") if start_date == end_date
+                        else f"{start_date:%d/%m/%Y} – {end_date:%d/%m/%Y}"
+                    )
+                    send_whatsapp(sender_phone, f"Ma jiraan wax lacag bixin ah ({period_label}).")
                 else:
+                    export_status = "payment_export_sent"
                     if fmt == "excel":
                         content = _build_payment_excel(records, start_date, end_date)
                         filename = f"deynjir_lacag_bixin_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx"
@@ -2113,7 +2119,7 @@ async def whatsapp_webhook(request: Request):
                     send_whatsapp_file(sender_phone, filename, content, mime,
                         f"💵 Liiska lacag-bixinta: {start_date:%d/%m/%Y} – {end_date:%d/%m/%Y}\nWadarta: ${total:.2f}")
                 PAYMENT_EXPORT_SESSIONS.pop(sender_phone, None)
-                return {"status": "payment_export_sent", "format": fmt}
+                return {"status": export_status, "format": fmt}
             except Exception as exc:
                 print(f"❌ Payment export failed: {type(exc).__name__}: {exc}")
                 send_whatsapp(sender_phone, "❌ Warbixinta lama diyaarin. Hubi taariikhaha oo mar kale isku day.")
@@ -2159,10 +2165,32 @@ async def whatsapp_webhook(request: Request):
                 start_date = end_date = None
 
             if start_date and end_date:
+                # Check for matching payments BEFORE asking the user to choose
+                # Excel/PDF. This avoids creating an export session for an
+                # empty date/month/range.
+                records = _load_shop_payments(business_user_id, start_date, end_date)
+                if not records:
+                    if month_token and not range_start:
+                        period_label = f"{month_token.title()} {start_date.year}"
+                    elif start_date == end_date:
+                        period_label = start_date.strftime("%d/%m/%Y")
+                    else:
+                        period_label = f"{start_date:%d/%m/%Y} – {end_date:%d/%m/%Y}"
+                    PAYMENT_EXPORT_SESSIONS.pop(sender_phone, None)
+                    send_whatsapp(sender_phone, f"Ma jiraan wax lacag bixin ah ({period_label}).")
+                    return {"status": "no_payments_for_period", "start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
+
+                if month_token and not range_start:
+                    period_label = f"{month_token.title()} {start_date.year}"
+                elif start_date == end_date:
+                    period_label = start_date.strftime("%d/%m/%Y")
+                else:
+                    period_label = f"{start_date:%d/%m/%Y} – {end_date:%d/%m/%Y}"
                 PAYMENT_EXPORT_SESSIONS[sender_phone] = {
                     "business_user_id": business_user_id,
                     "start_date": start_date,
                     "end_date": end_date,
+                    "period_label": period_label,
                 }
                 send_whatsapp(sender_phone,
                     f"💵 *LIISKA LACAG BIXINTA*\n📅 {start_date:%d/%m/%Y} – {end_date:%d/%m/%Y}\n\n"
