@@ -1499,13 +1499,13 @@ def _commit_import(admin_phone, session):
     if skipped > 0:
     admin_confirmation = (
         f"⚠️ Liiska deynta qayb ahaan ayaa la diiwaangeliyey.\n\n"
-        f"✅ Macaamiil cusub oo lagu daray: {added}\n"
-        f"⏭️ Macaamiil hore u jiray oo laga booday: {skipped}\n\n"
-        f"Macaamiisha hore laguma darin systemka mar labaad."
+        f"✅ Macaamiisha cusub ee lagu daray: {added}\n"
+        f"⏭️ Macaamiil hore u jirtay oo laga booday: {skipped}\n\n"
+        f"Macaamiisha hore laguma darin system-ka mar labaad."
     )
 else:
     admin_confirmation = (
-        f"✅ Waad ku guulaysatay Diwaangelinta Daynta.\n\n"
+        f"✅ Waad ku Guulaysatay Diwaangelinta Deyntan.\n\n"
         f"👥 Tirada Macaamiisha cusub ee lagu daray: {added}"
     )
     send_whatsapp(admin_phone, admin_confirmation)
