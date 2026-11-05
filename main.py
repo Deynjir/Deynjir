@@ -60,7 +60,8 @@ PAYMENT_REPORT_MONTH_PATTERN = (
 )
 PAYMENT_REPORT_DATE_PATTERN = (
     r"\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|"
-    r"\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?"
+    r"\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?|"
+    r"[A-Za-z]+\s+\d{1,2}(?:,?\s+\d{4})?"
 )
 
 def is_payment_report_command(value):
@@ -68,7 +69,7 @@ def is_payment_report_command(value):
     text = " ".join(str(value or "").strip().split())
     return bool(re.fullmatch(
         rf"(?:liiska\s+)?lacag\s*bixinta(?:\s+(?:{PAYMENT_REPORT_MONTH_PATTERN}|"
-        rf"{PAYMENT_REPORT_DATE_PATTERN}\s*(?:-|ilaa|to)\s*{PAYMENT_REPORT_DATE_PATTERN}))?",
+        rf"(?:{PAYMENT_REPORT_DATE_PATTERN})(?:\s*(?:-|ilaa|to)\s*(?:{PAYMENT_REPORT_DATE_PATTERN}))?))?",
         text, re.I
     ))
 DEFAULT_COUNTRY_CODE = re.sub(r"\D", "", os.getenv("DEFAULT_COUNTRY_CODE", ""))
@@ -1931,7 +1932,7 @@ async def whatsapp_webhook(request: Request):
     # Command: LIISKA LACAG BIXINTA [NOV | 03/11/2026 - 07/11/2026]
     payment_list_match = re.fullmatch(
         rf"\s*(?:liiska\s+)?lacag\s*bixinta(?:\s+({PAYMENT_REPORT_MONTH_PATTERN}|"
-        rf"({PAYMENT_REPORT_DATE_PATTERN})\s*(?:-|ilaa|to)\s*({PAYMENT_REPORT_DATE_PATTERN})))?\s*",
+        rf"((?:{PAYMENT_REPORT_DATE_PATTERN}))(?:\s*(?:-|ilaa|to)\s*((?:{PAYMENT_REPORT_DATE_PATTERN})))?))?\s*",
         payment_text, re.I)
     if payment_list_match:
         try:
@@ -1955,7 +1956,10 @@ async def whatsapp_webhook(request: Request):
                     end_date = datetime(report_year, month_number + 1, 1).date() - timedelta(days=1)
             elif range_start:
                 start_date = _parse_payment_report_date(range_start)
-                end_date = _parse_payment_report_date(range_end, start_date.year)
+                end_date = (
+                    _parse_payment_report_date(range_end, start_date.year)
+                    if range_end else start_date
+                )
                 if end_date < start_date:
                     raise ValueError("Taariikhda dhammaadka ayaa ka horreysa bilowga")
             else:
@@ -3835,9 +3839,13 @@ def _parse_payment_report_date(raw, default_year=None):
         except ValueError:
             pass
     months = {"jan":1,"january":1,"feb":2,"february":2,"mar":3,"march":3,"apr":4,"april":4,"may":5,"jun":6,"june":6,"jul":7,"july":7,"aug":8,"august":8,"sep":9,"sept":9,"september":9,"oct":10,"october":10,"nov":11,"november":11,"dec":12,"december":12}
+    year = default_year or today_eat().year
     m = re.fullmatch(r"(\d{1,2})\s+([A-Za-z]+)(?:\s+(\d{4}))?", value)
     if m and m.group(2).lower() in months:
-        return datetime(int(m.group(3) or default_year or today_eat().year), months[m.group(2).lower()], int(m.group(1))).date()
+        return datetime(int(m.group(3) or year), months[m.group(2).lower()], int(m.group(1))).date()
+    m = re.fullmatch(r"([A-Za-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?", value)
+    if m and m.group(1).lower() in months:
+        return datetime(int(m.group(3) or year), months[m.group(1).lower()], int(m.group(2))).date()
     raise ValueError("Taariikhda lama fahmin")
 
 
