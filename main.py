@@ -1293,11 +1293,11 @@ async def whatsapp_webhook(request: Request):
     
     message_text = ""
     
-    # Import files only during an owner-started IMPORT session. Never auto-register
-    # the sender and never write rows before the owner confirms the preview.
+    # Import files are accepted only during an authenticated approved-user
+    # import session. Nothing is saved before the sender confirms with OK.
     if type_message == "documentMessage":
-        if sender_phone != str(OWNER_PHONE).replace("+", "").strip() or sender_phone not in IMPORT_SESSIONS:
-            send_whatsapp(sender_phone, "Faylkan lama soo gelin karo ilaa aad marka hore dirto *IMPORT 252...*.")
+        if sender_phone not in IMPORT_SESSIONS:
+            send_whatsapp(sender_phone, "Marka hore dir *IMPORT* si aad u bilowdo soo gelinta liiska.")
             return {"status": "import_session_required"}
         if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
             send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
@@ -1342,8 +1342,8 @@ async def whatsapp_webhook(request: Request):
             return {"status": "import_document_error"}
 
     if type_message == "imageMessage":
-        if sender_phone != str(OWNER_PHONE).replace("+", "").strip() or sender_phone not in IMPORT_SESSIONS:
-            send_whatsapp(sender_phone, "Sawir liis ah soo geli kadib marka aad dirto *IMPORT 252...*.")
+        if sender_phone not in IMPORT_SESSIONS:
+            send_whatsapp(sender_phone, "Marka hore dir *IMPORT* si aad u bilowdo soo gelinta sawirka.")
             return {"status": "import_session_required"}
         if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
             send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
@@ -1385,9 +1385,11 @@ async def whatsapp_webhook(request: Request):
     sender_phone = str(sender_phone).replace("+", "").split("@")[0].strip()
     owner_phone = str(OWNER_PHONE).replace("+", "").split("@")[0].strip()
 
-    # Owner-only shop selection and staged import workflow.
-    if sender_phone == owner_phone:
-        import_text = str(message_text or "").strip()
+    # Approved users import into their own shop with IMPORT. The owner may
+    # additionally select another approved shop using IMPORT +252... .
+    import_text = str(message_text or "").strip()
+    is_import_command = bool(re.fullmatch(r"\s*IMPORT(?:\s+\+?\d{8,15})?\s*", import_text, re.I))
+    if sender_phone == owner_phone or sender_phone in IMPORT_SESSIONS or is_import_command:
         if re.fullmatch(r"\s*CANCEL\s*", import_text, re.I) and sender_phone in IMPORT_SESSIONS:
             IMPORT_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, "✅ Import waa la joojiyey. Waxba lama kaydin.")
@@ -1413,7 +1415,43 @@ async def whatsapp_webhook(request: Request):
                 else:
                     send_whatsapp(sender_phone, f"❌ Import lama dhammeystirin: {str(exc)[:250]}\nWaxba lama beddelin haddii khaladku dhacay intaan kaydintu bilaaban. Sax liiska ama qor *CANCEL*.")
                 return {"status": "import_commit_error"}
+        # IMPORT without a phone number starts an import for the sender's own
+        # approved shop. Unknown or unapproved numbers are never auto-registered.
+        if re.fullmatch(r"\s*IMPORT\s*", import_text, re.I):
+            try:
+                own_shop_result = (supabase.table("business_users")
+                    .select("id, phone_number, name, approval_status")
+                    .eq("phone_number", sender_phone).limit(1).execute())
+                if not own_shop_result.data:
+                    send_whatsapp(sender_phone, "❌ Lambarkan dukaan kuma jiro Deynjir.")
+                    return {"status": "import_shop_not_found"}
+                own_shop = own_shop_result.data[0]
+                if own_shop.get("approval_status") != "approved":
+                    send_whatsapp(sender_phone, "❌ Dukaanka lama ansixin. Import lama bilaabi karo.")
+                    return {"status": "import_shop_not_approved"}
+                IMPORT_SESSIONS[sender_phone] = {
+                    "business_user_id": own_shop["id"], "shop_phone": sender_phone,
+                    "shop_name": own_shop.get("name") or sender_phone,
+                    "entries": None, "mode": None,
+                    "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
+                }
+                send_whatsapp(sender_phone,
+                    f"✅ Dukaanka waa la doortay: {own_shop.get('name') or sender_phone}.\n\n"
+                    "Maxaad rabtaa inaad soo geliso?\n"
+                    "*DEYN* — deymo cusub.\n"
+                    "*LACAG BIXIN* — lacagaha laga bixiyay deymaha jira.\n\n"
+                    "Kadib ii soo dir qoraal, Excel/CSV ama sawir.\n"
+                    "Hubi hordhaca, kadib qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
+                return {"status": "import_own_shop_selected"}
+            except Exception as exc:
+                print(f"❌ Own-shop import lookup error: {exc}")
+                send_whatsapp(sender_phone, "❌ Dukaanka lama hubin karin. Mar kale isku day.")
+                return {"status": "import_own_shop_lookup_error"}
+
         match = re.fullmatch(r"\s*IMPORT\s+(\+?\d{8,15})\s*", import_text, re.I)
+        if match and sender_phone != owner_phone:
+            send_whatsapp(sender_phone, "❌ Waxaad soo gelin kartaa oo keliya liiska dukaankaaga. Dir *IMPORT* adigoon number raacin.")
+            return {"status": "cross_shop_import_not_allowed"}
         if match:
             target_phone = match.group(1).replace("+", "")
             try:
