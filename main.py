@@ -4281,144 +4281,192 @@ async def daily_digest(request: Request):
     }
 
 
-@app.get("/cron/evening-checkin")
-async def evening_checkin(request: Request):
-    """Send a compact end-of-day activity summary to each business user."""
-    if not cron_authorized(request):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=401, detail="Unauthorized cron request")
+def _report_period_utc_boundaries(start_date, end_date):
+    """Convert inclusive EAT calendar dates into UTC [start, end) boundaries."""
+    start_local = datetime.combine(start_date, datetime.min.time(), tzinfo=EAT)
+    end_local = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=EAT)
+    return start_local.astimezone(timezone.utc).isoformat(), end_local.astimezone(timezone.utc).isoformat()
 
-    print("🌙 EVENING CHECK-IN STARTED")
-    today, start_iso, end_iso = _cron_date_boundaries()
 
-    sent_count = 0
-    skipped_count = 0
-    error_count = 0
+def _report_period_data(business_user_id, start_date, end_date):
+    """Load period activity and current outstanding balances for one shop."""
+    start_iso, end_iso = _report_period_utc_boundaries(start_date, end_date)
+    debts_result = (supabase.table("customers")
+        .select("id, name, amount, original_amount, promised_date, is_paid, created_at")
+        .eq("business_user_id", business_user_id)
+        .gte("created_at", start_iso).lt("created_at", end_iso).execute())
+    new_debts = debts_result.data or []
 
+    payments_result = (supabase.table("payments")
+        .select("id, amount, paid_at, customer_id")
+        .eq("business_user_id", business_user_id)
+        .gte("paid_at", start_iso).lt("paid_at", end_iso).execute())
+    payments = payments_result.data or []
+
+    current_result = (supabase.table("customers")
+        .select("id, amount, promised_date, is_paid")
+        .eq("business_user_id", business_user_id)
+        .eq("is_paid", False).execute())
+    current_open = [row for row in (current_result.data or []) if _safe_money(row.get("amount")) > 0]
+
+    today = today_eat()
+    overdue_count = 0
+    for row in current_open:
+        raw_due = row.get("promised_date")
+        if not raw_due:
+            continue
+        try:
+            due = datetime.strptime(str(raw_due)[:10], "%Y-%m-%d").date()
+            if due < today:
+                overdue_count += 1
+        except ValueError:
+            continue
+
+    new_debt_total = sum(_safe_money(row.get("original_amount") if row.get("original_amount") is not None else row.get("amount")) for row in new_debts)
+    payment_total = sum(_safe_money(row.get("amount")) for row in payments)
+    return {
+        "new_debt_total": new_debt_total,
+        "new_debt_count": len(new_debts),
+        "new_customer_count": len({str(row.get("name") or "").strip().casefold() for row in new_debts if str(row.get("name") or "").strip()}),
+        "payment_total": payment_total,
+        "payment_count": len(payments),
+        "net_change": new_debt_total - payment_total,
+        "outstanding_total": sum(_safe_money(row.get("amount")) for row in current_open),
+        "outstanding_count": len(current_open),
+        "overdue_count": overdue_count,
+    }
+
+
+def _format_business_activity_report(report_type, start_date, end_date, data, shop_name=None):
+    if report_type == "daily":
+        heading, period_label = "📊 *Warbixinta Maanta*", start_date.strftime("%d/%m/%Y")
+    elif report_type == "weekly":
+        heading = "📊 *Warbixinta Toddobaadka*"
+        period_label = f"{start_date.strftime('%d/%m/%Y')} – {end_date.strftime('%d/%m/%Y')}"
+    else:
+        somali_months = ["Janaayo", "Febraayo", "Maarso", "Abriil", "Maajo", "Juun", "Luulyo", "Agoosto", "Sebtembar", "Oktoobar", "Nofeembar", "Diseembar"]
+        heading, period_label = "📊 *Warbixinta Bisha*", f"{somali_months[start_date.month - 1]} {start_date.year}"
+
+    lines = [heading, f"📅 {period_label}"]
+    if shop_name:
+        lines.append(f"🏪 {shop_name}")
+    lines.extend([
+        "",
+        f"🆕 Deyn cusub: *${data['new_debt_total']:.2f}* ({data['new_debt_count']} diiwaan)",
+        f"👥 Macaamiil deyn cusub qaatay: *{data['new_customer_count']}*",
+        f"💵 Lacag la bixiyey: *${data['payment_total']:.2f}* ({data['payment_count']} lacag-bixin)",
+        f"📈 Farqiga: *{'+' if data['net_change'] >= 0 else '-'}${abs(data['net_change']):.2f}*",
+        "",
+        f"📒 Daynta hadda taagan: *${data['outstanding_total']:.2f}*",
+        f"👤 Macaamiisha weli lagu leeyahay: *{data['outstanding_count']}*",
+        f"⚠️ Ballamaha dhaafay: *{data['overdue_count']}*",
+    ])
+    if data["new_debt_count"] == 0 and data["payment_count"] == 0:
+        lines.extend(["", "Ma jirin deyn cusub ama lacag-bixin muddadan."])
+    return "\n".join(lines)
+
+
+def _reserve_report_send(business_user_id, report_type, start_date, end_date):
+    """Reserve a unique period; cron_report_logs has a unique period constraint."""
+    payload = {
+        "business_user_id": str(business_user_id), "report_type": report_type,
+        "period_start": start_date.isoformat(), "period_end": end_date.isoformat(),
+    }
+    result = supabase.table("cron_report_logs").insert(payload).select("id").execute()
+    return bool(result.data)
+
+
+def _release_report_reservation(business_user_id, report_type, start_date, end_date):
     try:
-        users_result = (
-            supabase.table("business_users")
-            .select("id, phone_number, name")
-            .execute()
-        )
-        users = users_result.data or []
-        print(f"👥 Business users found: {len(users)}")
-    except Exception as e:
-        print(f"❌ EVENING CHECK-IN database error loading business users: {type(e).__name__}: {e}")
-        return {"status": "database_error"}
+        (supabase.table("cron_report_logs").delete()
+         .eq("business_user_id", str(business_user_id)).eq("report_type", report_type)
+         .eq("period_start", start_date.isoformat()).eq("period_end", end_date.isoformat()).execute())
+    except Exception as exc:
+        print(f"⚠️ Could not release report reservation: {type(exc).__name__}: {exc}")
+
+
+async def _send_period_report(report_type, start_date, end_date):
+    sent_count = skipped_count = error_count = 0
+    users_result = (supabase.table("business_users")
+        .select("id, phone_number, name").eq("approval_status", "approved").execute())
+    users = users_result.data or []
+    print(f"👥 {report_type.upper()} report: approved shops={len(users)}")
 
     for user in users:
         business_user_id = user.get("id")
         phone = str(user.get("phone_number") or "").strip()
-        name = str(user.get("name") or "").strip()
-
+        shop_name = str(user.get("name") or "").strip()
         if not business_user_id or not phone:
             skipped_count += 1
             continue
-
+        reserved = False
         try:
-            # Load today's customers once. This avoids one Supabase request per payment.
-            customers_result = (
-                supabase.table("customers")
-                .select("id, name, amount, created_at")
-                .eq("business_user_id", business_user_id)
-                .execute()
-            )
-            customers = customers_result.data or []
-            customer_by_id = {str(row.get("id")): row for row in customers}
-
-            new_debts = []
-            for customer in customers:
-                created_at = customer.get("created_at")
-                if created_at and start_iso <= str(created_at) < end_iso:
-                    new_debts.append(customer)
-
-            payments_result = (
-                supabase.table("payments")
-                .select("amount, paid_at, customer_id")
-                .eq("business_user_id", business_user_id)
-                .gte("paid_at", start_iso)
-                .lt("paid_at", end_iso)
-                .execute()
-            )
-            payments = payments_result.data or []
-
-            # Inactivity has its own separate reminder. Do not send an empty
-            # evening report as well, otherwise the user receives two messages.
-            if not new_debts and not payments:
+            reserved = _reserve_report_send(business_user_id, report_type, start_date, end_date)
+            if not reserved:
                 skipped_count += 1
-                print(f"⏭️ Evening report skipped: no activity for user={business_user_id}")
+                print(f"⏭️ Duplicate {report_type} report skipped: shop={business_user_id}")
                 continue
-
-            lines = ["🌙 *Natiijada maanta*"]
-            if name:
-                lines.append(f"👤 *{name}*")
-            lines.append("")
-
-            if new_debts or payments:
-                if new_debts:
-                    lines.append("🆕 *Deymaha cusub maanta:*")
-                    for debt in new_debts[:40]:
-                        lines.append(
-                            f"• {debt.get('name') or 'Macmiil'}: "
-                            f"${_safe_money(debt.get('amount')):.2f}"
-                        )
-                    if len(new_debts) > 40:
-                        lines.append(f"• ➕ {len(new_debts) - 40} kale")
-
-                if payments:
-                    lines.append("")
-                    lines.append("💵 *Lacagihii maanta la helay:*")
-                    total_paid = 0.0
-                    for payment in payments[:40]:
-                        amount = _safe_money(payment.get("amount"))
-                        total_paid += amount
-                        customer = customer_by_id.get(str(payment.get("customer_id")), {})
-                        customer_name = customer.get("name") or "Macmiil"
-                        lines.append(f"• {customer_name}: ${amount:.2f}")
-                    if len(payments) > 40:
-                        lines.append(f"• ➕ {len(payments) - 40} kale")
-                    lines.append(f"*Wadarta lacagta la helay: ${sum(_safe_money(p.get('amount')) for p in payments):.2f}*")
-
-                if new_debts:
-                    total_new = sum(_safe_money(d.get("amount")) for d in new_debts)
-                    lines.append(f"\n*Wadarta deynta cusub: ${total_new:.2f}*")
-
-            lines.extend([
-                "",
-                "Si aad u diiwaangeliso deyn cusub ama lacag-bixin, ii soo dir magaca macmiilka iyo lacagta."
-            ])
-
-            ok = send_whatsapp(phone, "\n".join(lines))
-            if ok:
+            data = _report_period_data(business_user_id, start_date, end_date)
+            message = _format_business_activity_report(report_type, start_date, end_date, data, shop_name)
+            if send_whatsapp(phone, message):
                 sent_count += 1
-                print(
-                    f"✅ Evening check-in sent: user={business_user_id}, "
-                    f"new_debts={len(new_debts)}, payments={len(payments)}"
-                )
+                print(f"✅ {report_type} report sent: shop={business_user_id}, debts={data['new_debt_count']}/${data['new_debt_total']:.2f}, payments={data['payment_count']}/${data['payment_total']:.2f}")
             else:
                 error_count += 1
-                print(f"❌ Evening check-in WhatsApp failed: user={business_user_id}")
-
-        except Exception as e:
+                _release_report_reservation(business_user_id, report_type, start_date, end_date)
+                print(f"❌ {report_type} report WhatsApp failed: shop={business_user_id}")
+        except Exception as exc:
             error_count += 1
-            print(
-                f"❌ Evening check-in user failed: user={business_user_id}, "
-                f"{type(e).__name__}: {e}"
-            )
-            continue
+            if reserved:
+                _release_report_reservation(business_user_id, report_type, start_date, end_date)
+            print(f"❌ {report_type} report failed: shop={business_user_id}, {type(exc).__name__}: {exc}")
+    return {"sent": sent_count, "skipped": skipped_count, "errors": error_count}
 
-    print(
-        f"🏁 EVENING CHECK-IN FINISHED: sent={sent_count}, "
-        f"skipped={skipped_count}, errors={error_count}"
-    )
-    return {
-        "status": "done",
-        "sent": sent_count,
-        "skipped": skipped_count,
-        "errors": error_count,
-        "date": today.isoformat(),
-    }
+
+@app.get("/cron/evening-checkin")
+async def evening_checkin(request: Request):
+    """Send the daily business activity report at 20:00 Somalia time."""
+    if not cron_authorized(request):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Unauthorized cron request")
+    today = today_eat()
+    print(f"🌙 DAILY BUSINESS REPORT STARTED: {today.isoformat()}")
+    try:
+        result = await _send_period_report("daily", today, today)
+    except Exception as exc:
+        print(f"❌ DAILY REPORT failed to load shops: {type(exc).__name__}: {exc}")
+        return {"status": "database_error", "detail": str(exc)}
+    print(f"🏁 DAILY REPORT FINISHED: sent={result['sent']}, skipped={result['skipped']}, errors={result['errors']}")
+    return {"status": "done", **result, "date": today.isoformat()}
+
+
+@app.get("/cron/periodic-reports")
+async def periodic_reports(request: Request):
+    """Run weekly on Fridays and monthly on each month's final calendar day."""
+    if not cron_authorized(request):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Unauthorized cron request")
+    today = today_eat()
+    results = {}
+    if today.weekday() == 4:
+        try:
+            results["weekly"] = await _send_period_report("weekly", today - timedelta(days=6), today)
+        except Exception as exc:
+            print(f"❌ WEEKLY REPORT failed: {type(exc).__name__}: {exc}")
+            results["weekly"] = {"status": "error", "detail": str(exc)}
+    else:
+        results["weekly"] = {"status": "not_scheduled_today"}
+
+    tomorrow = today + timedelta(days=1)
+    if tomorrow.month != today.month:
+        try:
+            results["monthly"] = await _send_period_report("monthly", today.replace(day=1), today)
+        except Exception as exc:
+            print(f"❌ MONTHLY REPORT failed: {type(exc).__name__}: {exc}")
+            results["monthly"] = {"status": "error", "detail": str(exc)}
+    else:
+        results["monthly"] = {"status": "not_scheduled_today"}
+    return {"status": "done", "date": today.isoformat(), **results}
 
 
 @app.get("/cron/inactivity-checkin")
