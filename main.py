@@ -2646,8 +2646,7 @@ async def whatsapp_webhook(request: Request):
 
                         debt_list.append(
                             f"{index}. {debtor_name}: "
-                            f"${debtor_amount:.2f}{status} "
-                            f" {due_date or 'lama gelin'}"
+                            f"${debtor_amount:.2f}{status}"
                         )
                     else:
                         debt_list.append(
