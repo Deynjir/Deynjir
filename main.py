@@ -1496,11 +1496,17 @@ def _commit_import(admin_phone, session):
                "is_paid": False}
         supabase.table("customers").insert(row).execute()
         added += 1
+    if skipped > 0:
     admin_confirmation = (
-        f"✅ Diiwaangelinta liiska deynta waa dhammaatay.\n"
-        f"Macaamiil cusub oo la daray: {added}\n"
-        f"Deyn hore u jirtay oo laga booday: {skipped}\n"
-        "Deymaha waxaa lagu kaydiyey ganacsiga aad dooratay."
+        f"⚠️ Liiska deynta qayb ahaan ayaa la diiwaangeliyey.\n\n"
+        f"✅ Macaamiil cusub oo lagu daray: {added}\n"
+        f"⏭️ Macaamiil hore u jiray oo laga booday: {skipped}\n\n"
+        f"Macaamiisha hore laguma darin systemka mar labaad."
+    )
+else:
+    admin_confirmation = (
+        f"✅ Waad ku guulaysatay Diwaangelinta Daynta.\n\n"
+        f"👥 Tirada Macaamiisha cusub ee lagu daray: {added}"
     )
     send_whatsapp(admin_phone, admin_confirmation)
 
@@ -1529,8 +1535,8 @@ def _commit_import(admin_phone, session):
 
     if shop_phone and shop_phone != admin_clean:
         business_message = (
-            f"✅ *Deymo cusub waa lagu daray dukaankaaga.*\n\n"
-            f"Dukaan: *{shop_name}*\n"
+            f"✅ *Deymo cusub ayaa lagu daray liiskaaga.*\n\n"
+            f"magaca: *{shop_name}*\n"
             f"Macaamiil cusub: *{added}*\n"
             f"Deyn hore oo laga booday: *{skipped}*\n\n"
             "Qor *LIISKA DAYNTA* si aad u aragto deymaha cusub."
@@ -1599,7 +1605,7 @@ async def whatsapp_webhook(request: Request):
     # import session. Nothing is saved before the sender confirms with OK.
     if type_message == "documentMessage":
         if sender_phone not in IMPORT_SESSIONS:
-            send_whatsapp(sender_phone, "Waxaan arkay faylkaaga. Si aan u akhriyo, marka hore qor *IMPORT*, dooro *DEYN* ama *LACAG BIXIN*, kadibna mar kale soo dir faylka. Waxba lama kaydin.")
+            send_whatsapp(sender_phone, "Waan arkay faylkaaga. Si aan u akhriyo, marka hore qor *IMPORT*, kadib dooro *DEYN* ama *LACAG BIXIN*, markaa soo dir faylka. Hada Waxba lama kaydin.")
             return {"status": "import_session_required"}
         if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
             send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
@@ -1648,7 +1654,7 @@ async def whatsapp_webhook(request: Request):
 
     if type_message == "imageMessage":
         if sender_phone not in IMPORT_SESSIONS:
-            send_whatsapp(sender_phone, "Waxaan arkay sawirkaaga. Si aan u akhriyo, marka hore qor *IMPORT*, dooro *DEYN* ama *LACAG BIXIN*, kadibna mar kale soo dir sawirka. Waxba lama kaydin.")
+            send_whatsapp(sender_phone, "Waan arkay sawirkaaga. Si aan u akhriyo, marka hore soo Qor *IMPORT*, kadib dooro *DEYN* ama *LACAG BIXIN*.")
             return {"status": "import_session_required"}
         if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
             send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
@@ -1677,13 +1683,13 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(
                     sender_phone,
                     "⏳ Adeegga akhrinta sawirradu hadda waa mashquul. "
-                    "Tani macnaheedu ma aha in sawirku khaldan yahay. Waxba lama kaydin. "
+                    "Tani macnaheedu ma aha in sawirku khaldan yahay. hada Waxba lama kaydin. "
                     "Fadlan sug dhowr daqiiqo kadibna isla sawirka mar kale soo dir."
                 )
                 return {"status": "import_image_ai_temporarily_unavailable"}
             send_whatsapp(
                 sender_phone,
-                "❌ Sawirka lama farsamayn karin. Waxba lama kaydin. "
+                "❌ Sawirka lama farsamayn karin. hada Waxba lama kaydin. "
                 "Fadlan mar kale isku day ama sawirka si cad u soo dir."
             )
             return {"status": "import_image_error"}
@@ -1718,21 +1724,21 @@ async def whatsapp_webhook(request: Request):
     ):
         if re.fullmatch(r"\s*CANCEL\s*", import_text, re.I) and sender_phone in IMPORT_SESSIONS:
             IMPORT_SESSIONS.pop(sender_phone, None)
-            send_whatsapp(sender_phone, "✅ Import waa la joojiyey. Waxba lama kaydin.")
+            send_whatsapp(sender_phone, "✅ Import waa la joojiyey. Hada Waxba lama kaydin.")
             return {"status": "import_cancelled"}
         session_for_choice = IMPORT_SESSIONS.get(sender_phone)
         if session_for_choice and session_for_choice.get("stage") == "duplicate_choice":
             if re.fullmatch(r"\s*2\s*", import_text):
                 _apply_import_duplicate_choice(session_for_choice, "2")
                 session_for_choice["stage"] = "ready"
-                send_whatsapp(sender_phone, "✅ Labada deyn waa la kala gelinayaa. Hadda qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
+                send_whatsapp(sender_phone, "✅ Labada deymood waa la kala gelinayaa. soo qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
                 return {"status": "import_duplicates_confirmed_separate"}
             if re.fullmatch(r"\s*1\s*", import_text):
                 _apply_import_duplicate_choice(session_for_choice, "1")
                 session_for_choice["stage"] = "ready"
-                send_whatsapp(sender_phone, "✅ Hal deyn oo keliya ayaa la haynayaa. Hadda qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
+                send_whatsapp(sender_phone, "✅ Hal deyn oo keliya ayaan kaydinayaa. soo qor *OK* si aan u kaydiyo ama *CANCEL* si loo joojiyo.")
                 return {"status": "import_duplicates_confirmed_single"}
-            send_whatsapp(sender_phone, "Jawaab *2* si labada deyn loo geliyo, ama *1* si hal keliya loo hayo. *CANCEL* si loo joojiyo.")
+            send_whatsapp(sender_phone, "ku Jawaab *2* si labada deymoodba loo geliyo, ama *1* si hal mid keliya loo geliyo. ama *CANCEL* si loo joojiyo.")
             return {"status": "awaiting_import_duplicate_choice"}
 
         if re.fullmatch(r"\s*OK\s*", import_text, re.I):
@@ -1781,7 +1787,7 @@ async def whatsapp_webhook(request: Request):
                     .select("id, phone_number, name, approval_status")
                     .eq("phone_number", sender_phone).limit(1).execute())
                 if not own_shop_result.data:
-                    send_whatsapp(sender_phone, "❌ Lambarkan dukaan kuma jiro Deynjir.")
+                    send_whatsapp(sender_phone, "❌ Lambarkan dukaan kuma jiro systemka.")
                     return {"status": "import_shop_not_found"}
                 own_shop = own_shop_result.data[0]
                 if own_shop.get("approval_status") != "approved":
@@ -1794,12 +1800,12 @@ async def whatsapp_webhook(request: Request):
                     "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
                 }
                 send_whatsapp(sender_phone,
-                    f"✅ Dukaanka waa la doortay: {own_shop.get('name') or sender_phone}.\n\n"
-                    "Maxaad rabtaa inaad soo geliso?\n"
+                    f"✅ Magaca: {own_shop.get('name') or sender_phone}.\n\n"
+                    "Maxaad rabtaa inaad soo xarayso?\n"
                     "*DEYN* — deymo cusub.\n"
-                    "*LACAG BIXIN* — lacagaha laga bixiyay deymaha jira.\n\n"
+                    "*LACAG BIXIN* — Deyn soo xarootay.\n\n"
                     "Kadib ii soo dir qoraal, Excel/CSV ama sawir.\n"
-                    "Hubi hordhaca, kadib qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
+                    "Xaqiiji, kadib soo qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
                 return {"status": "import_own_shop_selected"}
             except Exception as exc:
                 print(f"❌ Own-shop import lookup error: {exc}")
@@ -1808,7 +1814,7 @@ async def whatsapp_webhook(request: Request):
 
         match = re.fullmatch(r"\s*IMPORT\s+(\+?\d{8,15})\s*", import_text, re.I)
         if match and sender_phone != owner_phone:
-            send_whatsapp(sender_phone, "❌ Waxaad soo gelin kartaa oo keliya liiska dukaankaaga. Dir *IMPORT* adigoon number raacin.")
+            send_whatsapp(sender_phone, "❌ Waxaad soo gelin kartaa oo keliya liiska Ganacsigaaga. Dir *IMPORT* adigoon number raacin.")
             return {"status": "cross_shop_import_not_allowed"}
         if match:
             target_phone = match.group(1).replace("+", "")
@@ -1817,11 +1823,11 @@ async def whatsapp_webhook(request: Request):
                     .select("id, phone_number, name, approval_status")
                     .eq("phone_number", target_phone).limit(1).execute())
                 if not target.data:
-                    send_whatsapp(sender_phone, "❌ Lambarkan dukaan kuma jiro Deynjir. Hubi numberka.")
+                    send_whatsapp(sender_phone, "❌ Lambarkan kuma jiro systemka. Hubi numberka.")
                     return {"status": "import_shop_not_found"}
                 shop = target.data[0]
                 if shop.get("approval_status") != "approved":
-                    send_whatsapp(sender_phone, "❌ Dukaankan lama ansixin. Import lama bilaabi karo.")
+                    send_whatsapp(sender_phone, "❌ Ganacsigan lama ansixin. Import lama bilaabi karo.")
                     return {"status": "import_shop_not_approved"}
                 IMPORT_SESSIONS[sender_phone] = {"business_user_id": shop["id"], "shop_phone": target_phone,
                     "shop_name": shop.get("name") or target_phone, "entries": None, "mode": None,
@@ -1830,7 +1836,7 @@ async def whatsapp_webhook(request: Request):
                 return {"status": "import_shop_selected"}
             except Exception as exc:
                 print(f"❌ Import shop lookup error: {exc}")
-                send_whatsapp(sender_phone, "❌ Dukaanka lama hubin karin. Mar kale isku day.")
+                send_whatsapp(sender_phone, "❌ Ganacsigan lama xaqiijin karo. Mar kale isku day.")
                 return {"status": "import_shop_lookup_error"}
         active_import = IMPORT_SESSIONS.get(sender_phone)
         if active_import and not re.fullmatch(r"\s*(?:APPROVE|REJECT)\b.*", import_text, re.I):
@@ -1843,7 +1849,7 @@ async def whatsapp_webhook(request: Request):
                 active_import["mode"] = "debt"
                 active_import["entries"] = None
                 active_import["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
-                send_whatsapp(sender_phone, "✅ Waxaad dooratay *DEYN*. Hadda soo dir liiska deynta qoraal ahaan, Excel/CSV ama sawir ahaan.")
+                send_whatsapp(sender_phone, "✅ Waxaad dooratay *DEYN*. soo dir liiska deynta qoraal ahaan, Excel/CSV ama sawir ahaan.")
                 return {"status": "import_mode_debt_selected"}
             if mode_choice in {"lacag bixin", "lacag bixinta", "payment", "payments", "bixin"}:
                 active_import["mode"] = "payment"
@@ -1868,7 +1874,7 @@ async def whatsapp_webhook(request: Request):
                     return {"status": "import_text_preview_ready", "count": len(entries), "mode": active_import.get("mode", "debt")}
                 except Exception as exc:
                     print(f"❌ Import text parse error: {type(exc).__name__}: {exc}")
-                    send_whatsapp(sender_phone, "❌ Liiska si sax ah looma akhrin karin. Fadlan caddee magacyada iyo lacagaha, dabadeed mar kale soo dir.")
+                    send_whatsapp(sender_phone, "❌ Liiska si sax ah looma akhrin karo. Fadlan caddee magacyada iyo lacagaha, dabadeed mar kale soo dir.")
                     return {"status": "import_text_parse_error"}
 
     # Owner approves/rejects with: APPROVE 252... or REJECT 252...
@@ -1906,10 +1912,10 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, f"✅ Codsiga lambarka {applicant_phone} {decision_so}.")
             send_whatsapp(
                 applicant_phone,
-                "✅ Codsigaaga waa la oggolaaday. Ku soo dhowow Deynjir!\n\n"
-                "Qor *MENU* si aan tallaabo tallaabo kuugu hago, ama si toos ah u qor waxa aad rabto."
+                "✅ Soo dhawoow, Codsigaaga waa la oggolaaday.!\n\n"
+                "Qor *MENU* si aan kuugu hago system-ka, ama soo qor waxa aad rabto."
                 if new_status == "approved"
-                else "❌ Waan ka xunnahay, codsigaaga isticmaalka Deynjir waa la diiday."
+                else "❌ Waan ka xunnahay, codsigaaga waa la diiday."
             )
             return {"status": new_status}
 
@@ -2342,10 +2348,10 @@ async def whatsapp_webhook(request: Request):
                 print(f"✅ Clarification received; replaying saved message as {forced_transaction_action}")
             except Exception as pending_err:
                 print(f"❌ Pending clarification restore failed: {pending_err}")
-                send_whatsapp(sender_phone, "❌ Fariintii hore dib looma soo celin karin. Fadlan mar kale dir.")
+                send_whatsapp(sender_phone, "❌ Fariintii hore dib looma soo celin karo. Fadlan mar kale dir.")
                 return {"status": "pending_clarification_restore_error"}
         else:
-            send_whatsapp(sender_phone, "Fadlan marka hore ka jawaab fariintii sugaysay: *DEYN CUSUB* ama *DEYN SOO XAROOTAY*. Qor *JOOJI* si aad u baajiso.")
+            send_whatsapp(sender_phone, "Fadlan marka hore Dooro: *DEYN CUSUB* ama *DEYN SOO XAROOTAY*. ama Qor *JOOJI* si aad uga baxdo.")
             return {"status": "awaiting_transaction_clarification"}
 
     # Manual debt-reminder workflow: fully rule-based, no Gemini request.
@@ -4353,12 +4359,12 @@ def _format_business_activity_report(report_type, start_date, end_date, data, sh
     lines.extend([
         "",
         f"🆕 Deyn cusub: *${data['new_debt_total']:.2f}* ({data['new_debt_count']} diiwaan)",
-        f"👥 Macaamiil deyn cusub qaatay: *{data['new_customer_count']}*",
-        f"💵 Lacag la bixiyey: *${data['payment_total']:.2f}* ({data['payment_count']} lacag-bixin)",
+        f"👥 Tirada Macaamiisha deynta cusub qaatay: *{data['new_customer_count']}*",
+        f"💵 Lacagta la bixiyey: *${data['payment_total']:.2f}* ({data['payment_count']} lacag-bixin)",
         "",
-        f"📒 Daynta hadda taagan: *${data['outstanding_total']:.2f}*",
-        f"👤 Macaamiisha weli lagu leeyahay: *{data['outstanding_count']}*",
-        f"⚠️ Ballamaha dhaafay: *{data['overdue_count']}*",
+        f"📒 Totalka Daynta hadda taagan: *${data['outstanding_total']:.2f}*",
+        f"👤 Tirada Macaamiisha weli lagu leeyahay: *{data['outstanding_count']}*",
+        f"⚠️ Tirada Dadka balan dhaafka ah: *{data['overdue_count']}*",
     ])
     if data["new_debt_count"] == 0 and data["payment_count"] == 0:
         lines.extend(["", "Ma jirin deyn cusub ama lacag-bixin muddadan."])
