@@ -2739,8 +2739,8 @@ async def whatsapp_webhook(request: Request):
                     return {"status": "gemini_rate_limited_guidance_sent"}
                 send_whatsapp(
                     sender_phone,
-                    "Waan ka xumahay, fariinta si fiican uma fahmin. Waxba lama beddelin.\n\n"
-                    "Waxaan kaa caawin karaa sidan: \n" + deynjir_main_menu()
+                    "Ku Ma fahmin.\n\n"
+                    "Fadlan raac tilmaamahan: \n" + deynjir_main_menu()
                 )
                 return {"status": "friendly_fallback_sent"}
 
