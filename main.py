@@ -48,6 +48,7 @@ RENAME_SESSIONS = {}
 REMINDER_SESSION_TTL = timedelta(minutes=15)
 # Admin-assisted imports are staged for preview and explicit confirmation.
 IMPORT_SESSIONS = {}
+PAYMENT_EXPORT_SESSIONS = {}
 IMPORT_SESSION_TTL = timedelta(minutes=30)
 DEFAULT_COUNTRY_CODE = re.sub(r"\D", "", os.getenv("DEFAULT_COUNTRY_CODE", ""))
 
@@ -1858,6 +1859,84 @@ async def whatsapp_webhook(request: Request):
         print(f"❌ DATABASE ERROR (Business User Lookup): {db_err}")
         return {"status": "business_user_db_error"}
 
+    # Shop-wide payment history and date-range Excel/PDF exports.
+    payment_text = str(message_text or "").strip()
+    pending_payment_export = PAYMENT_EXPORT_SESSIONS.get(sender_phone)
+    if pending_payment_export and pending_payment_export.get("business_user_id") == business_user_id:
+        if re.fullmatch(r"\s*(?:cancel|jooji)\s*", payment_text, re.I):
+            PAYMENT_EXPORT_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "✅ Warbixinta lacag-bixinta waa la joojiyey.")
+            return {"status": "payment_export_cancelled"}
+        if re.fullmatch(r"\s*(?:excel|xlsx)\s*", payment_text, re.I):
+            fmt = "excel"
+        elif re.fullmatch(r"\s*(?:pdf)\s*", payment_text, re.I):
+            fmt = "pdf"
+        else:
+            fmt = None
+        if fmt:
+            try:
+                start_date = pending_payment_export["start_date"]
+                end_date = pending_payment_export["end_date"]
+                records = _load_shop_payments(business_user_id, start_date, end_date)
+                if not records:
+                    send_whatsapp(sender_phone, "Ma jiraan lacag-bixinno muddadaas.")
+                else:
+                    if fmt == "excel":
+                        content = _build_payment_excel(records, start_date, end_date)
+                        filename = f"deynjir_lacag_bixin_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx"
+                        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    else:
+                        content = _build_payment_pdf(records, start_date, end_date, business_user.get("name"))
+                        filename = f"deynjir_lacag_bixin_{start_date:%Y%m%d}_{end_date:%Y%m%d}.pdf"
+                        mime = "application/pdf"
+                    total = sum(r["amount"] for r in records)
+                    send_whatsapp_file(sender_phone, filename, content, mime,
+                        f"💵 Liiska lacag-bixinta: {start_date:%d/%m/%Y} – {end_date:%d/%m/%Y}\nWadarta: ${total:.2f}")
+                PAYMENT_EXPORT_SESSIONS.pop(sender_phone, None)
+                return {"status": "payment_export_sent", "format": fmt}
+            except Exception as exc:
+                print(f"❌ Payment export failed: {type(exc).__name__}: {exc}")
+                send_whatsapp(sender_phone, "❌ Warbixinta lama diyaarin. Hubi taariikhaha oo mar kale isku day.")
+                PAYMENT_EXPORT_SESSIONS.pop(sender_phone, None)
+                return {"status": "payment_export_error"}
+        send_whatsapp(sender_phone, "Dooro *EXCEL* ama *PDF*. Qor *CANCEL* si aad u joojiso.")
+        return {"status": "payment_export_waiting_format"}
+
+    # Command: LIISKA LACAG BIXINTA [03/11/2026 - 07/11/2026]
+    payment_list_match = re.fullmatch(
+        r"\s*(?:liiska\s+)?lacag\s*bixinta(?:\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?)\s*(?:-|ilaa|to)\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+(?:\s+\d{4})?))?\s*",
+        payment_text, re.I)
+    if payment_list_match:
+        try:
+            if payment_list_match.group(1):
+                start_date = _parse_payment_report_date(payment_list_match.group(1))
+                end_date = _parse_payment_report_date(payment_list_match.group(2), start_date.year)
+                if end_date < start_date:
+                    raise ValueError("Taariikhda dhammaadka ayaa ka horreysa bilowga")
+                PAYMENT_EXPORT_SESSIONS[sender_phone] = {
+                    "business_user_id": business_user_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+                send_whatsapp(sender_phone,
+                    f"💵 *LIISKA LACAG BIXINTA*\n📅 {start_date:%d/%m/%Y} – {end_date:%d/%m/%Y}\n\n"
+                    "Dooro nooca faylka: *EXCEL* ama *PDF*.\nQor *CANCEL* si aad u joojiso.")
+                return {"status": "payment_export_format_requested"}
+            records = _load_shop_payments(business_user_id)
+            if not records:
+                send_whatsapp(sender_phone, "✅ Weli ma jiraan lacag-bixinno la diiwaangeliyay.")
+                return {"status": "no_shop_payments"}
+            lines = ["💵 *LIISKA LACAG BIXINTA*", ""]
+            for index, record in enumerate(records[-40:], 1):
+                lines.append(f"{index}. {record['date_text']} — {record['name']} — ${record['amount']:.2f}")
+            lines.extend(["", "━━━━━━━━━━━━", f"Wadarta: *${sum(r['amount'] for r in records):.2f}*", f"Tirada lacag-bixinnada: *{len(records)}*"])
+            send_whatsapp(sender_phone, "\n".join(lines))
+            return {"status": "shop_payment_list_sent", "count": len(records)}
+        except Exception as exc:
+            print(f"❌ Shop payment list error: {type(exc).__name__}: {exc}")
+            send_whatsapp(sender_phone, "❌ Taariikhda lama fahmin. Tusaale: LIISKA LACAG BIXINTA 03/11/2026 - 07/11/2026")
+            return {"status": "shop_payment_list_error"}
+
     # Two-step SAX flow. Explicit "SAX old -> new" continues through the
     # existing immediate-rename path; "SAX old" asks for the corrected name.
     rename_state = RENAME_SESSIONS.get(sender_phone)
@@ -2420,12 +2499,12 @@ async def whatsapp_webhook(request: Request):
                 return {"status": "pending_clarification_save_error"}
             send_whatsapp(
                 sender_phone,
-                "Waxaad soo qortay magac iyo lacag keliya.\n\n"
-                "*Maxaad ula jeeddaa?*\n\n"
+                "Waxaad soo qortay magac iyo tiro keliya.\n\n"
+                "*Hadii aad ula jeedo*\n\n"
                 "1️⃣ Dayn cusub – Taabo 1\n\n"
-                "2️⃣ Dayn bixin – Taabo 2\n\n"
+                "2️⃣ Lacag bixin – Taabo 2\n\n"
                 "3️⃣ JOOJI – Taabo 3\n\n"
-                "Waxba lama diiwaangelinayo ilaa aad doorato."
+                "Waxba lama diiwaangelinayo ilaa aad mid Doorato."
             )
             return {"status": "awaiting_transaction_clarification"}
         elif has_financial_entries and explicit_direction:
@@ -2778,7 +2857,7 @@ async def whatsapp_webhook(request: Request):
                     send_whatsapp(
                         sender_phone,
                         f"✅ {updated_debtor['name']} wuxuu bixiyay ${actual_payment:.2f}. "
-                        f"Haray: ${float(updated_debtor['amount']):.2f}."
+                        f"Baaqi: ${float(updated_debtor['amount']):.2f}."
                     )
 
             except Exception as e:
@@ -3692,6 +3771,109 @@ def _safe_money(value):
         return 0.0
 
 
+def _parse_payment_report_date(raw, default_year=None):
+    """Parse report dates in DD/MM/YYYY, YYYY-MM-DD, or day-month-name form."""
+    value = str(raw or "").strip().replace(".", "/")
+    if not value:
+        raise ValueError("Taariikh maqan")
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m"):
+        try:
+            parsed = datetime.strptime(value, fmt).date()
+            if fmt == "%d/%m":
+                parsed = parsed.replace(year=default_year or today_eat().year)
+            return parsed
+        except ValueError:
+            pass
+    months = {"jan":1,"january":1,"feb":2,"february":2,"mar":3,"march":3,"apr":4,"april":4,"may":5,"jun":6,"june":6,"jul":7,"july":7,"aug":8,"august":8,"sep":9,"sept":9,"september":9,"oct":10,"october":10,"nov":11,"november":11,"dec":12,"december":12}
+    m = re.fullmatch(r"(\d{1,2})\s+([A-Za-z]+)(?:\s+(\d{4}))?", value)
+    if m and m.group(2).lower() in months:
+        return datetime(int(m.group(3) or default_year or today_eat().year), months[m.group(2).lower()], int(m.group(1))).date()
+    raise ValueError("Taariikhda lama fahmin")
+
+
+def _load_shop_payments(business_user_id, start_date=None, end_date=None):
+    query = (supabase.table("payments")
+        .select("amount, paid_at, customer_id")
+        .eq("business_user_id", business_user_id)
+        .order("paid_at", desc=False))
+    if start_date:
+        query = query.gte("paid_at", datetime.combine(start_date, datetime.min.time(), tzinfo=EAT).astimezone(timezone.utc).isoformat())
+    if end_date:
+        next_day = end_date + timedelta(days=1)
+        query = query.lt("paid_at", datetime.combine(next_day, datetime.min.time(), tzinfo=EAT).astimezone(timezone.utc).isoformat())
+    rows = query.execute().data or []
+    ids = list({str(row.get("customer_id")) for row in rows if row.get("customer_id")})
+    names = {}
+    if ids:
+        customer_rows = (supabase.table("customers")
+            .select("id, name")
+            .eq("business_user_id", business_user_id)
+            .in_("id", ids).execute().data or [])
+        names = {str(row.get("id")): row.get("name") or "Macmiil" for row in customer_rows}
+    records = []
+    for row in rows:
+        paid_at = row.get("paid_at")
+        date_text = str(paid_at or "")[:10]
+        try:
+            payment_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+        except ValueError:
+            payment_date = None
+        records.append({
+            "date": payment_date,
+            "date_text": payment_date.strftime("%d/%m/%Y") if payment_date else date_text,
+            "name": names.get(str(row.get("customer_id")), "Macmiil"),
+            "amount": _safe_money(row.get("amount")),
+        })
+    return records
+
+
+def _build_payment_excel(records, start_date, end_date):
+    frame = pd.DataFrame([{"Taariikhda": r["date_text"], "Magaca macmiilka": r["name"], "Lacagta la bixiyay ($)": r["amount"]} for r in records])
+    if frame.empty:
+        frame = pd.DataFrame(columns=["Taariikhda", "Magaca macmiilka", "Lacagta la bixiyay ($)"])
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        frame.to_excel(writer, index=False, sheet_name="Lacag bixinta")
+        sheet = writer.sheets["Lacag bixinta"]
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        for column, width in {"A":16,"B":32,"C":22}.items():
+            sheet.column_dimensions[column].width = width
+        total_row = len(frame) + 3
+        sheet.cell(total_row, 2, "Wadarta")
+        sheet.cell(total_row, 3, sum(r["amount"] for r in records))
+        sheet.cell(total_row + 1, 2, "Tirada diiwaannada")
+        sheet.cell(total_row + 1, 3, len(records))
+    return output.getvalue()
+
+
+def _build_payment_pdf(records, start_date, end_date, shop_name):
+    output = BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    story = [Paragraph("DEYNJIR — LIISKA LACAG BIXINTA", styles["Title"]), Spacer(1, 8)]
+    if shop_name:
+        story.append(Paragraph(escape(str(shop_name)), styles["Heading2"]))
+    story.append(Paragraph(f"Muddada: {start_date.strftime('%d/%m/%Y')} – {end_date.strftime('%d/%m/%Y')}", styles["Normal"]))
+    story.append(Spacer(1, 12))
+    data = [["Taariikhda", "Magaca macmiilka", "Lacagta ($)"]]
+    data.extend([[r["date_text"], r["name"], f"${r['amount']:.2f}"] for r in records])
+    data.append(["", "Wadarta", f"${sum(r['amount'] for r in records):.2f}"])
+    data.append(["", "Tirada diiwaannada", str(len(records))])
+    table = Table(data, colWidths=[105, 260, 105], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#E8EEF5")),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("GRID", (0,0), (-1,-3), 0.35, colors.grey),
+        ("ALIGN", (-1,1), (-1,-1), "RIGHT"),
+        ("FONTNAME", (1,-2), (-1,-1), "Helvetica-Bold"),
+        ("TOPPADDING", (0,0), (-1,-1), 7), ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+    ]))
+    story.append(table)
+    doc.build(story)
+    return output.getvalue()
+
+
 @app.get("/cron/daily-digest")
 async def daily_digest(request: Request):
     """Send daily due/overdue reminders to every registered business user.
@@ -3745,39 +3927,46 @@ async def daily_digest(request: Request):
             )
             debts = debts_result.data or []
 
-            due_today = []
+            overdue_items = []
+            today_items = []
+            today_date = today_eat()
             for debt in debts:
-                due_date = debt.get("promised_date")
-                if not due_date:
+                raw_due_date = debt.get("promised_date")
+                if not raw_due_date:
                     continue
-                if str(due_date) <= today:
-                    due_today.append(
-                        f"• {debt.get('name') or 'Macmiil'}: "
-                        f"${_safe_money(debt.get('amount')):.2f} "
-                        f"(due_date)"
+                try:
+                    due_date = datetime.strptime(str(raw_due_date)[:10], "%Y-%m-%d").date()
+                except (TypeError, ValueError):
+                    print(f"⚠️ Invalid promised_date for {debt.get('name')}: {raw_due_date!r}")
+                    continue
+                amount_text = f"${_safe_money(debt.get('amount')):.2f}"
+                customer_name = debt.get("name") or "Macmiil"
+                if due_date < today_date:
+                    overdue_days = (today_date - due_date).days
+                    overdue_items.append(
+                        f"• {customer_name}: {amount_text} — ⚠️ Balan dhaaf ({overdue_days} maalin)"
                     )
+                elif due_date == today_date:
+                    today_items.append(f"• {customer_name}: {amount_text} — 🔴 Maanta")
 
-            if not due_today:
+            all_items = overdue_items + today_items
+            print(f"📅 Daily digest user={business_user_id}: overdue={len(overdue_items)}, due_today={len(today_items)}")
+            if not all_items:
                 skipped_count += 1
                 continue
 
-            # Keep scheduled messages reasonably sized. The complete customer
-            # list remains available through LIST/HISTORY in WhatsApp.
             max_items = 40
-            shown = due_today[:max_items]
-            omitted = len(due_today) - len(shown)
-
-            message_lines = [
-                "☀️ *Xasuusin* ☀️",
-                "",
-                "*Balamaha maanta & kuwa Balan dhaafka ah:*",
-                *shown,
-            ]
+            shown_overdue = overdue_items[:max_items]
+            remaining_slots = max(0, max_items - len(shown_overdue))
+            shown_today = today_items[:remaining_slots]
+            omitted = len(all_items) - len(shown_overdue) - len(shown_today)
+            message_lines = ["☀️ *Xasuusin* ☀️", ""]
+            if shown_overdue:
+                message_lines.extend(["⚠️ *DEYNTA BALAN DHAAFTAY*", *shown_overdue, ""])
+            if shown_today:
+                message_lines.extend(["🔴 *BALANTA MAANTA*", *shown_today])
             if omitted > 0:
-                message_lines.extend([
-                    "",
-                    f"➕ {omitted} kale ayaa jira. Qor *Liiska daynta* si aad u aragto dhammaan.",
-                ])
+                message_lines.extend(["", f"➕ {omitted} kale ayaa jira. Qor *LIISKA DAYNTA* si aad u aragto dhammaan."])
 
             if name:
                 message_lines.insert(1, f"👤 *{name}*")
@@ -3785,7 +3974,7 @@ async def daily_digest(request: Request):
             ok = send_whatsapp(phone, "\n".join(message_lines))
             if ok:
                 sent_count += 1
-                print(f"✅ Daily digest sent: user={business_user_id}, items={len(due_today)}")
+                print(f"✅ Daily digest sent: user={business_user_id}, overdue={len(overdue_items)}, due_today={len(today_items)}")
             else:
                 error_count += 1
                 print(f"❌ Daily digest WhatsApp failed: user={business_user_id}")
