@@ -57,20 +57,17 @@ GUIDED_SESSION_TTL = timedelta(minutes=15)
 
 def deynjir_main_menu():
     return (
-        "👋 *Soo Dhawoow!*\n\n"
-        "Nidaadmkan waxaad kula soconaysaa daymaha, lacag-bixinta iyo ballamaha ganacsigaaga.\n\n"
-        
-        "*Raac Tilmaamahan*\n\n"
-        
-        "Deyn cusub- Taabo 1️⃣\n"
-        "Lacag bixin - Taabo 2️⃣\n"
-        "Eeg liiska daynta - Taabo 3️⃣\n"
-        "Raadi Macmiil - Taabo 4️⃣\n"
-        "Ballamaha maanta - Taabo 5️⃣\n"
-        "Caawimaad - Taabo 6️⃣\n\n"
-        "Dooro lambar ama soo qor waxa aad rabto."
+        "👋 *Soo Dhawoow!*\\n\\n"
+        "Nidaamkan waxaad kula soconaysaa daymaha, lacag-bixinta iyo ballamaha ganacsigaaga.\\n\\n"
+        "*Waxaad fariin ahaan u soo qoraysaa lambarka:*\\n\\n"
+        "1️⃣ Deyn cusub\\n"
+        "2️⃣ Lacag bixin\\n"
+        "3️⃣ Eeg liiska daynta\\n"
+        "4️⃣ Raadi macmiil\\n"
+        "5️⃣ Ballamaha maanta\\n"
+        "6️⃣ Caawimaad\\n\\n"
+        "Soo qor lambar 1 ilaa 6, ama si caadi ah u qor waxa aad rabto."
     )
-
 
 def deynjir_help_message():
     return (
@@ -83,6 +80,38 @@ def deynjir_help_message():
         "• Soo geli sawir/Excel: qor *IMPORT*\n\n"
         "Soo Qor *MENU* marka aad u baahato hagid."
     )
+
+
+def deynjir_confusion_help_message():
+    return (
+        "😊 Dhib ma leh, waan ku caawinayaa.\\n\\n"
+        "Nidaamkan wuxuu kaa caawinayaa inaad\\n"
+        "diiwaangeliso daymaha, lacag-bixinta iyo balamaha Ganacsigaaga.\\n\\n"
+        "Tusaale:\\n"
+        "Waxaad Dayn $10 ku leedahay Qof lagu magacaabo Cali.\\n"
+        "si aad Nidaamka ugu darto soo Qor:\\n"
+        "*ADD Cali $10*\\n\\n"
+        "Haddii Cali bixiyay $5, soo qor:\\n\\n"
+        "*Lacag bixin Cali $5*"
+    )
+
+
+def is_somali_confusion_request(message_text):
+    """Recognize common Somali requests for help understanding how to use Deynjir."""
+    text = normalize_customer_name(str(message_text or ""))
+    patterns = (
+        r"\bbarnaamijka\s+(?:waxba\s+)?ma\s+fahmin\b",
+        r"\bbarnaamijka\s+waxba\s+kama\s+fahmin\b",
+        r"\b(?:waxba\s+kama\s+fahmin|ma\s+fahmin)\b",
+        r"\bsidee\s+(?:loo\s+)?isticmaalaa\b",
+        r"\bsidee\s+loo\s+isticmaali\s+karaa\b",
+        r"\bmaxaan\s+sameeyaa\b",
+        r"\bii\s+sharax\b",
+        r"\bma\s+garanayo\s+sida\s+loo\s+isticmaalo\b",
+        r"\bsidee\s+dayn\s+loo\s+geliyaa\b",
+        r"\bsidee\s+nidaamkan\s+u\s+shaqeeyaa\b",
+    )
+    return any(re.search(pattern, text, flags=re.I) for pattern in patterns)
 
 
 def normalize_easy_command(value):
@@ -2112,6 +2141,13 @@ async def whatsapp_webhook(request: Request):
             GUIDED_SESSIONS.pop(sender_phone, None)
             guided = None
 
+    # Respond to common Somali expressions of confusion with a clear example.
+    # Clear an unfinished guided step so the user can restart without stale state.
+    if is_somali_confusion_request(guided_text):
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        send_whatsapp(sender_phone, deynjir_confusion_help_message())
+        return {"status": "somali_usage_help_sent"}
+
     menu_words = {"menu", "start", "hello", "hi", "hey", "help", "caawi", "caawimaad", "bilow"}
     if guided_text.casefold() in menu_words:
         GUIDED_SESSIONS[sender_phone] = {
@@ -2186,13 +2222,17 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, "Fadlan qor lacag sax ah. Tusaale: *50* ama *$50*. Waxba lama kaydin.")
             return {"status": "guided_invalid_amount"}
         guided["amount"] = amount
-        guided["stage"] = "confirm"
-        guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-        transaction_label = "Deyn cusub" if guided.get("transaction_type") == "debt" else "Lacag bixin"
-        send_whatsapp(sender_phone,
-            f"*Hubi xogta:*\n\nNooc: {transaction_label}\nMagac: *{guided['customer_name']}*\nLacag: *${amount:,.2f}*\n\n"
-            "Ma sax baa?\n1️⃣ Haa, kaydi\n2️⃣ Maya, jooji")
-        return {"status": "guided_transaction_confirmation_requested"}
+        # The user has already supplied the name, transaction type and amount.
+        # Do not add an unnecessary final "Ma sax baa?" confirmation step.
+        name = guided.get("customer_name")
+        transaction_type = guided.get("transaction_type")
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        if not name or transaction_type not in {"debt", "payment"}:
+            send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Fadlan mar kale isku day.")
+            return {"status": "guided_session_invalid"}
+        message_text = (f"{name} ${amount} ayuu iga qaatay" if transaction_type == "debt"
+                        else f"{name} ${amount} ayuu bixiyay")
+        print(f"✅ Guided transaction ready: type={transaction_type}, name={name!r}, amount={amount}")
 
     if guided and guided.get("stage") == "confirm":
         answer = guided_text.casefold().strip()
@@ -2496,7 +2536,7 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(sender_phone, "❌ Fariintii hore dib looma soo celin karo. Fadlan mar kale dir.")
                 return {"status": "pending_clarification_restore_error"}
         else:
-            send_whatsapp(sender_phone, "Fadlan marka hore Dooro: *DEYN CUSUB* ama *DEYN SOO XAROOTAY*. ama Qor *JOOJI* si aad uga baxdo.")
+            send_whatsapp(sender_phone, "Deyn cusub baa mise lacag-bixin?\n\nSoo qor *DEYN CUSUB* ama *LACAG BIXIN*. Qor *JOOJI* haddii aad rabto inaad ka baxdo.")
             return {"status": "awaiting_transaction_clarification"}
 
     # Manual debt-reminder workflow: fully rule-based, no Gemini request.
@@ -2888,11 +2928,7 @@ async def whatsapp_webhook(request: Request):
                         "Waxaad dooran kartaa mid ka mid ah hawlahan: \n" + deynjir_main_menu()
                     )
                     return {"status": "gemini_rate_limited_guidance_sent"}
-                send_whatsapp(
-                    sender_phone,
-                    "Ku ma fahmin.\n\n"
-                    "Fadlan raac tilmaamahan: \n" + deynjir_main_menu()
-                )
+                send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Maxaad ka wadaa?\n\n" + deynjir_main_menu())
                 return {"status": "friendly_fallback_sent"}
 
     # If the user answered the pending question, apply that answer to every
@@ -2930,10 +2966,10 @@ async def whatsapp_webhook(request: Request):
                 sender_phone,
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
                 "*Hadii aad ula jeedo*\n\n"
-                "1️⃣ Dayn cusub – Taabo 1\n\n"
-                "2️⃣ Lacag bixin – Taabo 2\n\n"
-                "3️⃣ JOOJI – Taabo 3\n\n"
-                "Waxba lama diiwaangelinayo ilaa aad mid Doorato."
+                "Deyn cusub baa mise lacag-bixin?\n\n"
+                "Soo qor *DEYN CUSUB* ama *LACAG BIXIN*.\n"
+                "Soo qor *JOOJI* haddii aad rabto inaad ka baxdo.\n\n"
+                "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
             )
             return {"status": "awaiting_transaction_clarification"}
         elif has_financial_entries and explicit_direction:
@@ -3050,14 +3086,8 @@ async def whatsapp_webhook(request: Request):
                 entry["new_date"] = date_only
                 print(f"🗓️ Date-only ADD converted to EDIT for {name!r}: {date_only} (amount preserved)")
             else:
-                send_whatsapp(
-                    sender_phone,
-                    "⚠️ Ma fahmin Qoraalkaaga.\n\n"
-                    "Haddii aad rabto inaad beddesho taariikhda ballanta deyn hore, qor magaca macmiilka iyo taariikhda cusub.\n"
-                    "Tusaale: Faarax oct 10\n"
-                    "Deyn cusubna sidan u qor: Axmed $5 oct 11"
-                )
-                failed_inserts.append({"name": name or "Unknown", "reason": "Amount missing for new debt"})
+                send_whatsapp(sender_phone, "Lacag intee le'eg ayuu qaatay ama bixiyay?")
+                print(f"⚠️ Amount missing for transaction: customer={name!r}; message={message_text!r}")
                 continue
 
         # Recover the full stored name from the original WhatsApp message if AI shortened it.
@@ -3073,14 +3103,15 @@ async def whatsapp_webhook(request: Request):
                 print(f"⚠️ Original-message name resolution failed: {name_err}")
         
         if not name and action not in ["LIST", "REPORT", "EXPORT"]:
-            failed_inserts.append({"name": "Unknown", "reason": "No name"})
+            print(f"⚠️ Transaction skipped because customer name is missing: action={action!r}; message={message_text!r}")
+            send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca ii sheeg.")
             continue
         
         if action == "ADD":
             try:
                 if amount is None and not new_phone:
-                    send_whatsapp(sender_phone, "⚠️ Lacagta deynta lama sheegin. Tusaale: C/SAMAD SANDHEERE $4 oct 10")
-                    failed_inserts.append({"name": name, "reason": "Amount missing for new debt"})
+                    send_whatsapp(sender_phone, "Lacag intee le'eg ayuu qaatay ama bixiyay?")
+                    print(f"⚠️ Amount missing for ADD: customer={name!r}; message={message_text!r}")
                     continue
                 if not promised_date and days_until_due is not None:
                     promised_date = (today_eat() + timedelta(days=int(days_until_due))).isoformat()
@@ -4172,10 +4203,10 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, success_message)
 
     if failed_inserts:
-        error_message = f"❌ {len(failed_inserts)} deyntii ma keydsamin:\n"
-        for fail in failed_inserts:
-            error_message += f"- {fail['name']}: {fail['reason']}\n"
-        send_whatsapp(sender_phone, error_message)
+        # Keep detailed failure reasons in server logs only. Never expose internal
+        # parser/database messages such as "Unknown: No name" to WhatsApp users.
+        print(f"❌ Transaction failures ({len(failed_inserts)}): {failed_inserts}")
+        send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Maxaad ka wadaa?")
     
     return {"status": "success"}
 
