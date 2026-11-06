@@ -69,6 +69,20 @@ def deynjir_main_menu():
         "Soo qor lambar 1 ilaa 6, ama si caadi ah u qor waxa aad rabto."
     )
 
+def deynjir_unrecognized_message():
+    """One concise menu prompt for text the bot cannot understand."""
+    return (
+        "Fadlan Raac Tilmaamahan:\n\n"
+        "Deyn cusub -Taabo 1️⃣\n"
+        "Lacag bixin -Taabo2️⃣\n"
+        "Eeg liiska daynta -Taabo3️⃣\n"
+        "Raadi macmiil -Taabo4️⃣\n"
+        "Ballamaha maanta -Taabo5️⃣\n"
+        "Caawimaad -Taabo6️⃣\n\n"
+        "Ka Dooro Numberka aad rabto si aad gudaha ugu gasho."
+    )
+
+
 def deynjir_help_message():
     return (
         "ℹ️ *Raac Tilmaamahan*\n\n"
@@ -2228,7 +2242,7 @@ async def whatsapp_webhook(request: Request):
         transaction_type = guided.get("transaction_type")
         GUIDED_SESSIONS.pop(sender_phone, None)
         if not name or transaction_type not in {"debt", "payment"}:
-            send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Fadlan mar kale isku day.")
+            send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "guided_session_invalid"}
         message_text = (f"{name} ${amount} ayuu iga qaatay" if transaction_type == "debt"
                         else f"{name} ${amount} ayuu bixiyay")
@@ -2928,7 +2942,7 @@ async def whatsapp_webhook(request: Request):
                         "Waxaad dooran kartaa mid ka mid ah hawlahan: \n" + deynjir_main_menu()
                     )
                     return {"status": "gemini_rate_limited_guidance_sent"}
-                send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Maxaad ka wadaa?\n\n" + deynjir_main_menu())
+                send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "friendly_fallback_sent"}
 
     # Reject invalid/empty AI intents before they can reach database handlers.
@@ -2941,7 +2955,7 @@ async def whatsapp_webhook(request: Request):
         ]
         if not usable_entries:
             print(f"⚠️ No usable intent extracted; message={message_text!r}; entries={entries!r}")
-            send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Maxaad ka wadaa?")
+            send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "unrecognized_message"}
         entries = usable_entries
 
@@ -2962,7 +2976,7 @@ async def whatsapp_webhook(request: Request):
                     f"⚠️ Rejected empty SEARCH intent for unrecognized text: "
                     f"{message_text!r}"
                 )
-                send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Maxaad ka wadaa?")
+                send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "unrecognized_message"}
 
     # If the user answered the pending question, apply that answer to every
@@ -4244,7 +4258,7 @@ async def whatsapp_webhook(request: Request):
         # Keep detailed failure reasons in server logs only. Never expose internal
         # parser/database messages such as "Unknown: No name" to WhatsApp users.
         print(f"❌ Transaction failures ({len(failed_inserts)}): {failed_inserts}")
-        send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Maxaad ka wadaa?")
+        send_whatsapp(sender_phone, deynjir_unrecognized_message())
     
     return {"status": "success"}
 
