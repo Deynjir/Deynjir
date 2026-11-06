@@ -57,16 +57,18 @@ GUIDED_SESSION_TTL = timedelta(minutes=15)
 
 def deynjir_main_menu():
     return (
-        "👋 *soo dhawoow!*\n\n"
-        "Waxaan kaa caawinayaa la socodka daymaha iyo lacag bixinta.\n\n"
-        "*Raac tilmaamahan?*\n\n"
-        "1️⃣ Deyn cusub ku dar\n"
-        "2️⃣ Lacag bixin diiwaangeli\n"
-        "3️⃣ Eeg liiska daynta\n"
-        "4️⃣ Raadi qof\n"
-        "5️⃣ Eeg ballamaha maanta\n"
-        "6️⃣ Caawimaad\n\n"
-        "Dooro lambar ama si caadi ah iigu sheeg waxa aad rabto."
+        "👋 *Soo Dhawoow!*\n\n"
+        "Nidaadmkan wuxuu kaa caawinayaa inaad si fudud ula socoto daymaha, lacag-bixinta iyo ballamaha ganacsigaaga.\n\n"
+        
+        "*Raac Tilmaamahan*\n\n"
+        
+        "si aad ugu darto Deyn cusub- Taabo 1️⃣\n"
+        "si aad uga Jarto Lacag bixin - Taabo 2️⃣\n"
+        "si aad u Eegto liiska daynta - Taabo 3️⃣\n"
+        "Si aad u Raadiso Macmiil - Taabo 4️⃣\n"
+        "si aad u Eegto ballamaha maanta - Taabo 5️⃣\n"
+        "si aad u hesho Caawimaad - Taabo 6️⃣\n\n"
+        "Dooro lambar ama soo qor waxa aad rabto."
     )
 
 
