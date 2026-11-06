@@ -3274,8 +3274,9 @@ async def whatsapp_webhook(request: Request):
                 else:
                     send_whatsapp(
                         sender_phone,
-                        f"✅ {updated_debtor['name']} wuxuu bixiyay ${actual_payment:.2f}. "
-                        f"Baaqi: ${float(updated_debtor['amount']):.2f}."
+                        f"✅ {updated_debtor['name']}\n"
+                        f"Lacag-bixin: ${actual_payment:.2f}\n"
+                        f"Baaqiga daynta: ${float(updated_debtor['amount']):.2f}."
                     )
 
             except Exception as e:
@@ -3371,7 +3372,7 @@ async def whatsapp_webhook(request: Request):
 
                                 if days_left < 0:
                                     status = (
-                                        f" ⚠️ Balan dhaaf "
+                                        f" ⚠️ "
                                         f"({abs(days_left)} maalin)"
                                     )
                                     overdue_count += 1
@@ -4384,7 +4385,7 @@ async def daily_digest(request: Request):
             omitted = len(all_items) - len(shown_overdue) - len(shown_today)
             message_lines = ["☀️ *Xasuusin* ☀️", ""]
             if shown_overdue:
-                message_lines.extend(["⚠️ *DEYNTA BALAN DHAAFTAY*", *shown_overdue, ""])
+                message_lines.extend(["⚠️ *DEYMAHA BALAN DHAAFKA AH*", *shown_overdue, ""])
             if shown_today:
                 message_lines.extend(["🔴 *BALANTA MAANTA*", *shown_today])
             if omitted > 0:
