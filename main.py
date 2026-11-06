@@ -3384,7 +3384,7 @@ async def whatsapp_webhook(request: Request):
                                     )
                                     overdue_count += 1
                                 elif days_left == 0:
-                                    status = " 🔴 Balan = maanta"
+                                    status = " ➤ Balan = maanta"
                                 else:
                                     status = f" 📅 {due_date}"
 
