@@ -56,30 +56,31 @@ GUIDED_SESSION_TTL = timedelta(minutes=15)
 
 
 def deynjir_main_menu():
+    """Return the welcome menu with real WhatsApp line breaks."""
     return (
-        "👋 *Soo Dhawoow!*\\n\\n"
-        "Nidaamkan waxaad kula soconaysaa daymaha, lacag-bixinta iyo ballamaha ganacsigaaga.\\n\\n"
-        "*Waxaad fariin ahaan u soo qoraysaa lambarka:*\\n\\n"
-        "1️⃣ Deyn cusub\\n"
-        "2️⃣ Lacag bixin\\n"
-        "3️⃣ Eeg liiska daynta\\n"
-        "4️⃣ Raadi macmiil\\n"
-        "5️⃣ Ballamaha maanta\\n"
-        "6️⃣ Caawimaad\\n\\n"
-        "Soo qor lambar 1 ilaa 6, ama si caadi ah u qor waxa aad rabto."
+        "👋 *Soo Dhawoow!*\n\n"
+        "Nidaamkan waxaad kula soconaysaa daymaha, lacag-bixinta iyo ballamaha ganacsigaaga.\n\n"
+        "*Raac Tilmaamahan Hoose:*\n\n"
+        "Deyn cusub – Taabo 1️⃣\n"
+        "Lacag bixin – Taabo 2️⃣\n"
+        "liiska daynta – Taabo 3️⃣\n"
+        "Raadi macmiil – Taabo 4️⃣\n"
+        "Ballamaha maanta – Taabo 5️⃣\n"
+        "Caawimaad – Taabo 6️⃣\n\n"
+        "Soo qor lambar 1 ilaa 6."
     )
 
 def deynjir_unrecognized_message():
     """One concise menu prompt for text the bot cannot understand."""
     return (
-        "Fadlan Raac Tilmaamahan:\n\n"
-        "Deyn cusub -Taabo 1️⃣\n"
-        "Lacag bixin -Taabo2️⃣\n"
-        "Eeg liiska daynta -Taabo3️⃣\n"
-        "Raadi macmiil -Taabo4️⃣\n"
-        "Ballamaha maanta -Taabo5️⃣\n"
-        "Caawimaad -Taabo6️⃣\n\n"
-        "Ka Dooro Numberka aad rabto si aad gudaha ugu gasho."
+        "Fadlan dooro waxa aad rabto inaad samayso:\n\n"
+        "1️⃣ Deyn cusub\n"
+        "2️⃣ Lacag bixin\n"
+        "3️⃣ Eeg liiska daynta\n"
+        "4️⃣ Raadi macmiil\n"
+        "5️⃣ Ballamaha maanta\n"
+        "6️⃣ Caawimaad\n\n"
+        "Soo qor lambar 1 ilaa 6."
     )
 
 
@@ -98,14 +99,14 @@ def deynjir_help_message():
 
 def deynjir_confusion_help_message():
     return (
-        "😊 Dhib ma leh, waan ku caawinayaa.\\n\\n"
-        "Nidaamkan wuxuu kaa caawinayaa inaad\\n"
-        "diiwaangeliso daymaha, lacag-bixinta iyo balamaha Ganacsigaaga.\\n\\n"
-        "Tusaale:\\n"
-        "Waxaad Dayn $10 ku leedahay Qof lagu magacaabo Cali.\\n"
-        "si aad Nidaamka ugu darto soo Qor:\\n"
-        "*ADD Cali $10*\\n\\n"
-        "Haddii Cali bixiyay $5, soo qor:\\n\\n"
+        "😊 Dhib ma leh, waan ku caawinayaa.\n\n"
+        "Nidaamkan wuxuu kaa caawinayaa inaad\n"
+        "diiwaangeliso daymaha, lacag-bixinta iyo balamaha Ganacsigaaga.\n\n"
+        "Tusaale:\n"
+        "Waxaad Dayn $10 ku leedahay Qof lagu magacaabo Cali.\n"
+        "si aad Nidaamka ugu darto soo Qor:\n"
+        "*ADD Cali $10*\n\n"
+        "Haddii Cali bixiyay $5, soo qor:\n\n"
         "*Lacag bixin Cali $5*"
     )
 
@@ -134,7 +135,8 @@ def normalize_easy_command(value):
     folded = raw.casefold().strip(" .!؟?")
     aliases = {
         "inbort": "IMPORT", "inport": "IMPORT", "importi": "IMPORT",
-        "menyu": "MENU", "caawi": "HELP", "caawimaad": "HELP",
+        "menu": "MENU", "manu": "MENU", "menyu": "MENU", "menue": "MENU",
+        "caawi": "HELP", "caawimaad": "HELP",
         "help me": "HELP", "salaan": "MENU", "asc": "MENU",
         "assalamu alaikum": "MENU", "asalaamu calaykum": "MENU",
         "lacag bixn": "GUIDED_PAYMENT",
@@ -2022,7 +2024,7 @@ async def whatsapp_webhook(request: Request):
                     f"🌟 *{greeting}!*\n\n"
                     "Halkan waxaa loogu talagalay in Shirkadaha & Ganacsiyada yaryar ay ku maamulaan "
                     "Soo xaraynta Daymaha ka maqan & La socodka kuwa ka baxaya, iyo Adeegyo kale oo badan.\n\n"
-                    "Haddii aad rabto inaad isticmaasho Taabo *1*, Haddii kale Taabo *2*."
+                    "Haddii aad rabto inaad isticmaasho soo qor *1*. Haddii kale soo qor *2*."
                 )
                 return {"status": "onboarding_restarted"}
 
@@ -2107,7 +2109,7 @@ async def whatsapp_webhook(request: Request):
 
                 send_whatsapp(
                     sender_phone,
-                    "Si aad u isticmaasho Fadlan Taabo *1*, hadii aad rabto inaad ka baxdo Taabo *2*."
+                    "Si aad u isticmaasho soo qor *1*. Haddii aad rabto inaad ka baxdo soo qor *2*."
                 )
                 return {"status": "onboarding_invalid_choice"}
 
@@ -2122,7 +2124,7 @@ async def whatsapp_webhook(request: Request):
                     f"🌟 *{greeting}!*\n\n"
                     "Halkan waxaa loogu talagalay in Shirkadaha & Ganacsiyada yaryar ay ku maamulaan "
                     "Soo xaraynta Daymaha ka maqan iyo La socodka kuwa ka baxaya, iyo Adeegyo kale oo badan.\n\n"
-                    "Haddii aad rabto inaad isticmaasho Taabo *1*, Haddii kale Taabo *2*."
+                    "Haddii aad rabto inaad isticmaasho soo qor *1*. Haddii kale soo qor *2*."
                 )
                 return {"status": "onboarding_welcome_sent"}
 
@@ -2217,7 +2219,7 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, deynjir_help_message())
             return {"status": "help_sent"}
         else:
-            send_whatsapp(sender_phone, "Ma fahmin doorashadaas. Fadlan dooro 1 ilaa 6.\n\n" + deynjir_main_menu())
+            send_whatsapp(sender_phone, "Fadlan soo qor lambar 1 ilaa 6.\n\n" + deynjir_main_menu())
             return {"status": "invalid_menu_choice"}
 
     if guided and guided.get("stage") in {"debt_name", "payment_name"}:
@@ -3748,7 +3750,18 @@ async def whatsapp_webhook(request: Request):
             try:
                 search_matches = find_debtor_matches(business_user_id, name)
                 if not search_matches:
-                    send_whatsapp(sender_phone, "Ma heli karo qofkan. Hubi magaciisa?")
+                    explicit_search_request = bool(re.match(
+                        r"^\s*(?:search|find|lookup|look\s+up|raadi|raadso)\b",
+                        str(message_text or ""), flags=re.IGNORECASE
+                    ))
+                    if explicit_search_request:
+                        send_whatsapp(sender_phone, "Ma heli karo qofkan. Hubi magaciisa?")
+                    else:
+                        print(
+                            f"⚠️ Bare-word SEARCH did not match a customer; treating as unrecognized text: "
+                            f"{message_text!r}"
+                        )
+                        send_whatsapp(sender_phone, deynjir_unrecognized_message())
                     continue
 
                 distinct_search_names = {
