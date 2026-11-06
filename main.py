@@ -1929,8 +1929,7 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, f"✅ Codsiga lambarka {applicant_phone} {decision_so}.")
             send_whatsapp(
                 applicant_phone,
-                "✅ Soo dhawoow, Codsigaaga waa la oggolaaday.!\n\n"
-                "Qor *MENU* si aan kuugu hago system-ka, ama soo qor waxa aad rabto."
+                "🎉 *Codsigaaga waa la oggolaaday!*\n\n" + deynjir_main_menu()
                 if new_status == "approved"
                 else "❌ Waan ka xunnahay, codsigaaga waa la diiday."
             )
