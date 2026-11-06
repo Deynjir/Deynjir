@@ -3042,7 +3042,7 @@ async def whatsapp_webhook(request: Request):
             else:
                 send_whatsapp(
                     sender_phone,
-                    "⚠️ Lacagta deynta lama sheegin.\n\n"
+                    "⚠️ Ma fahmin Qoraalkaaga.\n\n"
                     "Haddii aad rabto inaad beddesho taariikhda ballanta deyn hore, qor magaca macmiilka iyo taariikhda cusub.\n"
                     "Tusaale: Faarax oct 10\n"
                     "Deyn cusubna sidan u qor: Axmed $5 oct 11"
@@ -3326,7 +3326,13 @@ async def whatsapp_webhook(request: Request):
                     elif filter_type == "tomorrow":
                         message_title = "📋 *Balamaha Berri*"
                     else:
-                        message_title = f"📋 *Balamaha {filter_date}*"
+                        try:
+                            display_date = datetime.strptime(
+                                str(filter_date), "%Y-%m-%d"
+                            ).strftime("%d-%m-%Y")
+                        except (TypeError, ValueError):
+                            display_date = str(filter_date)
+                        message_title = f"📋 *Balamaha {display_date}*"
 
                     wants_due_dates = True
                 else:
@@ -3384,21 +3390,23 @@ async def whatsapp_webhook(request: Request):
                                     )
                                     overdue_count += 1
                                 elif days_left == 0:
-                                    status = " "
-                                else:
-                                    status = f" 📅 {due_date}"
+                                    status = ""
+                                elif not filter_date:
+                                    # Keep individual dates when showing a mixed-date list.
+                                    status = f" {due_date}"
 
                             except (TypeError, ValueError):
-                                status = f" 📅 {due_date}"
+                                if not filter_date:
+                                    status = f" {due_date}"
 
                         debt_list.append(
-                            f"{index}. {debtor_name}: "
-                            f"${debtor_amount:.2f}{status}"
+                            f"{index}. {debtor_name} — "
+                            f"${debtor_amount:,.2f}{status}"
                         )
                     else:
                         debt_list.append(
-                            f"{index}. {debtor_name}: "
-                            f"${debtor_amount:.2f}"
+                            f"{index}. {debtor_name} — "
+                            f"${debtor_amount:,.2f}"
                         )
 
                 message = (
@@ -3415,7 +3423,7 @@ async def whatsapp_webhook(request: Request):
 
                 message += (
                     f"\n\n💰 Total: "
-                    f"${total:.2f}"
+                    f"${total:,.2f}"
                 )
 
                 send_whatsapp(sender_phone, message)
