@@ -2405,7 +2405,7 @@ async def whatsapp_webhook(request: Request):
         try:
             sax_matches = find_debtor_matches(business_user_id, sax_old_name)
             if not sax_matches:
-                send_whatsapp(sender_phone, f"❌ Lama helin qofka *{sax_old_name}*. Hubi magaca.")
+                send_whatsapp(sender_phone, f"❌ Ma hayo *{sax_old_name}*. Hubi magaca.")
                 return {"status": "rename_customer_not_found"}
             distinct = {str(row.get("name") or "").strip() for row in sax_matches}
             if len(distinct) != 1:
@@ -3094,7 +3094,7 @@ async def whatsapp_webhook(request: Request):
                             failed_inserts.append({"name": name, "reason": "Phone update returned no rows"})
                         continue
                     else:
-                        send_whatsapp(sender_phone, f"❌ Lama helin qofka {name} si lambarkiisa loo kaydiyo.")
+                        send_whatsapp(sender_phone, f"❌ Ma helin {name} si lambarkiisa aan u kaydiyo.")
                         failed_inserts.append({"name": name, "reason": "Debtor not found for phone update"})
                         continue
                 
@@ -3647,7 +3647,7 @@ async def whatsapp_webhook(request: Request):
             try:
                 search_matches = find_debtor_matches(business_user_id, name)
                 if not search_matches:
-                    send_whatsapp(sender_phone, f"❌ Lama helin qofka {name}. Hubi higgaadda magaca ama isku day magaciisa oo buuxa.")
+                    send_whatsapp(sender_phone, f"❌ Lama helin {name}. Hubi higgaadda magaca ama isku day magaciisa oo buuxa.")
                     continue
 
                 distinct_search_names = {
