@@ -1967,7 +1967,7 @@ async def whatsapp_webhook(request: Request):
                     sender_phone,
                     f"🌟 *{greeting}!*\n\n"
                     "Halkan waxaa loogu talagalay in Shirkadaha & Ganacsiyada yaryar ay ku maamulaan "
-                    "Soo xaraynta Daymaha ka maqan iyo La socodka kuwa ka baxaya, iyo Adeegyo kale oo badan.\n\n"
+                    "Soo xaraynta Daymaha ka maqan & La socodka kuwa ka baxaya, iyo Adeegyo kale oo badan.\n\n"
                     "Haddii aad rabto inaad isticmaasho Taabo *1*, Haddii kale Taabo *2*."
                 )
                 return {"status": "onboarding_restarted"}
@@ -2020,7 +2020,7 @@ async def whatsapp_webhook(request: Request):
                         if owner_phone:
                             owner_notified = send_whatsapp(
                                 owner_phone,
-                                "📩 *CODSI CUSUB OO DEYNJIR AH*\n\n"
+                                "📩 *CODSI CUSUB AYAA SOO DHACAY*\n\n"
                                 f"Lambarka codsadaha: *{sender_phone}*\n\n"
                                 f"Si aad u oggolaato: *APPROVE {sender_phone}*\n"
                                 f"Si aad u diiddo: *REJECT {sender_phone}*"
