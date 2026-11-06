@@ -462,7 +462,7 @@ def build_statement_pdf(customer_name, debts, payments_by_debt, total_paid, tota
 
     safe_name = escape(str(customer_name or "Customer"))
     safe_business_name = escape(str(business_name or "DEYNJIR"))
-    statement_date = today_eat().strftime("%d %b %Y")
+    statement_date = today_eat().strftime("%Y-%m-%d")
 
     original_total = 0.0
     calculated_paid = 0.0
@@ -3199,8 +3199,14 @@ async def whatsapp_webhook(request: Request):
                 matches = find_debtor_matches(business_user_id, name)
 
                 if len(matches) == 0:
-                    send_whatsapp(sender_phone, f"❌ Lama helin deynta aan weli la bixin ee {name}.")
-                    failed_inserts.append({"name": name, "reason": "Unpaid debtor not found"})
+                    send_whatsapp(
+                        sender_phone,
+                        f"❌ Lama helin deynta aan weli la bixin ee {name} Hubi magaca macmiilka."
+                    )
+                    failed_inserts.append({
+                        "name": name,
+                        "reason": "Unpaid debtor not found"
+                    })
                     continue
 
                 if len(matches) > 1:
@@ -3276,7 +3282,7 @@ async def whatsapp_webhook(request: Request):
                         sender_phone,
                         f"✅ {updated_debtor['name']}\n"
                         f"Lacag-bixin: ${actual_payment:.2f}\n"
-                        f"Baaqiga daynta: ${float(updated_debtor['amount']):.2f}."
+                        f"Baaqiga: ${float(updated_debtor['amount']):.2f}."
                     )
 
             except Exception as e:
@@ -3342,7 +3348,7 @@ async def whatsapp_webhook(request: Request):
                     else:
                         send_whatsapp(
                             sender_phone,
-                            "✅ Ma jiraan deyn aan la bixin."
+                            "✅ Ma jirto deyn aan la bixin."
                         )
                     continue
 
@@ -3372,12 +3378,12 @@ async def whatsapp_webhook(request: Request):
 
                                 if days_left < 0:
                                     status = (
-                                        f" ⚠️ "
+                                        f" ⚠️ Mudo dhaaf "
                                         f"({abs(days_left)} maalin)"
                                     )
                                     overdue_count += 1
                                 elif days_left == 0:
-                                    status = " 🔴 Balanta maanta"
+                                    status = " 🔴 Balan = maanta"
                                 else:
                                     status = f" 📅 {due_date}"
 
@@ -3402,12 +3408,12 @@ async def whatsapp_webhook(request: Request):
 
                 if wants_due_dates and overdue_count > 0:
                     message = (
-                        f"⚠️ {overdue_count} deyn balan dhaaftay:\n\n"
+                        f"⚠️ {overdue_count} Macmiil ayaa mudo dhaaf ah:\n\n"
                         + message
                     )
 
                 message += (
-                    f"\n\n💰 Lacagta guud: "
+                    f"\n\n💰 Total: "
                     f"${total:.2f}"
                 )
 
@@ -3426,15 +3432,7 @@ async def whatsapp_webhook(request: Request):
                     "name": "LIST",
                     "reason": f"List error: {str(e)}"
                 })
-
-        elif action == "EDIT":
-            try:
-                matches = find_debtor_matches(business_user_id, name)
-
-                if len(matches) == 0:
-                    send_whatsapp(sender_phone, f"❌ Lama helin deynta aan weli la bixin ee {name}.")
-                    failed_inserts.append({"name": name, "reason": "Debtor not found"})
-                    continue
+                continue
 
                 # A name-only EDIT/SAX request renames every debt row belonging
                 # to the same exact stored customer name. It does not alter
@@ -4367,7 +4365,7 @@ async def daily_digest(request: Request):
                 if due_date < today_date:
                     overdue_days = (today_date - due_date).days
                     overdue_items.append(
-                        f"• {customer_name}: {amount_text} — ⚠️ Balan dhaaf ({overdue_days} maalin)"
+                        f"• {customer_name}: {amount_text} — ⚠️ Mudo dhaaf ({overdue_days} maalin)"
                     )
                 elif due_date == today_date:
                     today_items.append(f"• {customer_name}: {amount_text} — 🔴 Maanta")
