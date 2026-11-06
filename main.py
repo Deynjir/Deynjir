@@ -2931,6 +2931,40 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Maxaad ka wadaa?\n\n" + deynjir_main_menu())
                 return {"status": "friendly_fallback_sent"}
 
+    # Reject invalid/empty AI intents before they can reach database handlers.
+    # Gemini sometimes labels meaningless text as SEARCH with customer_name=null.
+    valid_actions = {"ADD", "PAY", "LIST", "SEARCH", "EDIT", "DELETE", "HISTORY", "REPORT", "EXPORT"}
+    if not pdf_only_requested and not rename_request and not forced_transaction_action:
+        usable_entries = [
+            item for item in entries
+            if isinstance(item, dict) and str(item.get("action") or "").upper() in valid_actions
+        ]
+        if not usable_entries:
+            print(f"⚠️ No usable intent extracted; message={message_text!r}; entries={entries!r}")
+            send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Maxaad ka wadaa?")
+            return {"status": "unrecognized_message"}
+        entries = usable_entries
+
+        # A SEARCH action without a name is not a search. Ask for the name only
+        # when the user actually issued a search command; otherwise treat the
+        # model's empty SEARCH classification as an unrecognized message.
+        for item in entries:
+            action = str(item.get("action") or "").upper()
+            if action == "SEARCH" and not str(item.get("customer_name") or "").strip():
+                explicit_search = bool(re.match(
+                    r"^\\s*(?:search|find|lookup|look\\s+up|raadi|raadso)\\b",
+                    str(message_text or ""), flags=re.IGNORECASE
+                ))
+                if explicit_search:
+                    send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca ii sheeg.")
+                    return {"status": "search_name_required"}
+                print(
+                    f"⚠️ Rejected empty SEARCH intent for unrecognized text: "
+                    f"{message_text!r}"
+                )
+                send_whatsapp(sender_phone, "Qoraalka si fiican uma fahmin. Maxaad ka wadaa?")
+                return {"status": "unrecognized_message"}
+
     # If the user answered the pending question, apply that answer to every
     # entry extracted from the saved original message. Otherwise require an
     # explicit direction before any ADD/PAY financial operation.
@@ -3693,10 +3727,14 @@ async def whatsapp_webhook(request: Request):
                 })
         
         elif action == "SEARCH":
+            if not str(name or "").strip():
+                print(f"⚠️ Blocked SEARCH with missing customer_name: message={message_text!r}")
+                send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca ii sheeg.")
+                continue
             try:
                 search_matches = find_debtor_matches(business_user_id, name)
                 if not search_matches:
-                    send_whatsapp(sender_phone, f"❌ Lama helin {name}. Hubi higgaadda magaca ama isku day magaciisa oo buuxa.")
+                    send_whatsapp(sender_phone, "Ma heli karo qofkan. Hubi magaciisa?")
                     continue
 
                 distinct_search_names = {
