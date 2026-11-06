@@ -3434,6 +3434,15 @@ async def whatsapp_webhook(request: Request):
                 })
                 continue
 
+        elif action == "EDIT":
+            try:
+                matches = find_debtor_matches(business_user_id, name)
+
+                if len(matches) == 0:
+                    send_whatsapp(sender_phone, f"❌ Lama helin deynta aan weli la bixin ee {name}.")
+                    failed_inserts.append({"name": name, "reason": "Debtor not found"})
+                    continue
+
                 # A name-only EDIT/SAX request renames every debt row belonging
                 # to the same exact stored customer name. It does not alter
                 # amounts, due dates, payment records, or customer IDs.
