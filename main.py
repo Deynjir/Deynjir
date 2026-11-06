@@ -228,7 +228,7 @@ def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone, is_repeat=Fal
     if is_repeat:
         return (
             f"Asc {name},\n\n"
-            f"Waxaad weli lagugu leeyahay *${balance:.2f}*.\n\n"
+            f"Waxaa weli lagugu leeyahay *${balance:.2f}*.\n\n"
             "Fadlan soo bixi lacagta. Mahadsanid."
         )
 
@@ -1713,17 +1713,27 @@ async def whatsapp_webhook(request: Request):
             )
             return {"status": "import_image_error"}
 
-    # ✅ HANDLE TEXT MESSAGES
+    # ✅ HANDLE TEXT MESSAGES, INCLUDING WHATSAPP QUOTED REPLIES
     try:
         if type_message == "textMessage":
-            message_text = message_data["textMessageData"]["textMessage"]
+            message_text = message_data.get("textMessageData", {}).get("textMessage", "")
         elif type_message == "extendedTextMessage":
-            message_text = message_data["extendedTextMessageData"]["text"]
+            message_text = message_data.get("extendedTextMessageData", {}).get("text", "")
+        elif type_message == "quotedMessage":
+            # Green-API sends a WhatsApp reply/quote as typeMessage="quotedMessage".
+            # The user's actual reply text is in extendedTextMessageData.text;
+            # quotedMessage contains the message being replied to, not the new text.
+            message_text = message_data.get("extendedTextMessageData", {}).get("text", "")
         else:
-            return {"status": "unsupported_message_type"}
-    except KeyError:
+            print(f"⚠️ Unsupported incoming message type: {type_message}")
+            return {"status": "unsupported_message_type", "type_message": type_message}
+    except (KeyError, TypeError) as exc:
+        print(f"❌ Could not extract incoming text: {type_message} - {exc}")
         return {"status": "no_text_payload"}
-        
+
+    print(f"📩 INCOMING MESSAGE TYPE: {type_message}")
+    print(f"💬 EXTRACTED MESSAGE TEXT: {message_text!r}")
+
     if not message_text:
         return {"status": "empty_text"}
 
