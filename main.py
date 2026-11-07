@@ -1434,13 +1434,11 @@ def parse_transaction_clarification(message_text):
     ):
         return "CANCEL"
 
-    # A clarification reply may itself be a complete natural transaction
-    # phrase, e.g. "ka jar Xasan Dhakaawe 308". Only infer direction here;
-    # the saved original customer/amount remain unchanged and payment still
-    # goes through the normal confirmation workflow.
-    explicit_direction = classify_transaction_direction(text)
-    if explicit_direction in {"ADD", "PAY"}:
-        return explicit_direction
+    # Do not treat a complete new transaction as an answer to the old
+    # clarification. For example, while waiting for DEYN CUSUB/LACAG BIXIN,
+    # "Ka jar Muna $10" is a NEW payment command, not confirmation of the
+    # previous message. Only the exact short answers above (or the explicit
+    # answer patterns) may replay a saved transaction.
     return None
 
 
@@ -1563,7 +1561,7 @@ def local_fallback_parse(message_text):
                 break
             tail_description = segment[match.end():].strip(" .,:;-")
             tail_description = re.sub(
-                r"\\b(?:ayuu|wuxuu|wuu|ayaa|iga|qaatay|qaatey|qaato|bixiyay|bixiyey|bixisay|celiyay|celiyey|paid|repaid|amaah|deyn|dayn|cusub)\\b",
+                r"\b(?:ayuu|wuxuu|wuu|ayaa|iga|qaatay|qaatey|qaato|bixiyay|bixiyey|bixisay|celiyay|celiyey|paid|repaid|amaah|deyn|dayn|cusub|usd|dollars?|dollar)\b",
                 " ", tail_description, flags=re.I
             )
             tail_description = " ".join(tail_description.split()).strip(" .,:;-")
@@ -1631,7 +1629,7 @@ def local_fallback_parse(message_text):
             r"\b(?:ayuu|wuxuu|wuu|ayaa|ayay|ayaan|waxay|way|buu|bay|iga|"
             r"qaatay|qaadatay|qaateen|qaatey|qaato|bixiyay|bixiyey|bixisay|"
             r"celiyay|celiyey|celisay|celiyeen|soo|helay|keenay|keentay|qabatay|qabtay|"
-            r"shubay|shubtay|xareeyay|xareysay|ii|ka|lacag|bixin|paid|repaid|amaah|deyn|dayn|cusub)\b",
+            r"shubay|shubtay|xareeyay|xareysay|ii|ka|lacag|bixin|paid|repaid|amaah|deyn|dayn|cusub|usd|dollars?|dollar)\b",
             " ", tail, flags=re.I
         )
         tail = " ".join(tail.split()).strip(" .,:;-")
@@ -1647,7 +1645,7 @@ def local_fallback_parse(message_text):
 
     name_text = re.sub(r"\b(?:\$|usd|dollars?|ayuu|ayuu\s+iga\s+qaatay)\b", " ", name_text, flags=re.I)
 
-    name_text = re.sub(r"^(?:edit|add|deyn|delete|remove|tirtir|search|find|lookup|look\s+up|raadi|raadso|show|check|hubi)\b\s*[:,-]?\s*", "", name_text, flags=re.I)
+    name_text = re.sub(r"^(?:edit|add|deyn|dayn|delete|remove|tirtir|search|find|lookup|look\s+up|raadi|raadso|show|check|hubi|ka\s+jar|ka\s+jarey|ka\s+reeb|ka\s+reebay)\b\s*[:,-]?\s*", "", name_text, flags=re.I)
 
     name_text = re.sub(r"\b(?:deyntiisa|deynta|deynteeda|balance|amount)\s+(?:ka\s+dhig|kadhig|ka\s+dhigo)\b", " ", name_text, flags=re.I)
 
@@ -4162,6 +4160,7 @@ async def whatsapp_webhook(request: Request):
     # Render restarts. The original message is replayed only after a clear answer.
     pending_clarification = None
     forced_transaction_action = None
+    pending_new_transaction_entries = None
     try:
         pending_result = (
             supabase.table("pending_transaction_clarifications")
@@ -4235,8 +4234,29 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(sender_phone, "❌ Fariintii hore dib looma soo celin karo. Fadlan mar kale dir.")
                 return {"status": "pending_clarification_restore_error"}
         else:
-            send_whatsapp(sender_phone, "Deyn cusub baa mise lacag-bixin?\n\nSoo qor *DEYN CUSUB* ama *LACAG BIXIN*. Qor *JOOJI* haddii aad rabto inaad ka baxdo.")
-            return {"status": "awaiting_transaction_clarification"}
+            # A new, fully specified transaction supersedes the stale pending
+            # clarification. Never replay the previous customer's transaction.
+            fresh_entries = local_fallback_parse(message_text)
+            fresh_financial_entries = [
+                item for item in (fresh_entries or [])
+                if isinstance(item, dict)
+                and str(item.get("action") or "").upper() in {"ADD", "PAY"}
+                and item.get("customer_name")
+                and item.get("amount") is not None
+            ]
+            if fresh_financial_entries and classify_transaction_direction(message_text) in {"ADD", "PAY"}:
+                try:
+                    supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).eq("business_user_id", business_user_id).execute()
+                except Exception as pending_err:
+                    print(f"❌ Could not replace old pending clarification: {pending_err}")
+                    send_whatsapp(sender_phone, "❌ Fariintii hore lama nadiifin. Waxba lama beddelin; fadlan mar kale dir fariinta.")
+                    return {"status": "pending_clarification_replace_error"}
+                pending_new_transaction_entries = fresh_financial_entries
+                pending_clarification = None
+                print(f"🔄 New explicit transaction superseded stale clarification: {fresh_financial_entries!r}")
+            else:
+                send_whatsapp(sender_phone, "Deyn cusub baa mise lacag-bixin?\n\nSoo qor *DEYN CUSUB* ama *LACAG BIXIN*. Qor *JOOJI* haddii aad rabto inaad ka baxdo.")
+                return {"status": "awaiting_transaction_clarification"}
 
     # Manual debt-reminder workflow: fully rule-based, no Gemini request.
     # Start: XUSUUSIN -> numbered unpaid-customer list -> "1,3" -> confirmation.
@@ -4571,7 +4591,10 @@ async def whatsapp_webhook(request: Request):
             "Use it for a pronoun-only follow-up only when the user's wording clearly refers to this customer."
         )
     
-    if pending_payment_replay_entry:
+    if pending_new_transaction_entries:
+        entries = pending_new_transaction_entries
+        print(f"⚡ Processing new explicit transaction instead of stale clarification: {entries!r}")
+    elif pending_payment_replay_entry:
         entries = [pending_payment_replay_entry]
         print(
             "⚡ Using corrected pending-debt details locally; skipping Gemini: "
@@ -4610,6 +4633,15 @@ async def whatsapp_webhook(request: Request):
             "🧠 Contextual Somali payment follow-up resolved to recently selected customer: "
             f"{contextual_payment_entry['customer_name']!r}"
         )
+    elif (direct_somali_entries := local_fallback_parse(message_text)) and any(
+        isinstance(item, dict)
+        and str(item.get("action") or "").upper() in {"ADD", "PAY"}
+        and item.get("customer_name")
+        and item.get("amount") is not None
+        for item in direct_somali_entries
+    ) and classify_transaction_direction(message_text) in {"ADD", "PAY"}:
+        entries = direct_somali_entries
+        print(f"⚡ Explicit Somali transaction parsed locally before Gemini: {entries!r}")
     elif (structured_entries := parse_structured_somali_transaction(message_text)):
         entries = structured_entries
         print(f"⚡ Structured Somali transaction parsed locally: {entries}")
@@ -4831,11 +4863,11 @@ async def whatsapp_webhook(request: Request):
                 return {"status": "pending_clarification_save_error"}
             send_whatsapp(
                 sender_phone,
-                "Waxaad qortay magac iyo tiro keliya.\n\n"
+                "Waxaad soo qortay magac iyo tiro keliya.\n\n"
                 "*Hadii aad ula jeedo*\n\n"
-                "*DEYN CUSUB* - Taabo 1 ?\n\n"
-                "*LACAG BIXIN* - Taabo 2.\n"
-                "Haddii aad rabto inaad ka baxdo Soo qor *JOOJI*.\n\n"
+                "Deyn cusub baa mise lacag-bixin?\n\n"
+                "Soo qor *DEYN CUSUB* ama *LACAG BIXIN*.\n"
+                "Soo qor *JOOJI* haddii aad rabto inaad ka baxdo.\n\n"
                 "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
             )
             return {"status": "awaiting_transaction_clarification"}
