@@ -3441,8 +3441,21 @@ async def whatsapp_webhook(request: Request):
                 entry["new_date"] = date_only
                 print(f"🗓️ Date-only ADD converted to EDIT for {name!r}: {date_only} (amount preserved)")
             else:
-                send_whatsapp(sender_phone, "Lacag intee le'eg ayuu qaatay ama bixiyay?")
-                print(f"⚠️ Amount missing for transaction: customer={name!r}; message={message_text!r}")
+                # Preserve this customer's transaction while asking for its amount.
+                GUIDED_SESSIONS[sender_phone] = {
+                    "stage": "debt_amount" if action == "ADD" else "payment_amount",
+                    "transaction_type": "debt" if action == "ADD" else "payment",
+                    "customer_name": str(name).strip(),
+                    "description": description or "-",
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                }
+                send_whatsapp(
+                    sender_phone,
+                    f"{name}, lacag intee le'eg ayuu qaatay ama bixiyay?\n\n"
+                    "Qor lacagta keliya, tusaale: *$4*. Waxba lama diiwaangelin weli. "
+                    "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+                )
+                print(f"⚠️ Amount missing; saved pending transaction context: action={action}, customer={name!r}; message={message_text!r}")
                 continue
 
         # Recover the full stored name from the original WhatsApp message if AI shortened it.
@@ -3471,8 +3484,20 @@ async def whatsapp_webhook(request: Request):
                         failed_inserts.append({"name": name, "reason": "ADD amount must be finite and positive"})
                         continue
                 if amount is None and (not new_phone or entry.get("_structured_somali_transaction")):
-                    send_whatsapp(sender_phone, "Lacag intee le'eg ayuu qaatay ama bixiyay?\n\nQor lacagta keliya, tusaale: *9.50*. Waxba lama diiwaangelin weli.")
-                    print(f"⚠️ Amount missing for ADD: customer={name!r}; message={message_text!r}")
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "debt_amount",
+                        "transaction_type": "debt",
+                        "customer_name": str(name).strip(),
+                        "description": description or "-",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
+                    send_whatsapp(
+                        sender_phone,
+                        f"{name}, lacag intee le'eg ayuu qaatay?\n\n"
+                        "Qor lacagta keliya, tusaale: *$4*. Waxba lama diiwaangelin weli. "
+                        "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+                    )
+                    print(f"⚠️ Amount missing for ADD; saved pending transaction context: customer={name!r}; message={message_text!r}")
                     continue
                 if not promised_date and days_until_due is not None:
                     promised_date = (today_eat() + timedelta(days=int(days_until_due))).isoformat()
@@ -3659,12 +3684,17 @@ async def whatsapp_webhook(request: Request):
 
                 # A missing amount is a full payment ONLY when the AI explicitly says FULL.
                 if payment_amount is None and payment_type != "FULL":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "payment_amount",
+                        "transaction_type": "payment",
+                        "customer_name": str(debtor.get("name") or name).strip(),
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
                     send_whatsapp(
                         sender_phone,
                         f"💵 {debtor['name']} lacag intee le'eg ayaad ka heshay?\n"
-                        f"Tusaale: {debtor['name']} ka jar $10.\n"
-                        "Haddii uu deynta oo dhan bixiyay, qor: "
-                        f"{debtor['name']} wuu bixiyay deyntii oo dhan."
+                        "Qor lacagta keliya, tusaale: *$10*. "
+                        "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
                     )
                     continue
 
