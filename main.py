@@ -60,6 +60,11 @@ IMPORT_SESSION_TTL = timedelta(minutes=30)
 # Short, guided WhatsApp conversations for users who do not remember commands.
 GUIDED_SESSIONS = {}
 GUIDED_SESSION_TTL = timedelta(minutes=15)
+# Pending ADD/PAY customer identity confirmations. No transaction is saved until resolved.
+CUSTOMER_MATCH_SESSIONS = {}
+# Explicit, confirmed DELETE workflow; sender/shop scoped and temporary.
+DELETE_SESSIONS = {}
+DELETE_SESSION_TTL = timedelta(minutes=15)
 
 
 def deynjir_main_menu():
@@ -789,9 +794,11 @@ def classify_transaction_direction(message_text):
         r"dayn\s+qaato|deyn\s+qaato|dayn\s+qaatay|deyn\s+qaatay|"
         r"dayn\s+qaadatay|deyn\s+qaadatay|dayn\s+qaatey|deyn\s+qaatey|"
         r"dayn\s+qaadasho|deyn\s+qaadasho|amaah)\b",
+        r"\b(?:ku\s+dar|kudar|ku\s+biir|ku\s+biiri|ku\s+darid|add\s+to\s+(?:the\s+)?existing)\b",
         r"\b(?:took|borrowed)\b",
     ]
     pay_patterns = [
+        r"\b(?:ka\s+jar|ka\s+jarey|ka\+jar)\b",
         r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|soo celiyay|soo celiyey|celiyay|celiyey)\b",
         r"\b(?:waan ka helay|waxaan ka helay|lacag ayuu soo celiyay|lacag\s*bixin(?:ta)?)\b",
         r"\b(?:paid|payment received|paid back|repaid|returned the money)\b",
@@ -1394,6 +1401,73 @@ def find_debtor_matches(business_user_id, name):
     return scored[0][2]["rows"]
 
 
+
+def is_existing_account_add_request(message_text):
+    """Detect wording that explicitly asks to extend an existing customer account."""
+    text = normalize_customer_name(str(message_text or ""))
+    patterns = (
+        r"\b(?:kudar|ku\s+dar|ku\s+biir|ku\s+biiri|ku\s+biirid)\b",
+        r"\b(?:xisaabtii|xisaabta)\s+(?:hore|jirta)\b",
+        r"\b(?:deyntii|dayntii|deynta|daynta)\s+(?:hore|jirta)\b",
+        r"\b(?:horey?\s+(?:ugu\s+)?dar|ku\s+dar\s+haraaga)\b",
+        r"\badd\s+to\s+(?:the\s+)?existing\s+(?:account|balance)\b",
+    )
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def _unique_customer_names(matches):
+    """Return one display name per distinct normalized customer name."""
+    unique = {}
+    for row in matches or []:
+        display = str(row.get("name") or "").strip()
+        normalized = normalize_customer_name(display)
+        if normalized and normalized not in unique:
+            unique[normalized] = display
+    return list(unique.values())
+
+
+def start_customer_match_session(sender_phone, business_user_id, entry,
+                                 original_message, matches, stage,
+                                 remaining_entries=None, allow_new=False):
+    """Pause an ADD/PAY safely while the sender identifies the intended customer."""
+    names = _unique_customer_names(matches)
+    CUSTOMER_MATCH_SESSIONS[sender_phone] = {
+        "business_user_id": str(business_user_id),
+        "entry": dict(entry),
+        "original_message": str(original_message or ""),
+        "candidate_names": names,
+        "stage": stage,
+        "remaining_entries": [dict(item) for item in (remaining_entries or [])],
+        "allow_new": bool(allow_new),
+        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+    }
+
+    if stage == "confirm_single":
+        prompt = (
+            f"Waxaan helay hal macmiil oo magacaagu u egyahay: *{names[0]}*.\n\n"
+            "Ma isaga/iyada ayaad ula jeeddaa? Soo qor *HAA* ama *MAYA*."
+        )
+        if allow_new:
+            prompt += "\nHaddii aad rabto macmiil cusub, qor *CUSUB*."
+    elif stage == "enter_full_name":
+        prompt = (
+            f"Ma helin *{entry.get('customer_name')}* liiska macaamiisha.\n"
+            "Fadlan qor magaca buuxa ee macmiilka jira. Waxba lama diiwaangelin."
+        )
+    else:
+        prompt = "⚠️ *Waxaan helay macaamiil magacyadoodu isku dhow yihiin.*\n\n"
+        for index, customer_name in enumerate(names[:10], start=1):
+            prompt += f"{index}️⃣ {customer_name}\n"
+        prompt += "\nDooro lambarka macmiilka saxda ah."
+        if allow_new:
+            prompt += "\nHaddii uusan ku jirin, qor *CUSUB*."
+        else:
+            prompt += "\nHaddii uusan ku jirin, qor magaca oo buuxa."
+
+    prompt += "\n\nQor *JOOJI* si aad u baajiso."
+    send_whatsapp(sender_phone, prompt)
+
+
 def ask_for_full_name(sender_phone, matches, action):
     message = "⚠️ Waxaan helay macaamiil isku magac ah:\n\n"
 
@@ -1421,7 +1495,241 @@ def ask_for_full_name(sender_phone, matches, action):
     )
 
     send_whatsapp(sender_phone, message)
-  
+
+
+def find_delete_customer_candidates(business_user_id, requested_name):
+    """Find all plausible distinct customer names for DELETE; never pick one by shortest-name bias."""
+    requested = normalize_customer_name(requested_name)
+    if not requested:
+        return []
+
+    result = (
+        supabase.table("customers")
+        .select("id, name, amount, business_user_id")
+        .eq("business_user_id", business_user_id)
+        .order("name")
+        .execute()
+    )
+    rows = result.data or []
+    grouped = {}
+    for row in rows:
+        display = str(row.get("name") or "").strip()
+        normalized = normalize_customer_name(display)
+        if not normalized:
+            continue
+        item = grouped.setdefault(normalized, {"name": display, "rows": [], "score": 0.0})
+        item["rows"].append(row)
+
+    if requested in grouped:
+        return [grouped[requested]]
+
+    request_tokens = requested.split()
+    token_matches = []
+    for normalized, item in grouped.items():
+        stored_tokens = normalized.split()
+        # Every typed token must correspond to a stored token. Partial spelling
+        # is allowed, but all possible full-name matches are retained.
+        token_scores = []
+        for token in request_tokens:
+            best = max(
+                (difflib.SequenceMatcher(None, token, stored).ratio() for stored in stored_tokens),
+                default=0.0,
+            )
+            token_scores.append(best)
+        if token_scores and all(score >= 0.78 for score in token_scores):
+            item["score"] = sum(token_scores) / len(token_scores)
+            token_matches.append(item)
+    if token_matches:
+        token_matches.sort(key=lambda item: item["score"], reverse=True)
+        return token_matches
+
+    # Word-boundary partial match, preserving every distinct matching name.
+    partial = [
+        item for normalized, item in grouped.items()
+        if f" {requested} " in f" {normalized} " or f" {normalized} " in f" {requested} "
+    ]
+    if partial:
+        return partial
+
+    # Last resort: full-name fuzzy candidates. A single clear candidate is
+    # acceptable only because it will still require an explicit confirmation.
+    scored = []
+    for normalized, item in grouped.items():
+        score = _name_similarity(requested, normalized)
+        if score >= 0.78:
+            item["score"] = score
+            scored.append(item)
+    if not scored:
+        return []
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    best_score = scored[0]["score"]
+    return [item for item in scored if best_score - item["score"] <= 0.08]
+
+
+def begin_delete_flow(sender_phone, business_user_id, requested_name):
+    """Resolve a DELETE name and stage exact row IDs for a second-step confirmation."""
+    requested_name = " ".join(str(requested_name or "").split()).strip(" .,:;")
+    if not requested_name:
+        DELETE_SESSIONS[sender_phone] = {
+            "business_user_id": str(business_user_id),
+            "stage": "name",
+            "expires_at": datetime.now(timezone.utc) + DELETE_SESSION_TTL,
+        }
+        send_whatsapp(sender_phone, "Waa qofkee? Fadlan qor magaca macmiilka aad rabto inaad tirtirto.\nQor *JOOJI* si aad uga baxdo.")
+        return {"status": "delete_name_requested"}
+
+    candidates = find_delete_customer_candidates(business_user_id, requested_name)
+    if not candidates:
+        DELETE_SESSIONS.pop(sender_phone, None)
+        send_whatsapp(sender_phone, f"❌ Lama helin macmiil u dhigma *{requested_name}*. Hubi magaca oo mar kale isku day.")
+        return {"status": "delete_customer_not_found"}
+
+    if len(candidates) > 1:
+        DELETE_SESSIONS[sender_phone] = {
+            "business_user_id": str(business_user_id),
+            "stage": "choose",
+            "candidates": candidates,
+            "expires_at": datetime.now(timezone.utc) + DELETE_SESSION_TTL,
+        }
+        lines = ["⚠️ Magacaasi wuxuu la mid yahay macaamiil kala duwan. Dooro qofka saxda ah:"]
+        for index, candidate in enumerate(candidates[:10], 1):
+            balance = sum(float(row.get("amount") or 0) for row in candidate["rows"])
+            lines.append(f"{index}. {candidate['name']} — ${balance:.2f}")
+        lines.extend(["", "Soo qor lambarka saxda ah ama magaca buuxa.", "Qor *JOOJI* si aad u baajiso."])
+        send_whatsapp(sender_phone, "\n".join(lines))
+        return {"status": "delete_customer_choice_required", "candidate_count": len(candidates)}
+
+    candidate = candidates[0]
+    rows = candidate["rows"]
+    balance = sum(float(row.get("amount") or 0) for row in rows)
+    DELETE_SESSIONS[sender_phone] = {
+        "business_user_id": str(business_user_id),
+        "stage": "confirm",
+        "customer_name": candidate["name"],
+        "customer_ids": [str(row["id"]) for row in rows if row.get("id") is not None],
+        "balance": balance,
+        "expires_at": datetime.now(timezone.utc) + DELETE_SESSION_TTL,
+    }
+    send_whatsapp(
+        sender_phone,
+        f"⚠️ *Xaqiiji tirtiridda*\n\n"
+        f"Macmiil: *{candidate['name']}*\n"
+        f"Wadarta deynta: *${balance:.2f}*\n"
+        f"Diiwaannada la tirtirayo: *{len(rows)}*\n\n"
+        "Haddii tani sax tahay, soo qor *HAA, TIRTIR*.\n"
+        "Haddii kale, soo qor *JOOJI*."
+    )
+    return {"status": "delete_confirmation_required", "customer": candidate["name"], "rows": len(rows)}
+
+
+def handle_delete_session(sender_phone, business_user_id, message_text):
+    """Handle the name, disambiguation, confirmation, and cancellation steps."""
+    state = DELETE_SESSIONS.get(sender_phone)
+    if not state:
+        return None
+    if state.get("business_user_id") != str(business_user_id):
+        DELETE_SESSIONS.pop(sender_phone, None)
+        return None
+
+    now = datetime.now(timezone.utc)
+    expires_at = state.get("expires_at")
+    if not expires_at or now > expires_at:
+        DELETE_SESSIONS.pop(sender_phone, None)
+        send_whatsapp(sender_phone, "⌛ Waqtigii tirtiriddu wuu dhammaaday. Waxba lama tirtirin. Mar kale qor *DELETE*.")
+        return {"status": "delete_session_expired"}
+
+    answer = " ".join(str(message_text or "").strip().split())
+    folded = normalize_customer_name(answer)
+    if re.fullmatch(r"(?:jooji|cancel|baaji|stop|maya)", folded, re.I):
+        DELETE_SESSIONS.pop(sender_phone, None)
+        send_whatsapp(sender_phone, "✅ Tirtiridda waa la joojiyey. Waxba lama tirtirin.")
+        return {"status": "delete_cancelled"}
+
+    stage = state.get("stage")
+    if stage == "name":
+        return begin_delete_flow(sender_phone, business_user_id, answer)
+
+    if stage == "choose":
+        candidates = state.get("candidates") or []
+        chosen = None
+        if re.fullmatch(r"\d+", answer):
+            index = int(answer)
+            if 1 <= index <= min(len(candidates), 10):
+                chosen = candidates[index - 1]
+        else:
+            exact = [item for item in candidates if normalize_customer_name(item.get("name")) == folded]
+            if len(exact) == 1:
+                chosen = exact[0]
+        if not chosen:
+            send_whatsapp(sender_phone, "Doorashada lama fahmin. Soo qor lambarka liiska ama magaca buuxa ee saxda ah. *JOOJI* si aad u baajiso.")
+            return {"status": "delete_choice_invalid"}
+        candidate_rows = chosen["rows"]
+        balance = sum(float(row.get("amount") or 0) for row in candidate_rows)
+        state.update({
+            "stage": "confirm",
+            "customer_name": chosen["name"],
+            "customer_ids": [str(row["id"]) for row in candidate_rows if row.get("id") is not None],
+            "balance": balance,
+            "expires_at": now + DELETE_SESSION_TTL,
+        })
+        send_whatsapp(
+            sender_phone,
+            f"⚠️ *Xaqiiji tirtiridda*\n\nMacmiil: *{chosen['name']}*\n"
+            f"Wadarta deynta: *${balance:.2f}*\n"
+            f"Diiwaannada la tirtirayo: *{len(candidate_rows)}*\n\n"
+            "Haddii tani sax tahay, soo qor *HAA, TIRTIR*.\nHaddii kale, soo qor *JOOJI*."
+        )
+        return {"status": "delete_confirmation_required", "customer": chosen["name"]}
+
+    if stage == "confirm":
+        if not re.fullmatch(r"(?:haa\s*,?\s*tirtir|tirtir|confirm\s+delete|yes\s+delete)", folded, re.I):
+            send_whatsapp(sender_phone, "Fadlan xaqiiji adigoo qoraya *HAA, TIRTIR*, ama qor *JOOJI*. Waxba lama tirtirin.")
+            return {"status": "delete_waiting_confirmation"}
+
+        customer_name = state.get("customer_name") or "macmiilka"
+        customer_ids = state.get("customer_ids") or []
+        if not customer_ids:
+            DELETE_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "❌ Diiwaanka macmiilka lama xaqiijin karin. Waxba lama tirtirin.")
+            return {"status": "delete_missing_ids"}
+
+        try:
+            deleted_count = 0
+            for customer_id in customer_ids:
+                result = (
+                    supabase.table("customers")
+                    .delete()
+                    .eq("id", customer_id)
+                    .eq("business_user_id", business_user_id)
+                    .select("id")
+                    .execute()
+                )
+                deleted_count += len(result.data or [])
+            DELETE_SESSIONS.pop(sender_phone, None)
+            if deleted_count != len(customer_ids):
+                send_whatsapp(sender_phone, f"⚠️ {customer_name}: {deleted_count} ka mid ah {len(customer_ids)} diiwaan ayaa la tirtiray. Fadlan hubi liiska daynta.")
+                return {"status": "delete_partial", "deleted": deleted_count}
+            send_whatsapp(sender_phone, f"✅ Deynta *{customer_name}* waa la tirtiray.")
+            return {"status": "delete_confirmed", "deleted": deleted_count}
+        except Exception as exc:
+            print(f"❌ Confirmed delete failed: {type(exc).__name__}: {exc}")
+            DELETE_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "❌ Tirtiriddu way fashilantay. Diiwaanka lama xaqiijin inuu tirtirmay; fadlan hubi liiska daynta.")
+            return {"status": "delete_error"}
+
+    DELETE_SESSIONS.pop(sender_phone, None)
+    return None
+
+
+def parse_explicit_delete_command(message_text):
+    """Return the customer name for a direct DELETE/REMOVE/TIRTIR command."""
+    raw = " ".join(str(message_text or "").strip().split())
+    match = re.match(r"^(?:delete|remove|tirtir)\b\s*[:,-]?\s*(.*?)\s*[.!]?$", raw, re.I)
+    if not match:
+        return None
+    return match.group(1).strip(" .,:;") or ""
+
+
 def send_due_list_followup(phone):
     send_whatsapp(
         phone,
@@ -2400,6 +2708,22 @@ async def whatsapp_webhook(request: Request):
         print(f"❌ DATABASE ERROR (Business User Lookup): {db_err}")
         return {"status": "business_user_db_error"}
 
+    # DELETE is handled locally and safely before Gemini or other command routing.
+    # A name is resolved against this shop; multiple possible names require a choice.
+    pending_delete = DELETE_SESSIONS.get(sender_phone)
+    explicit_delete_name = parse_explicit_delete_command(message_text)
+    if pending_delete:
+        # A fresh explicit DELETE command intentionally replaces the previous
+        # pending delete request; otherwise continue its name/choice/confirmation step.
+        if explicit_delete_name is None:
+            delete_result = handle_delete_session(sender_phone, business_user_id, message_text)
+            if delete_result is not None:
+                return delete_result
+    if explicit_delete_name is not None:
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+        return begin_delete_flow(sender_phone, business_user_id, explicit_delete_name)
+
     # Friendly onboarding and guided actions. Numeric choices are interpreted
     # only while a menu session is active, so ordinary numbers remain untouched.
     guided_text = str(message_text or "").strip()
@@ -2419,6 +2743,7 @@ async def whatsapp_webhook(request: Request):
 
     menu_words = {"menu", "start", "hello", "hi", "hey", "help", "caawi", "caawimaad", "bilow"}
     if guided_text.casefold() in menu_words:
+        CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
         GUIDED_SESSIONS[sender_phone] = {
             "stage": "menu",
             "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
@@ -2500,8 +2825,15 @@ async def whatsapp_webhook(request: Request):
             activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "guided_session_invalid"}
-        message_text = (f"{name} ${amount} ayuu iga qaatay" if transaction_type == "debt"
-                        else f"{name} ${amount} ayuu bixiyay")
+        saved_description = str(guided.get("description") or "").strip()
+        description_part = f" {saved_description}" if saved_description and saved_description != "-" else ""
+        message_text = (
+            f"{name} ${amount}{description_part} ayuu iga qaatay"
+            if transaction_type == "debt"
+            else f"{name} ${amount}{description_part} ayuu bixiyay"
+        )
+        if transaction_type == "debt" and guided.get("existing_account_request"):
+            message_text += " ku dar xisaabtii hore"
         print(f"✅ Guided transaction ready: type={transaction_type}, name={name!r}, amount={amount}")
 
     if guided and guided.get("stage") == "confirm":
@@ -2744,6 +3076,115 @@ async def whatsapp_webhook(request: Request):
             print(f"❌ SAX lookup failed: {exc}")
             send_whatsapp(sender_phone, "❌ Magaca lama hubin karin. Mar kale isku day.")
             return {"status": "rename_lookup_error"}
+
+    # Resolve a pending customer identity before parsing another message. The
+    # saved transaction is replayed only after a clear selection; no money is
+    # changed while this session is waiting.
+    customer_match_resume_entry = None
+    customer_match_resume_remaining = []
+    customer_match_resume_forced_action = None
+    customer_match_state = CUSTOMER_MATCH_SESSIONS.get(sender_phone)
+    if customer_match_state:
+        if customer_match_state.get("business_user_id") != str(business_user_id):
+            CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+            customer_match_state = None
+        elif datetime.now(timezone.utc) > customer_match_state.get(
+            "expires_at", datetime.min.replace(tzinfo=timezone.utc)
+        ):
+            CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "⌛ Xulashadii macmiilka way dhacday. Waxba lama diiwaangelin. Fadlan macaamilka mar kale dir.")
+            return {"status": "customer_match_session_expired"}
+
+    if customer_match_state:
+        answer = str(message_text or "").strip()
+        answer_folded = normalize_customer_name(answer)
+        if re.fullmatch(r"(?:jooji|cancel|baaji|stop)", answer, re.I):
+            CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "Waa la joojiyey. Waxba lama diiwaangelin.")
+            return {"status": "customer_match_cancelled"}
+
+        stage = customer_match_state.get("stage")
+        candidate_names = customer_match_state.get("candidate_names") or []
+        entry = dict(customer_match_state.get("entry") or {})
+        selected_name = None
+        force_new = False
+
+        if stage == "choose":
+            if answer_folded == "cusub" and customer_match_state.get("allow_new"):
+                force_new = True
+            elif answer_folded == "cusub":
+                send_whatsapp(sender_phone, "Codsigan wuxuu u baahan yahay macmiil hore u jiray. Fadlan dooro lambarka ama qor magaca buuxa.")
+                return {"status": "customer_match_new_not_allowed"}
+            elif re.fullmatch(r"\d+", answer):
+                selected_index = int(answer)
+                if 1 <= selected_index <= min(len(candidate_names), 10):
+                    selected_name = candidate_names[selected_index - 1]
+                else:
+                    send_whatsapp(sender_phone, "Lambarkaasi sax ma aha. Fadlan dooro mid ka mid ah lambarrada liiska.")
+                    return {"status": "customer_match_invalid_choice"}
+            elif answer_folded:
+                # A full name typed instead of a number is treated as a fresh
+                # lookup, not as permission to create a customer.
+                entry["customer_name"] = answer
+                entry["_existing_account_lookup_attempted"] = bool(
+                    is_existing_account_add_request(customer_match_state.get("original_message"))
+                )
+                entry["_customer_match_confirmed"] = False
+                selected_name = answer
+            else:
+                send_whatsapp(sender_phone, "Fadlan dooro lambarka macmiilka, ama qor magaca oo buuxa.")
+                return {"status": "customer_match_choice_pending"}
+        elif stage == "confirm_single":
+            if answer_folded in {"haa", "h", "yes", "y", "ok", "sax", "1"}:
+                selected_name = candidate_names[0] if candidate_names else entry.get("customer_name")
+            elif answer_folded == "cusub" and customer_match_state.get("allow_new"):
+                force_new = True
+            elif answer_folded in {"maya", "no", "n", "2"}:
+                customer_match_state["stage"] = "enter_full_name"
+                customer_match_state["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+                send_whatsapp(sender_phone, "Hagaag. Fadlan qor magaca buuxa ee macmiilka aad ula jeeddo.\nQor *CUSUB* haddii aad rabto macmiil cusub, ama *JOOJI*.")
+                return {"status": "customer_match_full_name_requested"}
+            else:
+                send_whatsapp(sender_phone, "Fadlan ku jawaab *HAA* ama *MAYA*.")
+                return {"status": "customer_match_confirmation_pending"}
+        elif stage == "enter_full_name":
+            if answer_folded == "cusub" and customer_match_state.get("allow_new"):
+                force_new = True
+            elif answer_folded == "cusub":
+                send_whatsapp(sender_phone, "Halkan waxaa loo baahan yahay magaca macmiilka jira. Fadlan qor magaca buuxa ama *JOOJI*.")
+                return {"status": "customer_match_new_not_allowed"}
+            elif len(answer) >= 2 and len(answer) <= 120 and not re.fullmatch(r"\d+", answer):
+                selected_name = answer
+                entry["_existing_account_lookup_attempted"] = bool(
+                    is_existing_account_add_request(customer_match_state.get("original_message"))
+                )
+                entry["_customer_match_confirmed"] = False
+            else:
+                send_whatsapp(sender_phone, "Fadlan qor magaca buuxa, ama *JOOJI*.")
+                return {"status": "customer_match_full_name_invalid"}
+
+        if force_new:
+            entry["_force_new_customer"] = True
+            entry["_customer_match_confirmed"] = True
+            if entry.get("amount") is not None:
+                entry["_source_amount_verified"] = True
+        elif selected_name:
+            entry["customer_name"] = selected_name
+            entry["_customer_match_confirmed"] = True
+            if entry.get("amount") is not None:
+                # The original transaction passed source-amount validation before
+                # this identity prompt; retain that validation after the name changes.
+                entry["_source_amount_verified"] = True
+
+        CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+        customer_match_resume_entry = entry
+        customer_match_resume_remaining = customer_match_state.get("remaining_entries") or []
+        customer_match_resume_forced_action = str(entry.get("action") or "").upper()
+        message_text = customer_match_state.get("original_message") or message_text
+        print(
+            f"✅ Customer match resolved: action={customer_match_resume_forced_action}, "
+            f"name={entry.get('customer_name')!r}, new_customer={force_new}"
+        )
 
     # A pending transaction clarification is persisted in Supabase so it survives
     # Render restarts. The original message is replayed only after a clear answer.
@@ -3088,7 +3529,11 @@ async def whatsapp_webhook(request: Request):
     today_str = today_eat().isoformat()
     dynamic_system_prompt = f"{SYSTEM_PROMPT}\nToday's date is strictly: {today_str}. Use this to calculate calendar targets or relative days offsets like 'berri'."
     
-    if pdf_only_requested:
+    if customer_match_resume_entry:
+        entries = [customer_match_resume_entry] + [dict(item) for item in customer_match_resume_remaining]
+        forced_transaction_action = customer_match_resume_forced_action
+        print(f"🔁 Resuming saved transaction after customer selection: {customer_match_resume_forced_action}")
+    elif pdf_only_requested:
         entries = [{"action": "HISTORY", "customer_name": pdf_customer_name}]
         print(f"📄 Skipping Gemini for PDF follow-up; using saved customer {pdf_customer_name!r}")
     elif standalone_detail_customer:
@@ -3384,7 +3829,7 @@ async def whatsapp_webhook(request: Request):
     successful_inserts = []
     failed_inserts = []
     
-    for entry in entries:
+    for entry_index, entry in enumerate(entries):
         action = str(entry.get("action", "ADD") or "ADD").upper()
         name = entry.get("customer_name")
         amount = entry.get("amount")
@@ -3447,6 +3892,7 @@ async def whatsapp_webhook(request: Request):
                     "transaction_type": "debt" if action == "ADD" else "payment",
                     "customer_name": str(name).strip(),
                     "description": description or "-",
+                    "existing_account_request": is_existing_account_add_request(message_text) if action == "ADD" else False,
                     "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
                 }
                 send_whatsapp(
@@ -3489,6 +3935,7 @@ async def whatsapp_webhook(request: Request):
                         "transaction_type": "debt",
                         "customer_name": str(name).strip(),
                         "description": description or "-",
+                        "existing_account_request": is_existing_account_add_request(message_text),
                         "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
                     }
                     send_whatsapp(
@@ -3531,11 +3978,43 @@ async def whatsapp_webhook(request: Request):
                 # If the name is ambiguous or multiple active rows exist, ask
                 # the user rather than changing the wrong balance.
                 if amount is not None:
-                    matches = find_debtor_matches(business_user_id, name)
-                    distinct_names = {normalize_customer_name(row.get("name")) for row in matches}
-                    if len(distinct_names) > 1:
-                        ask_for_full_name(sender_phone, matches, "EDIT")
-                        continue
+                    force_new_customer = bool(entry.get("_force_new_customer"))
+                    matches = [] if force_new_customer else find_debtor_matches(business_user_id, name)
+                    distinct_names = _unique_customer_names(matches)
+                    existing_account_request = is_existing_account_add_request(message_text)
+
+                    if len(distinct_names) > 1 and not entry.get("_customer_match_confirmed"):
+                        start_customer_match_session(
+                            sender_phone, business_user_id, entry, message_text, matches,
+                            "choose", entries[entry_index + 1:],
+                            allow_new=not existing_account_request
+                        )
+                        break
+
+                    if len(distinct_names) == 1 and not entry.get("_customer_match_confirmed"):
+                        matched_name = distinct_names[0]
+                        if normalize_customer_name(name) != normalize_customer_name(matched_name):
+                            start_customer_match_session(
+                                sender_phone, business_user_id, entry, message_text, matches,
+                                "confirm_single", entries[entry_index + 1:],
+                                allow_new=not existing_account_request
+                            )
+                            break
+
+                    if not matches and existing_account_request and not force_new_customer:
+                        if entry.get("_existing_account_lookup_attempted"):
+                            send_whatsapp(
+                                sender_phone,
+                                f"❌ Ma helin macmiil jira oo la yiraahdo *{name}*. "
+                                "Waxba laguma darin. Hubi magaca macmiilka oo mar kale dir."
+                            )
+                            failed_inserts.append({"name": name, "reason": "Existing customer requested but no match found"})
+                            break
+                        start_customer_match_session(
+                            sender_phone, business_user_id, entry, message_text, [],
+                            "enter_full_name", entries[entry_index + 1:], allow_new=False
+                        )
+                        break
 
                     active_matches = [
                         row for row in matches
@@ -3657,11 +4136,13 @@ async def whatsapp_webhook(request: Request):
                 payment_amount = entry.get("amount")
                 payment_type = str(entry.get("payment_type") or "UNKNOWN").upper()
                 matches = find_debtor_matches(business_user_id, name)
+                distinct_names = _unique_customer_names(matches)
 
                 if len(matches) == 0:
                     send_whatsapp(
                         sender_phone,
-                        f"❌ Lama helin deynta aan weli la bixin ee {name} Hubi magaca macmiilka."
+                        f"❌ Lama helin macmiil deyn ku leh oo la yiraahdo *{name}*. "
+                        "Lacag-bixin lama diiwaangelin. Hubi magaca macmiilka."
                     )
                     failed_inserts.append({
                         "name": name,
@@ -3669,7 +4150,25 @@ async def whatsapp_webhook(request: Request):
                     })
                     continue
 
+                if len(distinct_names) > 1 and not entry.get("_customer_match_confirmed"):
+                    start_customer_match_session(
+                        sender_phone, business_user_id, entry, message_text, matches,
+                        "choose", entries[entry_index + 1:], allow_new=False
+                    )
+                    break
+
+                if len(distinct_names) == 1 and not entry.get("_customer_match_confirmed"):
+                    matched_name = distinct_names[0]
+                    if normalize_customer_name(name) != normalize_customer_name(matched_name):
+                        start_customer_match_session(
+                            sender_phone, business_user_id, entry, message_text, matches,
+                            "confirm_single", entries[entry_index + 1:], allow_new=False
+                        )
+                        break
+
                 if len(matches) > 1:
+                    # Same display name with multiple unpaid debt rows cannot be
+                    # safely distinguished by a name-only selection.
                     ask_for_full_name(sender_phone, matches, "PAY")
                     continue
 
@@ -4076,47 +4575,14 @@ async def whatsapp_webhook(request: Request):
                 failed_inserts.append({"name": name, "reason": f"Edit error: {type(e).__name__}: {e}"})
         
         elif action == "DELETE":
+            # Fallback for AI-recognized DELETE phrasing: it must still pass
+            # through exact-name resolution and the explicit confirmation step.
             try:
-                matches = find_debtor_matches(business_user_id, name)
-
-                if len(matches) == 0:
-                    send_whatsapp(sender_phone, f"❌ Lama helin {name}.")
-                    failed_inserts.append({
-                        "name": name,
-                        "reason": "Debtor not found"
-                    })
-                    continue
-
-                if len(matches) > 1:
-                    ask_for_full_name(sender_phone, matches, "DELETE")
-                    continue
-
-                debtor = matches[0]
-
-                (
-                    supabase.table("customers")
-                    .delete()
-                    .eq("id", debtor["id"])
-                    .eq("business_user_id", business_user_id)
-                    .execute()
-                )
-
-                send_whatsapp(
-                    sender_phone,
-                    f"✅ Deynta {debtor['name']} (${debtor['amount']}) waa la tirtiray."
-                )
-                successful_inserts.append(entry)
-
+                begin_delete_flow(sender_phone, business_user_id, name)
             except Exception as e:
-                print(f"❌ Delete error: {e}")
-                send_whatsapp(
-                    sender_phone,
-                    "❌ Khalad ayaa dhacay marka deynta la tirtirayay."
-                )
-                failed_inserts.append({
-                    "name": name,
-                    "reason": f"Delete error: {str(e)}"
-                })
+                print(f"❌ Delete confirmation setup error: {type(e).__name__}: {e}")
+                send_whatsapp(sender_phone, "❌ Macmiilka lama xaqiijin karin. Waxba lama tirtirin.")
+                failed_inserts.append({"name": name, "reason": f"Delete setup error: {e}"})
         
         elif action == "SEARCH":
             if not str(name or "").strip():
