@@ -4,6 +4,8 @@ import json
 import csv
 import hmac
 import time
+import secrets
+import math
 from zoneinfo import ZoneInfo
 import difflib
 import unicodedata
@@ -39,6 +41,8 @@ app = FastAPI()
 # Remembers the most recent customer statement so the user can request its PDF
 # by sending "PDF" as a follow-up WhatsApp message. Cleared on server restart.
 LAST_HISTORY_REQUESTS = {}
+# First-contact onboarding choices are temporary per-sender conversations.
+ONBOARDING_SESSIONS = {}
 
 # Temporary manual reminder workflow. Sessions expire after 15 minutes and are
 # cleared before sending so a repeated "HAA DIR" cannot resend the same batch.
@@ -769,7 +773,7 @@ def classify_transaction_direction(message_text):
     ]
     pay_patterns = [
         r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|soo celiyay|soo celiyey|celiyay|celiyey)\b",
-        r"\b(?:waan ka helay|waxaan ka helay|lacag ayuu soo celiyay)\b",
+        r"\b(?:waan ka helay|waxaan ka helay|lacag ayuu soo celiyay|lacag\s*bixin(?:ta)?)\b",
         r"\b(?:paid|payment received|paid back|repaid|returned the money)\b",
     ]
     has_add = any(re.search(pattern, text, flags=re.I) for pattern in add_patterns)
@@ -782,22 +786,44 @@ def classify_transaction_direction(message_text):
 
 
 def parse_transaction_clarification(message_text):
-    """Recognize numbered or written replies to the pending transaction question."""
+    """Recognize natural Somali/English answers to a pending ADD-vs-PAY question."""
     text = normalize_customer_name(str(message_text or ""))
 
     # Numbered WhatsApp choices: 1 = new debt, 2 = payment, 3 = cancel.
-    if re.fullmatch(r"1", text):
+    if text == "1":
         return "ADD"
-    if re.fullmatch(r"2", text):
+    if text == "2":
         return "PAY"
-    if re.fullmatch(r"3", text):
+    if text == "3":
         return "CANCEL"
 
-    if re.fullmatch(r"(?:deyn cusub|dayn cusub|deyn cusub oo baxday|lacag baxday|add|new debt|deyn baa baxday)", text, re.I):
+    # People commonly answer in a sentence, not with the exact menu wording:
+    # "Waa lacag bixin", "waa deyn cusub", "lacag-bixin bay ahayd", etc.
+    text = re.sub(
+        r"^(?:waa|waxay ahayd|waxay aheyd|taasi waa|taas waa|waxaan ula jeedaa)\s+",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+
+    if re.fullmatch(
+        r"(?:deyn cusub|dayn cusub|deyn cusub oo baxday|dayn cusub oo baxday|"
+        r"lacag baxday|deyn baa baxday|add|new debt)",
+        text,
+        re.I,
+    ):
         return "ADD"
-    if re.fullmatch(r"(?:deyn soo xarootay|lacag soo xarootay|lacag baa soo gashay|lacag la helay|pay|payment|money received|received payment)", text, re.I):
+
+    if re.fullmatch(
+        r"(?:lacag\s*bixin(?:ta)?|lacag soo xarootay|deyn soo xarootay|"
+        r"lacag baa soo gashay|lacag la helay|bixin|pay|payment|"
+        r"money received|received payment)",
+        text,
+        re.I,
+    ):
         return "PAY"
-    if re.fullmatch(r"(?:jooji|cancel|baaji)", text, re.I):
+
+    if re.fullmatch(r"(?:jooji|cancel|baaji|stop)", text, re.I):
         return "CANCEL"
     return None
 
@@ -865,7 +891,7 @@ def local_fallback_parse(message_text):
     if not amount_matches:
         if re.search(r"\b(?:iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|added|add)\b", low):
             amount_matches = list(re.finditer(r"(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-])", raw))
-        elif re.search(r"\b(?:bixiyay|bixisay|paid|payment)\b", low):
+        elif re.search(r"\b(?:bixiyay|bixisay|paid|payment|lacag\s*bixin(?:ta)?)\b", low):
             amount_matches = list(re.finditer(r"(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-])", raw))
     # Do not guess if there are multiple amounts in a message.
     if len(amount_matches) > 1:
@@ -877,7 +903,7 @@ def local_fallback_parse(message_text):
     is_history = bool(re.search(r"\b(?:history|taariikh|statement|xisaab(?:ta)?)\b",
         low
     ))
-    is_payment = bool(re.search(r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|wuu\s+bixiyay|wuxuu\s+bixiyay|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|paid|payment|repaid|paid\s+back)\b", low))
+    is_payment = bool(re.search(r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|wuu\s+bixiyay|wuxuu\s+bixiyay|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|lacag\s*bixin(?:ta)?|paid|payment|repaid|paid\s+back)\b", low))
 
     if not amount_matches and not any((is_delete, is_search, is_history, is_payment)):
         # A bare name can be searched safely only if the caller verifies it exists.
@@ -909,6 +935,8 @@ def local_fallback_parse(message_text):
     name_text = re.sub(r"\b(?:deyntiisa|deynta|deynteeda|balance|amount)\s+(?:ka\s+dhig|kadhig|ka\s+dhigo)\b", " ", name_text, flags=re.I)
 
     name_text = re.sub(r"\b(?:ka\s+dhig|kadhig|ka\s+dhigo|wuu|wuxuu|ayuu|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|bixiyay|bixiyey|bixisay|bixiyeen|paid|payment|repaid|iga\s+soo|iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|deyntii|deynta|oo\s+dhan|added|add)\b", " ", name_text, flags=re.I)
+    name_text = re.sub(r"\b(?:lacag\s*bixin(?:ta)?|lacagta\s+soo\s+xarootay)\b", " ", name_text, flags=re.I)
+    name_text = re.sub(r"^(?:waa|waxay ahayd|waxay aheyd)\s+", " ", name_text, flags=re.I)
 
     name_text = re.sub(
         r"\b(?:history|taariikh|statement|xisaab(?:ta)?)\b",
@@ -929,8 +957,19 @@ def local_fallback_parse(message_text):
     if is_history:
         return [{**base, "action": "HISTORY", "customer_name": name}]
     if is_payment:
+        explicit_full_payment = bool(re.search(
+            r"\b(?:deyntii\s+oo\s+dhan|dhammaan\s+deynta|deynta\s+oo\s+dhan|"
+            r"paid\s+in\s+full|fully\s+paid|wuu\s+bixiyay|wuxuu\s+bixiyay)\b",
+            low,
+            flags=re.I,
+        ))
+        payment_type = (
+            "PARTIAL" if amount is not None
+            else "FULL" if explicit_full_payment
+            else "UNKNOWN"
+        )
         return [{**base, "action": "PAY", "customer_name": name, "amount": amount,
-                 "payment_type": "PARTIAL" if amount is not None else "FULL"}]
+                 "payment_type": payment_type}]
     if amount is not None and is_replace:
         return [{**base, "action": "EDIT", "customer_name": name,
                  "amount": amount, "new_amount": amount}]
@@ -1220,8 +1259,9 @@ def send_due_list_followup(phone):
         "*Liiska daynta iyo balamaha*"
     )
 def _import_parse_date(value):
+    # Missing due dates stay empty; never invent a promise date of today.
     if value is None or str(value).strip().lower() in ("", "nan", "nat", "none", "null"):
-        return today_eat().isoformat()
+        return None
     if hasattr(value, "strftime"):
         return value.strftime("%Y-%m-%d")
     raw = str(value).strip()
@@ -1247,8 +1287,8 @@ def _validate_import_entries(entries):
             amount = float(entry.get("amount"))
         except (TypeError, ValueError):
             raise ValueError(f"Saf {i} ({name}): lacagtu ma cadda.")
-        if amount <= 0:
-            raise ValueError(f"Saf {i} ({name}): lacagtu waa inay ka weyn tahay eber.")
+        if not math.isfinite(amount) or amount <= 0:
+            raise ValueError(f"Saf {i} ({name}): lacagtu waa inay noqotaa tiro sax ah oo ka weyn eber.")
         phone = entry.get("phone_number") or entry.get("customer_phone")
         if str(phone or "").strip().lower() in ("nan", "none", "null"):
             phone = None
@@ -1362,7 +1402,7 @@ def _stage_import(admin_phone, entries, import_mode="debt"):
     else:
         lines = ["📋 *HORDHACA DEYNTA LA DIIWAANGELINAYO*", f"Tirada macaamiisha: {len(entries)}", ""]
         for i, item in enumerate(entries, 1):
-            lines.append(f"{i}. {item['name']} — ${item['amount']:.2f} — {item['promised_date']}")
+            lines.append(f"{i}. {item['name']} — ${item['amount']:.2f} — {item.get('promised_date') or 'Lama sheegin'}")
         lines += ["", f"*Wadarta guud: ${total:.2f}*", "", "Hubi magacyada iyo lacagaha.",
                   "Haddii ay sax yihiin, soo qor *OK* si loo kaydiyo.",
                   "Haddii kale, soo qor *CANCEL* si loo joojiyo."]
@@ -1424,26 +1464,38 @@ def _apply_import_duplicate_choice(session, choice):
 
 
 def _commit_import(admin_phone, session):
-    entries = session["entries"]
+    """Commit a reviewed import, reporting partial writes rather than hiding them."""
+    entries = list(session.get("entries") or [])
     business_user_id = session["business_user_id"]
     import_mode = session.get("mode", "debt")
 
+    if not entries:
+        raise ValueError("Liiska import-ku waa madhan yahay.")
+
     if import_mode == "payment":
-        # Validate every row before making any changes. A name must resolve to
-        # exactly one unpaid debt, and cumulative imported payments cannot exceed it.
+        # Validate every row before making changes. Each payment must resolve to
+        # exactly one currently unpaid debt, and cumulative rows cannot exceed it.
         prepared = []
         cumulative = {}
-        debt_cache = {}
         for item in entries:
+            amount = float(item["amount"])
+            if not math.isfinite(amount) or amount <= 0:
+                raise ValueError(f"{item.get('name')}: lacagtu ma saxna.")
             matches = find_debtor_matches(business_user_id, item["name"])
-            unpaid = [m for m in matches if not m.get("is_paid") and _safe_money(m.get("amount")) > 0]
+            unpaid = [
+                row for row in matches
+                if row.get("is_paid") is not True and _safe_money(row.get("amount")) > 0
+            ]
             if len(unpaid) != 1:
-                reason = "lama helin deyn aan la bixin" if not unpaid else "waxaa jira deymo badan oo magacaas leh"
+                reason = (
+                    "lama helin deyn aan la bixin"
+                    if not unpaid
+                    else "waxaa jira deymo badan oo magacaas leh"
+                )
                 raise ValueError(f"{item['name']}: {reason}. Hubi magaca ama kala saar deymaha.")
             debtor = unpaid[0]
             debt_id = str(debtor["id"])
-            debt_cache[debt_id] = debtor
-            cumulative[debt_id] = cumulative.get(debt_id, 0.0) + float(item["amount"])
+            cumulative[debt_id] = cumulative.get(debt_id, 0.0) + amount
             if cumulative[debt_id] - _safe_money(debtor.get("amount")) > 0.009:
                 raise ValueError(
                     f"{item['name']}: lacagta la soo gelinayo (${cumulative[debt_id]:.2f}) "
@@ -1463,7 +1515,9 @@ def _commit_import(admin_phone, session):
                 if isinstance(rpc_data, list):
                     rpc_data = rpc_data[0] if rpc_data else None
                 if not isinstance(rpc_data, dict) or not rpc_data.get("id"):
-                    raise RuntimeError("record_debt_payment ma xaqiijin lacag-bixinta. Hubi Supabase.")
+                    raise RuntimeError(
+                        "record_debt_payment ma xaqiijin lacag-bixinta. Hubi Supabase."
+                    )
                 saved += 1
         except Exception as exc:
             if saved:
@@ -1475,18 +1529,15 @@ def _commit_import(admin_phone, session):
                 exc.partial_import = True
             raise
 
-        total_paid = sum(float(x["amount"]) for x in entries)
-        admin_confirmation = (
-            f"✅ Import-ka lacag-bixinta waa dhammaaday.\n"
-            f"Lacag-bixin la diiwaangeliyay: {saved}\n"
-            f"Wadarta lacagta: ${total_paid:.2f}\n"
+        total_paid = sum(float(item["amount"]) for item in entries)
+        send_whatsapp(
+            admin_phone,
+            "✅ Import-ka lacag-bixinta waa dhammaaday.\\n"
+            f"Lacag-bixin la diiwaangeliyay: {saved}\\n"
+            f"Wadarta lacagta: ${total_paid:.2f}\\n"
             "Lacagaha waxaa laga jaray deymaha dukaanka la doortay."
         )
-        send_whatsapp(admin_phone, admin_confirmation)
 
-        # Resolve the registered business user's phone from Supabase rather
-        # than relying only on a temporary session value. This ensures an admin
-        # importing on behalf of a shop notifies the correct business user.
         shop_phone = ""
         shop_name = str(session.get("shop_name") or "Dukaankaaga")
         try:
@@ -1501,7 +1552,10 @@ def _commit_import(admin_phone, session):
                 shop_phone = str(shop_result.data[0].get("phone_number") or "")
                 shop_name = str(shop_result.data[0].get("name") or shop_name)
         except Exception as lookup_exc:
-            print(f"⚠️ Could not look up business user for payment-import notification: {lookup_exc}")
+            print(
+                "⚠️ Could not look up business user for payment-import notification: "
+                f"{type(lookup_exc).__name__}: {lookup_exc}"
+            )
 
         if not shop_phone:
             shop_phone = str(session.get("shop_phone") or "")
@@ -1510,39 +1564,46 @@ def _commit_import(admin_phone, session):
 
         if shop_phone and shop_phone != admin_clean:
             business_message = (
-                f"✅ *Lacag-bixinnada waa la diiwaangeliyey.*\n\n"
-                f"Dukaan: *{shop_name}*\n"
-                f"Tirada lacag-bixinnada: *{saved}*\n"
-                f"Wadarta lacagta: *${total_paid:.2f}*\n\n"
-                "Lacagahan waxaa laga jaray deymaha macaamiisha ee dukaankaaga.\n"
+                "✅ *Lacag-bixinnada waa la diiwaangeliyey.*\\n\\n"
+                f"Dukaan: *{shop_name}*\\n"
+                f"Tirada lacag-bixinnada: *{saved}*\\n"
+                f"Wadarta lacagta: *${total_paid:.2f}*\\n\\n"
+                "Lacagahan waxaa laga jaray deymaha macaamiisha ee dukaankaaga.\\n"
                 "Qor *LIISKA DAYNTA* si aad u aragto haraaga cusub."
             )
             notification_sent = send_whatsapp(shop_phone, business_message)
             print(
-                f"📨 Payment-import business confirmation: "
+                "📨 Payment-import business confirmation: "
                 f"shop_phone={shop_phone}, sent={notification_sent}"
             )
         return
 
+    if import_mode != "debt":
+        raise ValueError("Nooca import-ka lama aqoonsan.")
+
     added = 0
     skipped = int(session.get("pre_skipped", 0) or 0)
-    for item in entries:
-        # Possible duplicates are explicitly resolved by the user before commit.
-        # Choice 2 means repeated rows are separate debts.
-        for item in customers_to_import:
+    allow_duplicates = session.get("duplicate_choice") == "2"
 
-            if session.get("duplicate_choice") != "2":
+    try:
+        for item in entries:
+            amount = float(item["amount"])
+            if not math.isfinite(amount) or amount <= 0:
+                raise ValueError(f"{item.get('name')}: lacagtu ma saxna.")
+
+            # Choice 2 explicitly allows same-name/same-amount rows as separate
+            # debts. Otherwise, recheck before insert to avoid a duplicate race.
+            if not allow_duplicates:
                 existing = (
                     supabase.table("customers")
                     .select("id")
                     .eq("business_user_id", business_user_id)
                     .eq("name", item["name"])
-                    .eq("amount", item["amount"])
+                    .eq("amount", amount)
                     .eq("is_paid", False)
                     .limit(1)
                     .execute()
                 )
-
                 if existing.data:
                     skipped += 1
                     continue
@@ -1550,32 +1611,40 @@ def _commit_import(admin_phone, session):
             row = {
                 "business_user_id": business_user_id,
                 "name": item["name"],
-                "amount": item["amount"],
-                "original_amount": item["amount"],
-                "promised_date": item["promised_date"],
-                "phone_number": item["phone_number"],
-                "is_paid": False
+                "amount": amount,
+                "original_amount": amount,
+                "promised_date": item.get("promised_date"),
+                "phone_number": item.get("phone_number"),
+                "is_paid": False,
             }
-
-            supabase.table("customers").insert(row).execute()
+            result = supabase.table("customers").insert(row).select("id").execute()
+            if not result.data:
+                raise RuntimeError(f"Deynta {item['name']} lama xaqiijin in la kaydiyey.")
             added += 1
-
-        if skipped > 0:
-            admin_confirmation = (
-                f"⚠️ Liiska deynta qayb ahaan ayaa la diiwaangeliyey.\n\n"
-                f"✅ Macaamiisha cusub ee lagu daray: {added}\n"
-                f"⏭️ Macaamiil hore u jiray oo laga booday: {skipped}\n\n"
-                f"Macaamiisha hore laguma darin system-ka mar labaad."
+    except Exception as exc:
+        if added:
+            send_whatsapp(
+                admin_phone,
+                f"⚠️ Import-ku qayb ayuu u dhacay: {added} deyn waa la kaydiyey. "
+                "Ha ku celin isla liiska; marka hore hubi LIISKA DAYNTA."
             )
-        else:
-            admin_confirmation = (
-                f"✅ Waad ku guulaysatay diiwaangelinta deyntan.\n\n"
-                f"👥 Tirada macaamiisha cusub ee lagu daray: {added}"
-            )
+            exc.partial_import = True
+        raise
 
-        send_whatsapp(admin_phone, admin_confirmation)
-    # Notify the registered business user when an admin imports debts on
-    # their behalf. Resolve the phone from Supabase, not only session data.
+    if skipped:
+        admin_confirmation = (
+            "⚠️ Liiska deynta qayb ahaan ayaa loo diiwaangeliyey.\\n\\n"
+            f"✅ Deymo cusub oo lagu daray: {added}\\n"
+            f"⏭️ Deymo hore oo laga booday: {skipped}\\n\\n"
+            "Deymaha hore laguma darin mar labaad."
+        )
+    else:
+        admin_confirmation = (
+            "✅ Liiska deynta waa la diiwaangeliyey.\\n\\n"
+            f"👥 Deymo cusub oo lagu daray: {added}"
+        )
+    send_whatsapp(admin_phone, admin_confirmation)
+
     shop_phone = ""
     shop_name = str(session.get("shop_name") or "Dukaankaaga")
     try:
@@ -1590,7 +1659,10 @@ def _commit_import(admin_phone, session):
             shop_phone = str(shop_result.data[0].get("phone_number") or "")
             shop_name = str(shop_result.data[0].get("name") or shop_name)
     except Exception as lookup_exc:
-        print(f"⚠️ Could not look up business user for debt-import notification: {lookup_exc}")
+        print(
+            "⚠️ Could not look up business user for debt-import notification: "
+            f"{type(lookup_exc).__name__}: {lookup_exc}"
+        )
 
     if not shop_phone:
         shop_phone = str(session.get("shop_phone") or "")
@@ -1599,15 +1671,15 @@ def _commit_import(admin_phone, session):
 
     if shop_phone and shop_phone != admin_clean:
         business_message = (
-            f"✅ *Deymo cusub ayaa lagu daray liiskaaga.*\n\n"
-            f"magaca: *{shop_name}*\n"
-            f"Macaamiil cusub: *{added}*\n"
-            f"Deyn hore oo laga booday: *{skipped}*\n\n"
+            "✅ *Deymo cusub ayaa lagu daray liiskaaga.*\\n\\n"
+            f"Dukaan: *{shop_name}*\\n"
+            f"Macaamiil/deymo cusub: *{added}*\\n"
+            f"Deyn hore oo laga booday: *{skipped}*\\n\\n"
             "Qor *LIISKA DAYNTA* si aad u aragto deymaha cusub."
         )
         notification_sent = send_whatsapp(shop_phone, business_message)
         print(
-            f"📨 Debt-import business confirmation: "
+            "📨 Debt-import business confirmation: "
             f"shop_phone={shop_phone}, sent={notification_sent}"
         )
     else:
@@ -1668,7 +1740,11 @@ async def whatsapp_webhook(request: Request):
     # Import files are accepted only during an authenticated approved-user
     # import session. Nothing is saved before the sender confirms with OK.
     if type_message == "documentMessage":
-        if sender_phone not in IMPORT_SESSIONS:
+        import_state = IMPORT_SESSIONS.get(sender_phone)
+        if import_state and datetime.now(timezone.utc) > import_state.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
+            IMPORT_SESSIONS.pop(sender_phone, None)
+            import_state = None
+        if import_state is None:
             send_whatsapp(sender_phone, "Waan arkay faylkaaga. Si aan u akhriyo, marka hore qor *IMPORT*, kadib dooro *DEYN* ama *LACAG BIXIN*, markaa soo dir faylka. Hada Waxba lama kaydin.")
             return {"status": "import_session_required"}
         if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
@@ -1717,7 +1793,11 @@ async def whatsapp_webhook(request: Request):
             return {"status": "import_document_error"}
 
     if type_message == "imageMessage":
-        if sender_phone not in IMPORT_SESSIONS:
+        import_state = IMPORT_SESSIONS.get(sender_phone)
+        if import_state and datetime.now(timezone.utc) > import_state.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
+            IMPORT_SESSIONS.pop(sender_phone, None)
+            import_state = None
+        if import_state is None:
             send_whatsapp(sender_phone, "Waan arkay sawirkaaga. Si aan u akhriyo, marka hore soo Qor *IMPORT*, kadib dooro *DEYN* ama *LACAG BIXIN*.")
             return {"status": "import_session_required"}
         if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
@@ -2511,7 +2591,7 @@ async def whatsapp_webhook(request: Request):
             if created_at and created_at.tzinfo is None:
                 created_at = created_at.replace(tzinfo=timezone.utc)
             if not created_at or datetime.now(timezone.utc) - created_at > timedelta(minutes=30):
-                supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).execute()
+                supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).eq("business_user_id", business_user_id).execute()
             else:
                 pending_clarification = candidate
     except Exception as pending_err:
@@ -2545,7 +2625,7 @@ async def whatsapp_webhook(request: Request):
                     raise ValueError("Saved pending entries are empty or invalid")
                 forced_transaction_action = clarification_action
                 message_text = pending_clarification.get("original_message") or message_text
-                supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).execute()
+                supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).eq("business_user_id", business_user_id).execute()
                 print(f"✅ Clarification received; replaying saved message as {forced_transaction_action}")
             except Exception as pending_err:
                 print(f"❌ Pending clarification restore failed: {pending_err}")
@@ -2947,6 +3027,13 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "friendly_fallback_sent"}
 
+    # Normalize action labels once, including saved clarification entries, so
+    # downstream routing never depends on Gemini's capitalization.
+    if isinstance(entries, list):
+        for parsed_item in entries:
+            if isinstance(parsed_item, dict) and parsed_item.get("action") is not None:
+                parsed_item["action"] = str(parsed_item["action"]).upper()
+
     # Reject invalid/empty AI intents before they can reach database handlers.
     # Gemini sometimes labels meaningless text as SEARCH with customer_name=null.
     valid_actions = {"ADD", "PAY", "LIST", "SEARCH", "EDIT", "DELETE", "HISTORY", "REPORT", "EXPORT"}
@@ -2960,6 +3047,8 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "unrecognized_message"}
         entries = usable_entries
+        for parsed_item in entries:
+            parsed_item["action"] = str(parsed_item.get("action") or "").upper()
 
         # A SEARCH action without a name is not a search. Ask for the name only
         # when the user actually issued a search command; otherwise treat the
@@ -2968,7 +3057,7 @@ async def whatsapp_webhook(request: Request):
             action = str(item.get("action") or "").upper()
             if action == "SEARCH" and not str(item.get("customer_name") or "").strip():
                 explicit_search = bool(re.match(
-                    r"^\\s*(?:search|find|lookup|look\\s+up|raadi|raadso)\\b",
+                    r"^\s*(?:search|find|lookup|look\s+up|raadi|raadso)\b",
                     str(message_text or ""), flags=re.IGNORECASE
                 ))
                 if explicit_search:
@@ -3083,7 +3172,7 @@ async def whatsapp_webhook(request: Request):
     failed_inserts = []
     
     for entry in entries:
-        action = entry.get("action", "ADD")
+        action = str(entry.get("action", "ADD") or "ADD").upper()
         name = entry.get("customer_name")
         amount = entry.get("amount")
         promised_date = entry.get("promised_date")
@@ -3159,6 +3248,12 @@ async def whatsapp_webhook(request: Request):
         
         if action == "ADD":
             try:
+                if amount is not None:
+                    amount = float(amount)
+                    if not math.isfinite(amount) or amount <= 0:
+                        send_whatsapp(sender_phone, "❌ Lacagta deynta waa inay noqotaa tiro sax ah oo ka weyn $0.")
+                        failed_inserts.append({"name": name, "reason": "ADD amount must be finite and positive"})
+                        continue
                 if amount is None and not new_phone:
                     send_whatsapp(sender_phone, "Lacag intee le'eg ayuu qaatay ama bixiyay?")
                     print(f"⚠️ Amount missing for ADD: customer={name!r}; message={message_text!r}")
@@ -3217,13 +3312,21 @@ async def whatsapp_webhook(request: Request):
                             send_whatsapp(sender_phone, "❌ Lacagta lagu darayo ma saxna.")
                             failed_inserts.append({"name": name, "reason": "Invalid additive amount"})
                             continue
-                        if add_amount <= 0:
-                            send_whatsapp(sender_phone, "❌ Lacagta lagu darayo waa inay ka badan tahay $0.")
+                        if not math.isfinite(add_amount) or add_amount <= 0:
+                            send_whatsapp(sender_phone, "❌ Lacagta lagu darayo waa inay noqotaa tiro sax ah oo ka weyn $0.")
                             failed_inserts.append({"name": name, "reason": "Additive amount must be positive"})
                             continue
 
                         old_amount = float(existing.get("amount") or 0)
                         update_data = {"amount": round(old_amount + add_amount, 2), "is_paid": False}
+                        old_original_amount = existing.get("original_amount")
+                        if old_original_amount is not None:
+                            try:
+                                original_value = float(old_original_amount)
+                                if math.isfinite(original_value) and original_value >= 0:
+                                    update_data["original_amount"] = round(original_value + add_amount, 2)
+                            except (TypeError, ValueError):
+                                print(f"⚠️ Invalid original_amount for customer row {existing.get('id')}; leaving it unchanged.")
                         if promised_date:
                             try:
                                 update_data["promised_date"] = datetime.strptime(str(promised_date), "%Y-%m-%d").date().isoformat()
@@ -3269,6 +3372,7 @@ async def whatsapp_webhook(request: Request):
                     'business_user_id': business_user_id,
                     'name': name,
                     'amount': float(amount) if amount is not None else 0,
+                    'original_amount': float(amount) if amount is not None else 0,
                     'promised_date': promised_date,
                     'phone_number': new_phone if new_phone else None,
                     'is_paid': False
@@ -3307,6 +3411,8 @@ async def whatsapp_webhook(request: Request):
 
                 debtor = matches[0]
                 current_balance = float(debtor.get("amount") or 0)
+                if not math.isfinite(current_balance):
+                    raise ValueError("Deynta hadda jirta waxay leedahay haraag aan sax ahayn.")
 
                 if current_balance <= 0 or debtor.get("is_paid") is True:
                     send_whatsapp(sender_phone, f"✅ {debtor['name']} hore ayuu u bixiyay deyntiisa.")
@@ -3332,8 +3438,8 @@ async def whatsapp_webhook(request: Request):
                         send_whatsapp(sender_phone, "❌ Lacagta ma fahmin. Tusaale: Cali ka jar $10.")
                         continue
 
-                if payment_amount <= 0:
-                    send_whatsapp(sender_phone, "❌ Lacagta la bixiyay waa inay ka badan tahay $0.")
+                if not math.isfinite(float(payment_amount)) or float(payment_amount) <= 0:
+                    send_whatsapp(sender_phone, "❌ Lacagta la bixiyay waa inay noqotaa tiro sax ah oo ka weyn $0.")
                     continue
 
                 if payment_amount - current_balance > 0.009:
@@ -3647,8 +3753,8 @@ async def whatsapp_webhook(request: Request):
                     except (TypeError, ValueError):
                         send_whatsapp(sender_phone, "❌ Lacagta cusub ma saxna.")
                         continue
-                    if amount_to_set < 0:
-                        send_whatsapp(sender_phone, "❌ Lacagtu ma noqon karto tiro taban.")
+                    if not math.isfinite(amount_to_set) or amount_to_set < 0:
+                        send_whatsapp(sender_phone, "❌ Lacagtu waa inay noqotaa tiro sax ah oo aan tabanayn.")
                         continue
                     update_data["amount"] = amount_to_set
                     update_data["is_paid"] = amount_to_set <= 0
