@@ -1152,10 +1152,10 @@ def _parse_somali_date(value):
 def parse_structured_somali_transaction(message_text):
     """Parse labelled multiline Somali debt/payment notes without depending on Gemini.
 
-    Supported shape includes Taariikhda, Dayn qaato, Magaca,
-    Numberkisa/Lambarkiisa, and Lacagta. It deliberately requires a name,
-    amount, and an identifiable ADD direction before returning. Payment notes
-    continue through the existing payment parser and atomic database RPC.
+    Supports labelled notes and unlabelled multiline ADD notes with an explicit
+    currency amount, a customer-name line, and optional standalone phone/item
+    lines. It deliberately requires a name, amount, and identifiable direction.
+    Payment notes continue through the existing payment parser and atomic RPC.
     """
     raw = str(message_text or "").replace("\r", "\n").strip()
     if not raw:
@@ -1216,10 +1216,20 @@ def parse_structured_somali_transaction(message_text):
                 phone = digits
             continue
 
+        # A standalone 7-15 digit line is commonly the customer's phone number.
+        if re.fullmatch(r"\s*\+?[\d\s().-]+\s*", line):
+            digits = re.sub(r"\D", "", line)
+            if 7 <= len(digits) <= 15:
+                phone = digits
+                continue
+
         amount_match = re.match(r"^(?:lacagta|lacag|amount)\s*[:：-]?\s*(.+?)\s*$", line, re.I)
-        if amount_match:
-            rest = amount_match.group(1).strip()
-            number_match = re.search(r"(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-])", rest)
+        amount_text = amount_match.group(1).strip() if amount_match else line
+        # Also accept a standalone amount line with an explicit currency marker,
+        # e.g. "123 $" or "$123"; never mistake a long phone number for money.
+        has_currency_marker = bool(re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", amount_text, re.I))
+        if amount_match or (action == "ADD" and has_currency_marker):
+            number_match = re.search(r"(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-])", amount_text)
             if number_match:
                 try:
                     parsed_amount = float(number_match.group(1).replace(",", "."))
@@ -1227,12 +1237,52 @@ def parse_structured_somali_transaction(message_text):
                     return None
                 if math.isfinite(parsed_amount) and parsed_amount > 0:
                     amount = parsed_amount
-                    tail = (rest[:number_match.start()] + " " + rest[number_match.end():]).strip()
+                    tail = (amount_text[:number_match.start()] + " " + amount_text[number_match.end():]).strip()
                     tail = re.sub(r"(?i)\b(?:usd|dollars?|dollar)\b|[$]", " ", tail)
                     tail = " ".join(tail.split()).strip(" .,:;-\t")
                     if tail:
                         description = tail
             continue
+
+    # For unlabelled multiline ADD notes, identify the customer before a
+    # description cue such as "oo ah", and collect the following item lines.
+    if action == "ADD":
+        description_cue_index = None
+        for idx, source_line in enumerate(lines):
+            if re.search(r"\b(?:oo\s+ah|shayga|alaabta|faahfaahin(?:ta)?)\b", source_line, re.I):
+                description_cue_index = idx
+                break
+
+        if description is None and description_cue_index is not None:
+            detail_lines = lines[description_cue_index + 1:]
+            cleaned_details = []
+            for detail_line in detail_lines:
+                detail_line = re.sub(r"\s+ah$", "", detail_line, flags=re.I).strip(" .,:;-")
+                if detail_line:
+                    cleaned_details.append(detail_line)
+            if cleaned_details:
+                description = " ".join(cleaned_details)
+
+        if not name:
+            possible_names = []
+            for idx, source_line in enumerate(lines):
+                if description_cue_index is not None and idx >= description_cue_index:
+                    break
+                if re.match(r"^(?:taariikh|tarikh|magaca|customer\s+name|numberkisa|numberkeeda|lambarkiisa|lambarkeeda|telefoon|phone|lacagta|lacag|amount)\b", source_line, re.I):
+                    continue
+                if re.fullmatch(r"\s*\+?[\d\s().-]+\s*", source_line):
+                    continue
+                if re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", source_line, re.I):
+                    continue
+                normalized_line = normalize_customer_name(source_line)
+                if re.search(r"\b(?:amaah|deyn|dayn)\b", normalized_line, re.I):
+                    continue
+                if re.search(r"\b(?:bixinayso|bixinayo|bixin doonta|mar dhow)\b", normalized_line, re.I):
+                    continue
+                if re.search(r"[A-Za-z\u0080-\uffff]", source_line):
+                    possible_names.append(source_line.strip(" .,:;-\t"))
+            if possible_names:
+                name = possible_names[-1]
 
     # Do not silently infer missing names or amounts from unrelated text.
     if not name or len(name) > 120 or amount is None:
@@ -3049,9 +3099,13 @@ async def whatsapp_webhook(request: Request):
         business_user_id = business_user["id"]
 
         # Resolve the sender's persisted payment confirmation before parsing new commands.
+        # A corrected customer name may reveal that the original message was a new debt,
+        # not a payment. In that case, reject the mistaken payment proposal and replay
+        # the debt through the normal ADD handler without changing any balance here.
+        pending_payment_replay_entry = None
         pending_payment_result = (
             supabase.table("pending_payment_confirmations")
-            .select("id, customer_name, amount, status, expires_at")
+            .select("id, customer_name, amount, status, expires_at, original_message")
             .eq("sender_phone", sender_phone)
             .eq("business_user_id", str(business_user_id))
             .in_("status", ["pending", "processing"])
@@ -3072,7 +3126,154 @@ async def whatsapp_webhook(request: Request):
                 supabase.table("pending_payment_confirmations").update({"status": "expired"}).eq("id", pending_payment["id"]).eq("status", "pending").execute()
                 send_whatsapp(sender_phone, "Waqtigii xaqiijinta wuu dhammaaday. Waxba lama kaydin. Fadlan lacag-bixinta mar kale soo dir.")
                 return {"status": "payment_confirmation_expired"}
-            answer = normalize_customer_name(message_text)
+            answer_raw = str(message_text or "").strip()
+            answer = normalize_customer_name(answer_raw)
+            if answer not in {"1", "haa", "h", "yes", "y", "ok", "sax", "2", "maya", "may", "no", "n", "cancel", "jooji"}:
+                # Accept a natural-language customer correction instead of trapping
+                # the user in the numeric confirmation prompt.
+                corrected_name = re.sub(
+                    r"^\s*(?:(?:maya|no)\s+)?(?:(?:waa|weeye|magaca(?:\s+saxda\s+ah)?(?:\s+waa)?)\s+)?",
+                    "",
+                    answer_raw,
+                    flags=re.I,
+                ).strip(" .,:;!-")
+                corrected_name = re.sub(
+                    r"^(?:magaca\s+saxda\s+ah\s+waa|macmiilka\s+saxda\s+ah\s+waa)\s+",
+                    "",
+                    corrected_name,
+                    flags=re.I,
+                ).strip(" .,:;!-")
+                original_pending_message = str(pending_payment.get("original_message") or "").strip()
+                if (
+                    len(corrected_name) >= 2
+                    and len(corrected_name) <= 120
+                    and not re.search(r"\d", corrected_name)
+                    and normalize_customer_name(corrected_name) not in {
+                        "waxba", "lacag", "jooji", "cancel", "deyn", "dayn",
+                        "lacag bixin", "haa", "maya", "ok"
+                    }
+                ):
+                    original_direction = classify_transaction_direction(original_pending_message)
+                    if original_pending_message and original_direction == "ADD":
+                        # The pending payment was a false interpretation of a clear
+                        # amaah/debt message. Keep the verified amount, correct the name,
+                        # and preserve a clearly supplied phone/item detail.
+                        rejected_ok, rejected_value = _reject_pending_payment_confirmation(
+                            pending_payment["id"], sender_phone
+                        )
+                        if not rejected_ok:
+                            send_whatsapp(sender_phone, rejected_value)
+                            return {"status": "mistaken_payment_rejection_failed"}
+                        try:
+                            replay_amount = float(pending_payment.get("amount") or 0)
+                        except (TypeError, ValueError):
+                            replay_amount = 0
+                        if not math.isfinite(replay_amount) or replay_amount <= 0:
+                            send_whatsapp(sender_phone, "Lacagtii hore si sax ah looma aqoonsan. Fadlan deynta mar kale u dir magaca iyo lacagta. Waxba lama kaydin.")
+                            return {"status": "corrected_debt_amount_invalid"}
+
+                        replay_phone = None
+                        for source_line in original_pending_message.splitlines():
+                            candidate_digits = re.sub(r"\D", "", source_line)
+                            if (
+                                re.fullmatch(r"\s*\+?[\d\s().-]+\s*", source_line)
+                                and 7 <= len(candidate_digits) <= 15
+                            ):
+                                replay_phone = candidate_digits
+                                break
+                        replay_description = None
+                        if re.search(r"\bmobile\b[\s\n]+a?\s*15\b|\ba\s*15\b[\s\n]+mobile\b", original_pending_message, re.I):
+                            replay_description = "Mobile A15"
+
+                        pending_payment_replay_entry = {
+                            "action": "ADD",
+                            "customer_name": corrected_name,
+                            "amount": replay_amount,
+                            "customer_phone": replay_phone,
+                            "new_phone": replay_phone,
+                            "promised_date": None,
+                            "days_until_due": None,
+                            "transaction_date": None,
+                            "payment_type": None,
+                            "description": replay_description,
+                            "_source_amount_verified": True,
+                        }
+                        message_text = original_pending_message
+                        GUIDED_SESSIONS.pop(sender_phone, None)
+                        CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+                        print(
+                            "🔁 Replaying mistaken payment as ADD after customer correction: "
+                            f"name={corrected_name!r}, amount={replay_amount:.2f}, "
+                            f"phone_present={bool(replay_phone)}, description={replay_description!r}"
+                        )
+                    else:
+                        # For a genuine payment, resolve the corrected name against
+                        # this shop and update the still-pending proposal only when
+                        # exactly one unpaid debt is found.
+                        corrected_matches = find_debtor_matches(business_user_id, corrected_name)
+                        corrected_matches = [
+                            row for row in corrected_matches
+                            if row.get("is_paid") is not True and _safe_money(row.get("amount")) > 0
+                        ]
+                        if not corrected_matches:
+                            # Do not keep asking for HAA/MAYA when the corrected
+                            # customer has no open debt. Cancel the mistaken payment
+                            # proposal and explain how to resend it as a new debt.
+                            rejected_ok, rejected_value = _reject_pending_payment_confirmation(
+                                pending_payment["id"], sender_phone
+                            )
+                            if not rejected_ok:
+                                send_whatsapp(sender_phone, rejected_value)
+                                return {"status": "payment_customer_correction_cancel_failed"}
+                            send_whatsapp(
+                                sender_phone,
+                                f"Waad saxday: *{corrected_name}* lagama helin dayn furan oo lacagta laga jaro. "
+                                "Lacag-bixintii khaldanayd waa la joojiyey; waxba lama kaydin.\n\n"
+                                "Haddii tani tahay *deyn cusub*, dib u dir xogta adigoo ku bilaabaya "
+                                "*DEYN CUSUB*, tusaale: *DEYN CUSUB Hinda $123*."
+                            )
+                            return {"status": "payment_correction_cancelled_no_open_debt"}
+                        if len(corrected_matches) > 1:
+                            send_whatsapp(
+                                sender_phone,
+                                "Waxaan helay in ka badan hal deyn oo magacaas leh. Fadlan qor magaca buuxa "
+                                "ama faahfaahin kale. Lacag-bixintii hore weli lama diiwaangelin; "
+                                "qor *MAYA* si aad u joojiso."
+                            )
+                            return {"status": "payment_customer_correction_needs_clarification"}
+                        corrected_debtor = corrected_matches[0]
+                        corrected_amount = _safe_money(pending_payment.get("amount"))
+                        corrected_balance = _safe_money(corrected_debtor.get("amount"))
+                        if corrected_amount <= 0 or corrected_amount - corrected_balance > 0.009:
+                            send_whatsapp(
+                                sender_phone,
+                                f"{corrected_debtor.get('name')} haraagiisu waa ${corrected_balance:.2f}, "
+                                f"mana daboolayo lacagta ${corrected_amount:.2f}. Lacag-bixinta lama diiwaangelin."
+                            )
+                            return {"status": "payment_customer_correction_amount_invalid"}
+                        updated_pending = (
+                            supabase.table("pending_payment_confirmations")
+                            .update({
+                                "customer_id": str(corrected_debtor["id"]),
+                                "customer_name": str(corrected_debtor.get("name") or corrected_name),
+                            })
+                            .eq("id", str(pending_payment["id"]))
+                            .eq("status", "pending")
+                            .select("id")
+                            .execute()
+                        )
+                        if not updated_pending.data:
+                            send_whatsapp(sender_phone, "Saxitaanka macmiilka lama kaydin karin. Waxba lama diiwaangelin; fadlan mar kale isku day.")
+                            return {"status": "payment_customer_correction_update_failed"}
+                        send_whatsapp(
+                            sender_phone,
+                            "*Macmiilka waa la saxay.*\n\n"
+                            f"{corrected_debtor.get('name')} ma wuxuu bixiyay *${corrected_amount:.2f}*?\n\n"
+                            "1. *HAA*\n2. *MAYA*\n\n"
+                            "Waxba lama kaydin ilaa aad xaqiijiso."
+                        )
+                        return {"status": "payment_customer_corrected_pending_confirmation"}
+
             if answer in {"1", "haa", "h", "yes", "y", "ok", "sax"}:
                 ok, result_text = _process_pending_payment_confirmation(pending_payment["id"], sender_phone)
                 send_whatsapp(sender_phone, result_text)
@@ -3260,10 +3461,81 @@ async def whatsapp_webhook(request: Request):
         send_whatsapp(sender_phone, f"Immisa dollar?\n\nQofka: *{guided['customer_name']}*\nTusaale: *50* ama *$50*.")
         return {"status": "guided_amount_requested"}
 
+    if (
+        guided
+        and guided.get("stage") == "payment_amount"
+        and classify_transaction_direction(guided_text) == "ADD"
+    ):
+        # A complete new-debt message must not be treated as an answer to an
+        # older customer's payment-amount question.
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        guided = None
+        message_text = guided_text
+        print(
+            "🔁 New ADD message received during a guided payment prompt; "
+            "discarded the stale payment context and processing the full message."
+        )
+
     if guided and guided.get("stage") in {"debt_amount", "payment_amount"}:
+        # A user may correct a payment assumption in natural Somali instead of
+        # entering a number. Handle this BEFORE the numeric-only amount parser.
+        # No payment is ever recorded from a denial/correction message.
+        if guided.get("stage") == "payment_amount":
+            folded_reply = normalize_customer_name(guided_text)
+            debt_taken_correction = bool(re.search(
+                r"\b(?:deyn|dayn)(?:ta|tii)?\s+(?:ayay|ayuu|ay|bay|buu)?\s*"
+                r"(?:qaadatay|qaatay|qaatey)\b|"
+                r"\b(?:waxay|wuxuu|wuu|way)\s+(?:qaadatay|qaatay|qaatey)\s+"
+                r"(?:deyn|dayn)\b|"
+                r"\b(?:deyn|dayn)\s+(?:cusub\s+)?(?:ayay|ayuu|ay|bay|buu)\s+"
+                r"(?:qaadatay|qaatay|qaatey)\b",
+                folded_reply,
+                flags=re.I,
+            ))
+            no_payment_reply = bool(re.search(
+                r"\b(?:waxba|waxba\s+kama\s+helin|wax\s+lacag\s+ah\s+"
+                r"kama\s+helin|lacag\s+ma\s+helin|wax\s+lacag\s+ah\s+"
+                r"ma\s+helin|lacag\s+ma\s+bixin|ma\s+bixin|ma\s+helin|"
+                r"lacag\s+ma\s+jirto|ma\s+jirto\s+lacag)\b",
+                folded_reply,
+                flags=re.I,
+            ))
+            if debt_taken_correction:
+                # The user clarified that no payment was received and the
+                # customer took debt instead. Switch the pending guided action
+                # to ADD and ask for the actual amount; do not infer it.
+                guided["transaction_type"] = "debt"
+                guided["stage"] = "debt_amount"
+                guided.pop("payment_declined", None)
+                guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+                customer_label = str(guided.get("customer_name") or "macmiilku").strip()
+                send_whatsapp(
+                    sender_phone,
+                    f"Waad mahadsan tahay caddeynta. Lacag-bixin lama diiwaangelin. "
+                    f"{customer_label} deyn ayay qaadatay.\n\n"
+                    "Immisa ayay qaadatay? Qor lacagta keliya, tusaale: *$50*. "
+                    "Qor *JOOJI* haddii aadan rabin inaad diiwaangeliso deyn cusub."
+                )
+                return {"status": "guided_payment_corrected_to_debt"}
+            if no_payment_reply:
+                # Keep the short session alive because the user may be about to
+                # explain that this was a new debt rather than a payment.
+                guided["payment_declined"] = True
+                guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+                send_whatsapp(
+                    sender_phone,
+                    "Hagaag, wax lacag ah lama helin. Lacag-bixin lama diiwaangelin.\n\n"
+                    "Haddii macmiilku deyn cusub qaatay, ii sheeg taas iyo lacagta ay qaadatay. "
+                    "Haddii kale qor *JOOJI*."
+                )
+                return {"status": "guided_payment_denied"}
         amount = _guided_amount(guided_text)
         if amount is None:
-            send_whatsapp(sender_phone, "Fadlan qor lacag sax ah. Tusaale: *50* ama *$50*. Waxba lama kaydin.")
+            send_whatsapp(
+                sender_phone,
+                "Fadlan qor lacag sax ah. Tusaale: *50* ama *$50*. "
+                "Haddii lacag aan la helin, ii sheeg; waxba lama kaydin."
+            )
             return {"status": "guided_invalid_amount"}
         guided["amount"] = amount
         # The user has already supplied the name, transaction type and amount.
@@ -4029,7 +4301,13 @@ async def whatsapp_webhook(request: Request):
             "Use it for a pronoun-only follow-up only when the user's wording clearly refers to this customer."
         )
     
-    if customer_match_resume_entry:
+    if pending_payment_replay_entry:
+        entries = [pending_payment_replay_entry]
+        print(
+            "⚡ Using corrected pending-debt details locally; skipping Gemini: "
+            f"{pending_payment_replay_entry['customer_name']!r}"
+        )
+    elif customer_match_resume_entry:
         entries = [customer_match_resume_entry] + [dict(item) for item in customer_match_resume_remaining]
         forced_transaction_action = customer_match_resume_forced_action
         print(f"🔁 Resuming saved transaction after customer selection: {customer_match_resume_forced_action}")
