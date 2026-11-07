@@ -2793,13 +2793,12 @@ async def whatsapp_webhook(request: Request):
             if onboarding_command == "join":
                 ONBOARDING_SESSIONS[sender_phone] = "awaiting_choice"
                 hour_eat = now_eat().hour
-                greeting = "MAALIN WANAAGSAN" if 5 <= hour_eat <= 17 else "HABEEN WANAAGSAN"
+                greeting = "MAALIN WANAAGSAN if 5 <= hour_eat <= 17 else "HABEEN WANAAGSAN"
                 send_whatsapp(
                     sender_phone,
                     f"🌟 *{greeting}!*\n\n"
-                    "Halkan waxaa loogu talagalay in Shirkadaha & Ganacsiyada yaryar ay ku maamulaan "
-                    "Soo xaraynta Daymaha ka maqan & La socodka kuwa ka baxaya, iyo Adeegyo kale oo badan.\n\n"
-                    "Haddii aad rabto inaad isticmaasho soo qor *1*. Haddii kale soo qor *2*."
+                    "Waxaan jeclaan lahaa inaad tijaabiso nidaam WhatsApp ah oo lagu maamulo deymaha, lacag-bixinta iyo ballamaha, kaas oo kuu fududaynaya hawl-maalmeedka ganacsigaaga.\n\n"
+                    "Haddii aad diyaar u tahay, waan kugu soo darayaa si aad u tijaabiso.   Mahadsanid."
                 )
                 return {"status": "onboarding_restarted"}
 
