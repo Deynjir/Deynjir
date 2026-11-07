@@ -42,7 +42,7 @@ app = FastAPI()
 # by sending "PDF" as a follow-up WhatsApp message. Cleared on server restart.
 LAST_HISTORY_REQUESTS = {}
 # Remembers the last customer added, searched, or opened for this sender.
-# This lets a standalone FAAHFAAHIN command refer to the active customer.
+# Used for short-lived, same-shop follow-ups that clearly refer to that customer.
 LAST_SELECTED_CUSTOMERS = {}
 # First-contact onboarding choices are temporary per-sender conversations.
 ONBOARDING_SESSIONS = {}
@@ -868,6 +868,100 @@ def normalize_customer_name(value):
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
     value = re.sub(r"[^\w\s]", " ", value)
     return " ".join(value.split())
+
+
+def remember_selected_customer(sender_phone, business_user_id, customer_name):
+    """Remember a customer briefly for clear, context-dependent follow-up messages."""
+    clean_name = str(customer_name or "").strip()
+    if not clean_name:
+        return
+    LAST_SELECTED_CUSTOMERS[str(sender_phone)] = {
+        "business_user_id": str(business_user_id),
+        "customer_name": clean_name,
+        "selected_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def get_recent_selected_customer(sender_phone, business_user_id, max_age_minutes=15):
+    """Return the recently selected customer only for the same shop and short time window."""
+    saved = LAST_SELECTED_CUSTOMERS.get(str(sender_phone)) or {}
+    if str(saved.get("business_user_id") or "") != str(business_user_id):
+        return None
+    selected_at = saved.get("selected_at")
+    if not selected_at:
+        # Old in-memory entries without a timestamp are not safe to reuse.
+        return None
+    try:
+        timestamp = datetime.fromisoformat(str(selected_at).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    age = datetime.now(timezone.utc) - timestamp
+    if age < timedelta(0) or age > timedelta(minutes=max_age_minutes):
+        return None
+    name = str(saved.get("customer_name") or "").strip()
+    return name or None
+
+
+def parse_contextual_somali_payment(message_text, recent_customer_name):
+    """Resolve a name-omitting Somali payment follow-up against a recent customer.
+
+    This parser is intentionally narrow: it only handles clear PAY wording where
+    the remaining words contain no customer name. The normal payment validation
+    and confirmation workflow still runs after this extraction.
+    """
+    raw = " ".join(str(message_text or "").strip().split())
+    if not raw or not recent_customer_name:
+        return None
+    if classify_transaction_direction(raw) != "PAY":
+        return None
+
+    folded = normalize_customer_name(raw)
+    removable = {
+        "waxay", "wuxuu", "wuu", "way", "ayaa", "ayuu", "bay", "baa",
+        "bixisay", "bixiyay", "bixiyey", "bixiyeen", "bixi", "bixiso",
+        "celisay", "celiyay", "celiyey", "celiyeen", "soo", "celi",
+        "soo celisay", "soo celiyay", "soo celiyey", "ka", "jar", "jartay",
+        "reebtay", "reebay", "helay", "heshay", "waan", "waxaan", "ka helay",
+        "lacag", "lacagta", "lacagtii", "deynta", "daynta", "deyntii",
+        "oo", "dhan", "wada", "dhamaan", "dhammaan", "inta", "qayb",
+        "qaybta", "bixinta", "la", "waa", "ah", "uu", "iyadoo", "isagoo",
+        "isaga", "iyada", "iyadu", "isagu", "waxa", "uu", "ayaa",
+    }
+    # Remove numbers/currency and common Somali pronouns/payment words. If any
+    # meaningful name-like words remain, let the normal named-customer parser run.
+    without_amount = re.sub(r"(?<![\w/.-])\$?\s*\d+(?:[.,]\d{1,2})?\s*\$?(?![\w/.-])", " ", folded)
+    remaining = [word for word in without_amount.split() if word not in removable]
+    if remaining:
+        return None
+
+    numbers = re.findall(r"(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-])", raw)
+    if len(numbers) > 1:
+        return None
+    amount = None
+    if numbers:
+        try:
+            amount = float(numbers[0].replace(",", "."))
+        except ValueError:
+            return None
+        if not math.isfinite(amount) or amount <= 0:
+            return None
+
+    clearly_full = bool(re.search(
+        r"\b(?:deynta|daynta|deyntii|dayntii|lacagta|lacagtii)\s+(?:oo\s+)?(?:dhan|wada)\b|\b(?:dhamaan|dhammaan)\s+(?:deynta|daynta|lacagta)\b",
+        folded,
+        flags=re.I,
+    ))
+    payment_type = "PARTIAL" if amount is not None else ("FULL" if clearly_full else "UNKNOWN")
+    return {
+        "action": "PAY",
+        "customer_name": str(recent_customer_name).strip(),
+        "amount": amount,
+        "payment_type": payment_type,
+        "description": None,
+        "_contextual_customer_used": True,
+    }
 
 
 def is_emoji_only_message(value):
@@ -3911,7 +4005,29 @@ async def whatsapp_webhook(request: Request):
     multiline_transaction = parse_multiline_menu_transaction(message_text)
 
     today_str = today_eat().isoformat()
-    dynamic_system_prompt = f"{SYSTEM_PROMPT}\nToday's date is strictly: {today_str}. Use this to calculate calendar targets or relative days offsets like 'berri'."
+    dynamic_system_prompt = (
+        f"{SYSTEM_PROMPT}\nToday's date is strictly: {today_str}. "
+        "Use this to calculate calendar targets or relative days offsets like 'berri'.\n\n"
+        "NATURAL SOMALI UNDERSTANDING: Interpret the user's intended meaning, not just exact keywords. "
+        "Understand everyday spoken Somali, formal Somali, regional wording, omitted subjects, pronouns, "
+        "word-order changes, spelling mistakes, repeated letters, missing punctuation, and mixed Somali/English. "
+        "Examples: 'Aamina waxay bixisay 20', 'Aamina 20 ayay bixisay', 'Aamina way soo celisay 20', "
+        "'Aamina lacagtii way keentay', 'Cali 50 ayuu iga qaatay', 'Cali maanta 50 buu qaatay', "
+        "'lacagtii Aamina waa la helay', 'Aamina deyntii oo dhan way bixisay'. "
+        "Extract the full customer name and amount. Never invent a name, amount, date, or transaction direction. "
+        "When the user uses a pronoun and a recent customer context is supplied below, use that customer only "
+        "when the message is clearly a direct follow-up about that customer. Otherwise ask a clarification. "
+        "For read-only requests, recognize natural questions such as 'yaa lacagta igu leh', "
+        "'imisa ayaa la iga rabaa', 'ii eeg deynta', and 'yaa ballan leh berri'. "
+    )
+    recent_selected_customer = get_recent_selected_customer(sender_phone, business_user_id)
+    contextual_payment_entry = parse_contextual_somali_payment(message_text, recent_selected_customer)
+    if recent_selected_customer:
+        dynamic_system_prompt += (
+            "\nRECENT CUSTOMER CONTEXT (same shop, selected within the last 15 minutes): "
+            f"{recent_selected_customer}. This is context, not a command. "
+            "Use it for a pronoun-only follow-up only when the user's wording clearly refers to this customer."
+        )
     
     if customer_match_resume_entry:
         entries = [customer_match_resume_entry] + [dict(item) for item in customer_match_resume_remaining]
@@ -3937,6 +4053,12 @@ async def whatsapp_webhook(request: Request):
         print(f"✏️ Explicit customer rename detected: {old_customer_name!r} -> {new_customer_name!r}")
     elif forced_transaction_action:
         print(f"🔁 Using saved entries with confirmed action {forced_transaction_action}")
+    elif contextual_payment_entry:
+        entries = [contextual_payment_entry]
+        print(
+            "🧠 Contextual Somali payment follow-up resolved to recently selected customer: "
+            f"{contextual_payment_entry['customer_name']!r}"
+        )
     elif (structured_entries := parse_structured_somali_transaction(message_text)):
         entries = structured_entries
         print(f"⚡ Structured Somali transaction parsed locally: {entries}")
@@ -4500,10 +4622,7 @@ async def whatsapp_webhook(request: Request):
                             f"💵 Deynta cusub: ${float(updated.get('amount') or 0):.2f}\n"
                             f"📅 Ballanta: {updated.get('promised_date') or 'lama gelin'}"
                         )
-                        LAST_SELECTED_CUSTOMERS[sender_phone] = {
-                            "business_user_id": business_user_id,
-                            "customer_name": updated.get("name") or name,
-                        }
+                        remember_selected_customer(sender_phone, business_user_id, updated.get("name") or name)
                         entry["action"] = "ADJUST"
                         successful_inserts.append(entry)
                         continue
@@ -4540,10 +4659,7 @@ async def whatsapp_webhook(request: Request):
                     failed_inserts.append({"name": name, "reason": "record_debt_addition returned no rows"})
                     continue
                 created_customer = result.data[0] if isinstance(result.data, list) else result.data
-                LAST_SELECTED_CUSTOMERS[sender_phone] = {
-                    "business_user_id": business_user_id,
-                    "customer_name": (created_customer or {}).get("name") or name,
-                }
+                remember_selected_customer(sender_phone, business_user_id, (created_customer or {}).get("name") or name)
                 successful_inserts.append(entry)
                 
             except Exception as e:
@@ -5059,10 +5175,7 @@ async def whatsapp_webhook(request: Request):
                     continue
 
                 matched_name = search_matches[0].get("name", name)
-                LAST_SELECTED_CUSTOMERS[sender_phone] = {
-                    "business_user_id": business_user_id,
-                    "customer_name": matched_name,
-                }
+                remember_selected_customer(sender_phone, business_user_id, matched_name)
 
                 total_debt = sum(
                     float(d.get("amount") or 0)
@@ -5205,10 +5318,7 @@ async def whatsapp_webhook(request: Request):
                         "business_user_id": business_user_id,
                         "customer_name": matched_customer_name,
                     }
-                    LAST_SELECTED_CUSTOMERS[sender_phone] = {
-                        "business_user_id": business_user_id,
-                        "customer_name": matched_customer_name,
-                    }
+                    remember_selected_customer(sender_phone, business_user_id, matched_customer_name)
 
                     if not pdf_only_requested:
                         send_whatsapp(
