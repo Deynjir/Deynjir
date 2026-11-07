@@ -52,6 +52,8 @@ ONBOARDING_SESSIONS = {}
 REMINDER_SESSIONS = {}
 # Two-step customer-name correction sessions (sender -> shop/name/stage).
 RENAME_SESSIONS = {}
+# Amount edits are staged and require explicit confirmation before changing a balance.
+AMOUNT_EDIT_SESSIONS = {}
 REMINDER_SESSION_TTL = timedelta(minutes=15)
 # Admin-assisted imports are staged for preview and explicit confirmation.
 IMPORT_SESSIONS = {}
@@ -1050,6 +1052,44 @@ def parse_customer_rename_command(message_text):
     return None
 
 
+def parse_somali_amount_edit(message_text):
+    """Parse explicit single-customer balance edits such as 'Muna ka dhig 25'.
+
+    Currency symbols are optional because the verb phrase clearly expresses an
+    edit. This parser never handles bare name+amount messages.
+    """
+    raw = " ".join(str(message_text or "").strip().split())
+    patterns = [
+        r"^(?:(?:deynta|daynta|deyn|dayn)\s+)?(?P<name>.+?)\s+(?:(?:deynta|daynta|deyn|dayn)\s+)?(?:ka\s+dhig|ka\s+dhigo|kadhig|kadhigo)\s+\$?\s*(?P<amount>\d+(?:[.,]\d{1,2})?)\s*[.!]?$",
+        r"^(?:(?:deynta|daynta|deyn|dayn)\s+)(?P<name>.+?)\s+(?:u\s+dhig|uga\s+dhig)\s+\$?\s*(?P<amount>\d+(?:[.,]\d{1,2})?)\s*[.!]?$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, raw, flags=re.I)
+        if not match:
+            continue
+        name = match.group("name").strip(" .,:;-")
+        amount_text = match.group("amount").replace(",", ".")
+        if not name or re.search(r"\d", name):
+            return None
+        try:
+            amount = float(amount_text)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(amount) or amount < 0:
+            return None
+        return {
+            "action": "EDIT",
+            "customer_name": name,
+            "amount": amount,
+            "new_amount": amount,
+            "new_date": None,
+            "promised_date": None,
+            "_source_amount_verified": True,
+            "_explicit_balance_edit": True,
+        }
+    return None
+
+
 def parse_sax_name_only(message_text):
     """Return the old customer name for a two-step SAX command, if supplied."""
     raw = " ".join(str(message_text or "").strip().split())
@@ -1057,6 +1097,9 @@ def parse_sax_name_only(message_text):
     if not match or re.search(r"(?:->|=>|\bto\b|\bku\s+bedel\b|\bu\s+bedel\b)", raw, re.I):
         return None
     old_name = match.group(1).strip(" \t,;:-")
+    # A trailing number in SAX is an amount correction, not a customer name.
+    if re.search(r"\d", old_name):
+        return None
     return old_name or None
 
 
@@ -3219,6 +3262,73 @@ async def whatsapp_webhook(request: Request):
 
         business_user_id = business_user["id"]
 
+        # Resolve a staged balance edit before interpreting the reply as a new command.
+        amount_edit_state = AMOUNT_EDIT_SESSIONS.get(sender_phone)
+        if amount_edit_state and amount_edit_state.get("business_user_id") == str(business_user_id):
+            if datetime.now(timezone.utc) > amount_edit_state.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
+                AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "Waqtigii xaqiijinta wax-ka-beddelka wuu dhammaaday. Waxba lama beddelin. Fadlan codsiga mar kale dir.")
+                return {"status": "amount_edit_expired"}
+            edit_answer = normalize_customer_name(str(message_text or ""))
+            if edit_answer in {"haa", "h", "1", "yes", "y", "ok", "sax"}:
+                try:
+                    current_result = (supabase.table("customers")
+                        .select("id, name, amount, is_paid, promised_date")
+                        .eq("id", str(amount_edit_state["customer_id"]))
+                        .eq("business_user_id", str(business_user_id))
+                        .eq("is_archived", False).limit(1).execute())
+                    if not current_result.data:
+                        AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
+                        send_whatsapp(sender_phone, "❌ Macmiilka lama helin. Waxba lama beddelin.")
+                        return {"status": "amount_edit_customer_missing"}
+                    current_customer = current_result.data[0]
+                    if abs(_safe_money(current_customer.get("amount")) - float(amount_edit_state["old_amount"])) > 0.009:
+                        AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
+                        send_whatsapp(sender_phone, "⚠️ Haraaga macmiilka wuu isbeddelay intii xaqiijintu sugaysay. Waxba lama beddelin. Fadlan dib u eeg liiska deynta.")
+                        return {"status": "amount_edit_stale_balance"}
+                    payment_history = (supabase.table("payments").select("customer_id")
+                        .eq("business_user_id", str(business_user_id))
+                        .eq("customer_id", str(amount_edit_state["customer_id"]))
+                        .limit(1).execute())
+                    transaction_history = (supabase.table("customer_transactions").select("customer_id")
+                        .eq("business_user_id", str(business_user_id))
+                        .eq("customer_id", str(amount_edit_state["customer_id"]))
+                        .limit(1).execute())
+                    if payment_history.data or transaction_history.data:
+                        AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
+                        send_whatsapp(sender_phone, "⚠️ Macmiilkani wuxuu leeyahay taariikh macaamil/lacag-bixin. Si aan taariikhda iyo haraaga isugu khaldin, si toos ah looma beddeli karo lacagta. Waxba lama beddelin.")
+                        return {"status": "amount_edit_blocked_by_ledger"}
+                    update_data = dict(amount_edit_state.get("update_data") or {})
+                    updated_result = (supabase.table("customers").update(update_data)
+                        .eq("id", str(amount_edit_state["customer_id"]))
+                        .eq("business_user_id", str(business_user_id))
+                        .eq("is_archived", False)
+                        .eq("amount", float(amount_edit_state["old_amount"]))
+                        .select("id, name, amount, promised_date, is_paid").execute())
+                    AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
+                    if not updated_result.data:
+                        send_whatsapp(sender_phone, "❌ Waxba lama beddelin. Hubi rukhsadaha database-ka (RLS).")
+                        return {"status": "amount_edit_update_empty"}
+                    updated_customer = updated_result.data[0]
+                    lines = []
+                    if "amount" in update_data:
+                        lines.append(f"💵 Lacag: ${float(current_customer.get('amount') or 0):.2f} → ${float(updated_customer.get('amount') or 0):.2f}")
+                    if "promised_date" in update_data:
+                        lines.append(f"📅 Ballan: {current_customer.get('promised_date') or 'lama gelin'} → {updated_customer.get('promised_date')}")
+                    send_whatsapp(sender_phone, f"✅ Wax-ka-beddelka waa la xaqiijiyey.\n{updated_customer.get('name')}:\n" + "\n".join(lines))
+                    return {"status": "amount_edit_confirmed"}
+                except Exception as edit_confirm_error:
+                    AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
+                    print(f"❌ Amount edit confirmation failed: {type(edit_confirm_error).__name__}: {edit_confirm_error}")
+                    send_whatsapp(sender_phone, "❌ Wax-ka-beddelka lama xaqiijin karin. Waxba lama beddelin; maamulka ha hubiyo.")
+                    return {"status": "amount_edit_confirmation_error"}
+            if edit_answer in {"maya", "2", "no", "n", "cancel", "jooji", "baaji"}:
+                AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "✅ Wax-ka-beddelka waa la joojiyey. Waxba lama beddelin.")
+                return {"status": "amount_edit_cancelled"}
+            send_whatsapp(sender_phone, "Fadlan qor *HAA* si loo xaqiijiyo ama *MAYA* si loo joojiyo. Waxba lama beddelin weli.")
+            return {"status": "amount_edit_confirmation_required"}
+
         # Resolve the sender's persisted payment confirmation before parsing new commands.
         # A corrected customer name may reveal that the original message was a new debt,
         # not a payment. In that case, reject the mistaken payment proposal and replay
@@ -3435,7 +3545,10 @@ async def whatsapp_webhook(request: Request):
                 .order("created_at", desc=True)
                 .limit(1).execute()
             )
-            correction = re.match(r"^\s*sax\s+(.+?)\s+\$\s*(\d+(?:[.,]\d{1,2})?)\s*$", str(message_text or ""), re.I)
+            correction = re.match(r"^\s*sax\s+(.+?)\s+\$?\s*(\d+(?:[.,]\d{1,2})?)\s*$", str(message_text or ""), re.I)
+            if correction and not rejected_result.data:
+                send_whatsapp(sender_phone, "Ma jiro lacag-bixin dhowaan la diiday oo la saxayo. Haddii aad rabto inaad beddesho magaca macmiilka, qor *SAX Magaca Hore*; haddii aad rabto wax-ka-beddelka deynta, qor *Magaca ka dhig 25*.")
+                return {"status": "no_rejected_payment_to_correct"}
             if rejected_result.data and correction:
                 corrected_name = correction.group(1).strip()
                 corrected_amount = float(correction.group(2).replace(",", "."))
@@ -3857,9 +3970,16 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, "❌ Taariikhda lama fahmin. Tusaale: LIISKA LACAG BIXINTA NOV ama LIISKA LACAG BIXINTA 03/11/2026 - 07/11/2026")
             return {"status": "shop_payment_list_error"}
 
+    # Explicit balance-edit wording takes priority over an unfinished name-rename
+    # prompt. For example, "Muna ka dhig 25" must never become a new customer name.
+    local_amount_edit_entry = parse_somali_amount_edit(message_text)
+    if local_amount_edit_entry:
+        RENAME_SESSIONS.pop(sender_phone, None)
+        print(f"✏️ Local Somali balance edit parsed: {local_amount_edit_entry['customer_name']!r} -> {local_amount_edit_entry['new_amount']}")
+
     # Two-step SAX flow. Explicit "SAX old -> new" continues through the
     # existing immediate-rename path; "SAX old" asks for the corrected name.
-    rename_state = RENAME_SESSIONS.get(sender_phone)
+    rename_state = None if local_amount_edit_entry else RENAME_SESSIONS.get(sender_phone)
     if rename_state and rename_state.get("business_user_id") == business_user_id:
         if datetime.now(timezone.utc) > rename_state.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
             RENAME_SESSIONS.pop(sender_phone, None)
@@ -4467,6 +4587,9 @@ async def whatsapp_webhook(request: Request):
     elif standalone_detail_customer:
         entries = [{"action": "HISTORY", "customer_name": standalone_detail_customer}]
         print(f"📒 Skipping Gemini for standalone FAAHFAAHIN; using {standalone_detail_customer!r}")
+    elif local_amount_edit_entry:
+        entries = [local_amount_edit_entry]
+        print(f"⚡ Skipping Gemini for explicit balance edit: {local_amount_edit_entry['customer_name']!r}")
     elif rename_request:
         old_customer_name, new_customer_name = rename_request
         entries = [{
@@ -4708,11 +4831,11 @@ async def whatsapp_webhook(request: Request):
                 return {"status": "pending_clarification_save_error"}
             send_whatsapp(
                 sender_phone,
-                "Waxaad soo qortay magac iyo tiro keliya.\n\n"
+                "Waxaad qortay magac iyo tiro keliya.\n\n"
                 "*Hadii aad ula jeedo*\n\n"
-                "Deyn cusub baa mise lacag-bixin?\n\n"
-                "Soo qor *DEYN CUSUB* ama *LACAG BIXIN*.\n"
-                "Soo qor *JOOJI* haddii aad rabto inaad ka baxdo.\n\n"
+                "*DEYN CUSUB* - Taabo 1 ?\n\n"
+                "*LACAG BIXIN* - Taabo 2.\n"
+                "Haddii aad rabto inaad ka baxdo Soo qor *JOOJI*.\n\n"
                 "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
             )
             return {"status": "awaiting_transaction_clarification"}
@@ -5576,6 +5699,39 @@ async def whatsapp_webhook(request: Request):
                         "Ama: Cali balantiisa ka dhig 2026-10-20"
                     )
                     failed_inserts.append({"name": name, "reason": "No changes supplied"})
+                    continue
+
+                if "amount" in update_data:
+                    try:
+                        payment_history = (supabase.table("payments").select("customer_id")
+                            .eq("business_user_id", str(business_user_id))
+                            .eq("customer_id", str(debtor["id"]))
+                            .limit(1).execute())
+                        transaction_history = (supabase.table("customer_transactions").select("customer_id")
+                            .eq("business_user_id", str(business_user_id))
+                            .eq("customer_id", str(debtor["id"]))
+                            .limit(1).execute())
+                    except Exception as history_check_error:
+                        print(f"❌ Could not verify ledger before amount edit: {history_check_error}")
+                        send_whatsapp(sender_phone, "❌ Taariikhda macaamilka lama hubin karin. Lacagta lama beddelin si loo ilaaliyo xisaabta.")
+                        continue
+                    if payment_history.data or transaction_history.data:
+                        send_whatsapp(sender_phone, "⚠️ Macmiilkani wuxuu leeyahay taariikh macaamil/lacag-bixin. Si aan taariikhda iyo haraaga isugu khaldin, si toos ah looma beddeli karo lacagta. Waxba lama beddelin. Haddii lacag-bixin hore khaldan tahay, isticmaal *SAX magaca lacagta*; haddii deyn cusub jirto, ku dar macaamil cusub.")
+                        continue
+                    AMOUNT_EDIT_SESSIONS[sender_phone] = {
+                        "business_user_id": str(business_user_id),
+                        "customer_id": str(debtor["id"]),
+                        "customer_name": str(debtor.get("name") or name),
+                        "old_amount": _safe_money(debtor.get("amount")),
+                        "update_data": dict(update_data),
+                        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+                    }
+                    change_lines = []
+                    if "amount" in update_data:
+                        change_lines.append(f"💵 Lacag: ${_safe_money(debtor.get('amount')):.2f} → ${float(update_data['amount']):.2f}")
+                    if "promised_date" in update_data:
+                        change_lines.append(f"📅 Ballan cusub: {update_data['promised_date']}")
+                    send_whatsapp(sender_phone, "*Xaqiiji wax-ka-beddelka*\n\n" + str(debtor.get("name") or name) + "\n" + "\n".join(change_lines) + "\n\nQor *HAA* si loo kaydiyo ama *MAYA* si loo joojiyo.\nWaxba lama beddelin ilaa aad xaqiijiso.")
                     continue
 
                 result = (
