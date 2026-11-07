@@ -91,6 +91,14 @@ def deynjir_unrecognized_message():
     )
 
 
+def activate_guided_menu(sender_phone):
+    """Make the next numeric reply a valid choice after showing the action menu."""
+    GUIDED_SESSIONS[sender_phone] = {
+        "stage": "menu",
+        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+    }
+
+
 def deynjir_help_message():
     return (
         "ℹ️ *Raac Tilmaamahan*\n\n"
@@ -2489,6 +2497,7 @@ async def whatsapp_webhook(request: Request):
         transaction_type = guided.get("transaction_type")
         GUIDED_SESSIONS.pop(sender_phone, None)
         if not name or transaction_type not in {"debt", "payment"}:
+            activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "guided_session_invalid"}
         message_text = (f"{name} ${amount} ayuu iga qaatay" if transaction_type == "debt"
@@ -3214,6 +3223,7 @@ async def whatsapp_webhook(request: Request):
                         "Waxaad dooran kartaa mid ka mid ah hawlahan: \n" + deynjir_main_menu()
                     )
                     return {"status": "gemini_rate_limited_guidance_sent"}
+                activate_guided_menu(sender_phone)
                 send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "friendly_fallback_sent"}
 
@@ -3234,6 +3244,7 @@ async def whatsapp_webhook(request: Request):
         ]
         if not usable_entries:
             print(f"⚠️ No usable intent extracted; message={message_text!r}; entries={entries!r}")
+            activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "unrecognized_message"}
         entries = usable_entries
@@ -3257,6 +3268,7 @@ async def whatsapp_webhook(request: Request):
                     f"⚠️ Rejected empty SEARCH intent for unrecognized text: "
                     f"{message_text!r}"
                 )
+                activate_guided_menu(sender_phone)
                 send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "unrecognized_message"}
 
@@ -4095,6 +4107,7 @@ async def whatsapp_webhook(request: Request):
                             f"⚠️ Bare-word SEARCH did not match a customer; treating as unrecognized text: "
                             f"{message_text!r}"
                         )
+                        activate_guided_menu(sender_phone)
                         send_whatsapp(sender_phone, deynjir_unrecognized_message())
                     continue
 
@@ -4581,6 +4594,7 @@ async def whatsapp_webhook(request: Request):
         # Keep detailed failure reasons in server logs only. Never expose internal
         # parser/database messages such as "Unknown: No name" to WhatsApp users.
         print(f"❌ Transaction failures ({len(failed_inserts)}): {failed_inserts}")
+        activate_guided_menu(sender_phone)
         send_whatsapp(sender_phone, deynjir_unrecognized_message())
     
     return {"status": "success"}
