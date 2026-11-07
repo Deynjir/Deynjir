@@ -166,6 +166,14 @@ def normalize_easy_command(value):
         "ku dar deyn": "GUIDED_DEBT", "ku dar dayn": "GUIDED_DEBT",
         "balanta beri": "BALAMAHA BERRI", "ballanta beri": "BALAMAHA BERRI",
         "balamaha beri": "BALAMAHA BERRI", "ballamaha beri": "BALAMAHA BERRI",
+
+        # Common Somali merchant spelling and phrasing variants.
+        "lacgta": "LACAGTA", "lacg": "LACAG",
+        "dayn": "DEYN", "daynta": "DEYNTA", "dayntii": "DEYNTII",
+        "wakhtiga balanta": "BALLANTA", "waqtiga balanta": "BALLANTA",
+        "wakhtiga balanta waa": "BALLAN", "waqtiga balanta waa": "BALLAN",
+        "ballan": "BALLAN", "lacg bixin": "LACAG BIXIN",
+        "lacg bixn": "LACAG BIXIN",
     }
     return aliases.get(folded, raw)
 
@@ -429,6 +437,40 @@ CUSTOMER NAME EXTRACTION RULES:
 - Example: "Delete Dhakalaf" -> action="DELETE", customer_name="Dhakalaf".
 - Example: "Bagadh mamulka wuxuu bixiyay $90" -> action="PAY", customer_name="Bagadh mamulka", amount=90.
 - Never return only the last word of a multi-word customer name when the full name appears in the message.
+
+CONTEXT-AWARE FOLLOW-UPS:
+- If the previous bot message asked "Deyn cusub baa mise lacag-bixin?", then:
+  "1" = ADD
+  "2" = PAY
+  "3" = CANCEL
+  "HAA" = ADD
+  "MAYA" = PAY
+
+MULTI-LINE MESSAGES:
+"Mahad cabdi
+Lacgta oo ah 10
+1"
+-> ADD, customer_name="Mahad Cabdi", amount=10
+
+"Menu
+1 mxmed cabdi 20
+Wakhtiga balanta waa 8/11/2026"
+-> ADD, customer_name="Mxmed Cabdi", amount=20, promised_date="2026-11-08"
+
+SPELLING AND PHRASING:
+- "Lacgta" means "Lacagta"
+- "Dayn" means "Deyn"
+- "Wakhtiga balanta waa" means due date
+- "Ballan" means due date
+
+MISSING INFORMATION:
+- "Cali ka jar" -> PAY, customer_name="Cali", amount=null, payment_type="UNKNOWN"
+- "Ka jar" -> PAY, customer_name=null, amount=null, payment_type="UNKNOWN"
+- "Ma jirtoh" -> Do not return SEARCH; return no usable financial action.
+
+DELETE CONFIRMATION:
+- If the previous bot message asked to confirm deletion, then:
+  "Haa tirtir" = CONFIRM_DELETE, not a customer-name search.
 
 Also support English:
 'Add debt' = ADD action
@@ -1162,6 +1204,72 @@ def parse_transaction_clarification(message_text):
     if re.fullmatch(r"(?:jooji|cancel|baaji|stop)", text, re.I):
         return "CANCEL"
     return None
+
+
+def parse_multiline_menu_transaction(message_text):
+    """Understand a menu choice, customer, amount, and optional due date
+    sent together, for example:
+
+    Menu
+    1 Mxmed Cabdi 20
+    Wakhtiga balanta waa 8/11/2026
+
+    This is additive: it runs before Gemini and returns a standard ADD entry.
+    """
+    raw = " ".join(str(message_text or "").splitlines())
+    raw = " ".join(raw.split())
+
+    match = re.search(
+        r"(?:^|\s)1\s+([A-Za-z\u0080-\uffff][A-Za-z\u0080-\uffff\s'-]{1,80}?)\s+"
+        r"(?:\$)?(\d+(?:[.,]\d{1,2})?)(?:\s*\$)?"
+        r"(?:.*?(?:ballan(?:ta)?|wakhtiga\s+balanta|waqtiga\s+balanta)\s*"
+        r"(?:waa)?\s*[:\-]?\s*"
+        r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{1,2}-\d{1,2}))?",
+        raw,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    name = match.group(1).strip()
+    amount_text = match.group(2).replace(",", ".")
+    due_text = match.group(3)
+
+    try:
+        amount = float(amount_text)
+    except (TypeError, ValueError):
+        return None
+
+    if amount <= 0 or not name:
+        return None
+
+    due_date = None
+    if due_text:
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+            try:
+                due_date = datetime.strptime(due_text, fmt).date().isoformat()
+                break
+            except ValueError:
+                continue
+
+    return [{
+        "action": "ADD",
+        "customer_name": name.title(),
+        "amount": amount,
+        "promised_date": due_date,
+        "days_until_due": None,
+        "customer_phone": None,
+        "transaction_date": None,
+        "filter_date": None,
+        "filter_type": None,
+        "new_amount": None,
+        "new_date": None,
+        "new_name": None,
+        "new_phone": None,
+        "payment_type": None,
+        "description": None,
+    }]
 
 
 def local_fallback_parse(message_text):
@@ -2353,9 +2461,37 @@ def _commit_import(admin_phone, session):
 
 
 @app.post("/webhook")
+def is_duplicate_webhook(event_id):
+    """Return True when this Green-API webhook event was already processed."""
+    if not event_id:
+        return False
+
+    try:
+        result = (
+            supabase.table("processed_webhook_events")
+            .insert({"event_id": str(event_id)})
+            .execute()
+        )
+        return not result.data
+    except Exception as dedup_error:
+        print(f"⚠️ Webhook deduplication check failed: {dedup_error}")
+        return True
+
+
 async def whatsapp_webhook(request: Request):
     data = await request.json()
     print(f"📥 Green-API webhook received: type={data.get('typeWebhook')}")
+
+    # Ignore a repeated Green-API webhook delivery before it can create a
+    # duplicate action or duplicate WhatsApp reply.
+    webhook_event_id = (
+        data.get("id")
+        or data.get("eventId")
+        or data.get("messageData", {}).get("id")
+        or data.get("senderData", {}).get("id")
+    )
+    if is_duplicate_webhook(webhook_event_id):
+        return {"status": "duplicate_webhook_ignored"}
 
     type_webhook = data.get("typeWebhook")
 
@@ -3731,11 +3867,30 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca ii sheeg. Tusaale: *FAAHFAAHIN Sakariye*.")
             return {"status": "history_customer_name_required"}
 
+    # If the user confirms a deletion but the delete session has expired or is
+    # missing, do not let Gemini/local parsing treat "Haa tirtir" as a customer
+    # name. Ask the user to start a new delete request instead.
+    if (
+        re.fullmatch(
+            r"\s*(?:haa\s*,?\s*tirtir|tirtir|confirm\s+delete|yes\s+delete)\s*[.!]?\s*",
+            str(message_text or ""),
+            flags=re.IGNORECASE,
+        )
+        and not DELETE_SESSIONS.get(sender_phone)
+    ):
+        send_whatsapp(
+            sender_phone,
+            "Ma jiraan tirtirid macmiil oo sugaya.\n\n"
+            "Qor *DELETE [magaca macmiilka]* si aad u bilowdo tirtirid cusub."
+        )
+        return {"status": "orphan_delete_confirmation_ignored"}
+
     # Explicit customer rename is parsed locally; it must not depend on Gemini.
     rename_request = parse_customer_rename_command(message_text)
 
     # Fast read-only command matching: avoid a Gemini request for debt lists.
     fuzzy_list_requested = is_fuzzy_debt_list_command(message_text)
+    multiline_transaction = parse_multiline_menu_transaction(message_text)
 
     today_str = today_eat().isoformat()
     dynamic_system_prompt = f"{SYSTEM_PROMPT}\nToday's date is strictly: {today_str}. Use this to calculate calendar targets or relative days offsets like 'berri'."
@@ -3776,6 +3931,12 @@ async def whatsapp_webhook(request: Request):
             "filter_type": None,
         }]
         print(f"⚡ Fuzzy debt-list command recognized locally: {message_text!r}; skipping Gemini")
+    elif multiline_transaction:
+        entries = multiline_transaction
+        print(
+            f"⚡ Multi-line menu transaction recognized locally: {message_text!r}; "
+            "skipping Gemini"
+        )
     else:
         try:
             if not GEMINI_API_KEY:
