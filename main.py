@@ -2335,11 +2335,10 @@ def _commit_import(admin_phone, session):
 
     if shop_phone and shop_phone != admin_clean:
         business_message = (
-            "✅ *Deymo cusub ayaa lagu daray liiskaaga.*\\n\\n"
-            f"Dukaan: *{shop_name}*\\n"
-            f"Macaamiil/deymo cusub: *{added}*\\n"
-            f"Deyn hore oo laga booday: *{skipped}*\\n\\n"
-            "Qor *LIISKA DAYNTA* si aad u aragto deymaha cusub."
+        "✅ *Deymo cusub ayaa lagu daray liiskaaga.*\n\n"
+        f"Dukaan: *{shop_name}*\n"
+        f"Macaamiil/deymo cusub: *{added}*\n"
+        "Qor *LIISKA DAYNTA* si aad u aragto deymaha cusub."
         )
         notification_sent = send_whatsapp(shop_phone, business_message)
         print(
