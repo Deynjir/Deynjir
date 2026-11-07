@@ -9,7 +9,7 @@ import math
 from zoneinfo import ZoneInfo
 import difflib
 import unicodedata
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from supabase import create_client, Client
 import requests
 from dotenv import load_dotenv
@@ -2460,35 +2460,53 @@ def _commit_import(admin_phone, session):
         )
 
 
-@app.post("/webhook")
 def is_duplicate_webhook(event_id):
-    """Return True when this Green-API webhook event was already processed."""
+    """Record an event ID once; return True only for a confirmed duplicate.
+
+    A unique constraint on processed_webhook_events.event_id is required.
+    Database/network errors raise HTTP 503 so Green-API can retry instead of
+    silently dropping a legitimate financial command.
+    """
     if not event_id:
+        # No stable event ID means this delivery cannot safely be deduplicated.
         return False
 
     try:
-        result = (
+        (
             supabase.table("processed_webhook_events")
             .insert({"event_id": str(event_id)})
             .execute()
         )
-        return not result.data
+        return False
     except Exception as dedup_error:
-        print(f"⚠️ Webhook deduplication check failed: {dedup_error}")
-        return True
+        # PostgREST/Supabase reports PostgreSQL unique violations as 23505.
+        error_code = getattr(dedup_error, "code", None)
+        if error_code == "23505" or "23505" in str(dedup_error):
+            return True
+
+        print(
+            "⚠️ Webhook deduplication unavailable: "
+            f"{type(dedup_error).__name__}: {dedup_error}"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Webhook deduplication is temporarily unavailable; retry delivery.",
+        ) from dedup_error
 
 
+@app.post("/webhook")
 async def whatsapp_webhook(request: Request):
     data = await request.json()
     print(f"📥 Green-API webhook received: type={data.get('typeWebhook')}")
 
     # Ignore a repeated Green-API webhook delivery before it can create a
     # duplicate action or duplicate WhatsApp reply.
+    message_data_for_id = data.get("messageData") or {}
     webhook_event_id = (
         data.get("id")
         or data.get("eventId")
-        or data.get("messageData", {}).get("id")
-        or data.get("senderData", {}).get("id")
+        or message_data_for_id.get("idMessage")
+        or message_data_for_id.get("id")
     )
     if is_duplicate_webhook(webhook_event_id):
         return {"status": "duplicate_webhook_ignored"}
