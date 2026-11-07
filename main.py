@@ -95,6 +95,7 @@ def deynjir_help_message():
         "• Lacag bixin: qor *Lacag bixin Cali $20*\n"
         "• Liiska daynta: qor *LIISKA DAYNTA*\n"
         "• Raadi qof: qor *Raadi Cali*\n"
+        "• Faahfaahin: qor *FAAHFAAHIN Cali*\n"
         "• Ballamaha: qor *Balamaha Maanta* ama *Balamaha Berri*\n"
         "• Soo geli sawir/Excel: qor *IMPORT*\n\n"
         "Soo Qor *MENU* marka aad u baahato hagid."
@@ -310,13 +311,13 @@ Extract transaction intent from chaotic, unstructured Somali text into raw JSON.
 Do not include any conversational filler, markdown syntax, or backticks.
 
 Extract ALL debt entries from the message.
-For each entry, extract: customer_name, amount, promised_date (YYYY-MM-DD), phone_number
+For each entry, extract: customer_name, amount, promised_date (YYYY-MM-DD), phone_number, description. Description is the item/reason text belonging to that specific debt or payment; use null when none is stated.
 
 ALWAYS return a JSON array, even for single entries.
 
 Response format (JSON array):
 [
-  {"action": "ADD" or "PAY" or "LIST" or "SEARCH" or "EDIT" or "DELETE" or "HISTORY" or "REPORT" or "EXPORT", "customer_name": "string or null", "amount": number or null, "days_until_due": number or null, "customer_phone": "string or null", "promised_date": "YYYY-MM-DD or null", "filter_date": "YYYY-MM-DD or null", "filter_type": "today" or "tomorrow" or "date" or "week" or "month" or null, "new_amount": number or null, "new_date": "YYYY-MM-DD or null", "new_name": "string or null", "new_phone": "string or null", "payment_type": "FULL" or "PARTIAL" or "UNKNOWN" or null}
+  {"action": "ADD" or "PAY" or "LIST" or "SEARCH" or "EDIT" or "DELETE" or "HISTORY" or "REPORT" or "EXPORT", "customer_name": "string or null", "amount": number or null, "days_until_due": number or null, "customer_phone": "string or null", "promised_date": "YYYY-MM-DD or null", "filter_date": "YYYY-MM-DD or null", "filter_type": "today" or "tomorrow" or "date" or "week" or "month" or null, "new_amount": number or null, "new_date": "YYYY-MM-DD or null", "new_name": "string or null", "new_phone": "string or null", "payment_type": "FULL" or "PARTIAL" or "UNKNOWN" or null, "description": "short transaction detail or null"}
 ]
 
 Examples - ADD:
@@ -387,6 +388,11 @@ TRANSACTION DIRECTION SAFETY:
 - "Cali $50 ayuu iga qaatay" is ADD.
 - "Cali $50 ayuu bixiyay" and "Cali wuxuu iga soo celiyay $50" are PAY.
 - For multiple name+amount entries without direction, extract every entry; the application asks one clarification and applies the answer to all entries.
+
+TRANSACTION DESCRIPTIONS:
+- Extract a short description for each individual ADD or PAY transaction when the user's message includes one (e.g. "Cali $10 raashin ayuu qaatay" -> description="raashin").
+- Do not copy a previous description or infer one. If no detail is stated, return description=null; the application stores and displays it as "-".
+- Description belongs to this one transaction only, never to the customer's combined balance.
 
 PAYMENT SAFETY:
 - Return the field payment_type for every entry: "FULL", "PARTIAL", "UNKNOWN", or null.
@@ -1008,8 +1014,18 @@ def local_fallback_parse(message_text):
             if not name_text:
                 ambiguous_entries = []
                 break
+            tail_description = segment[match.end():].strip(" .,:;-")
+            tail_description = re.sub(
+                r"\\b(?:ayuu|wuxuu|wuu|ayaa|iga|qaatay|qaatey|qaato|bixiyay|bixiyey|bixisay|celiyay|celiyey|paid|repaid|amaah|deyn|dayn|cusub)\\b",
+                " ", tail_description, flags=re.I
+            )
+            tail_description = " ".join(tail_description.split()).strip(" .,:;-")
+            if tail_description:
+                name_text = re.sub(re.escape(tail_description), " ", name_text, count=1, flags=re.I)
+                name_text = " ".join(name_text.split()).strip()
             ambiguous_entries.append({**base, "action": "ADD", "customer_name": name_text,
-                                      "amount": float(amount_text.replace(",", "."))})
+                                      "amount": float(amount_text.replace(",", ".")),
+                                      "description": tail_description or None})
         if ambiguous_entries:
             return ambiguous_entries
 
@@ -1029,7 +1045,7 @@ def local_fallback_parse(message_text):
     is_replace = bool(re.search(r"\b(?:edit|kadhig|ka\s+dhig|ka\s+dhigo)\b", low))
     is_delete = bool(re.match(r"^(?:delete|remove|tirtir)\b", low))
     is_search = bool(re.match(r"^(?:search|find|lookup|look\s+up|raadi|raadso|show|check|hubi)\b", low))
-    is_history = bool(re.search(r"\b(?:history|taariikh|statement|xisaab(?:ta)?)\b",
+    is_history = bool(re.search(r"\b(?:history|taariikh|statement|xisaab(?:ta)?|faahfaahin|faahfaahinta|description)\b",
         low
     ))
     is_payment = bool(re.search(r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|wuu\s+bixiyay|wuxuu\s+bixiyay|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|lacag\s*bixin(?:ta)?|paid|payment|repaid|paid\s+back)\b", low))
@@ -1051,11 +1067,26 @@ def local_fallback_parse(message_text):
         if amount < 0:
             return None
 
+    # Recover a description only from text after the stated amount. Never infer it
+    # from stored customer data or from words that indicate transaction direction.
+    transaction_description = None
+    if amount_matches and (is_payment or classify_transaction_direction(raw) == "ADD"):
+        tail = raw[amount_matches[0].end():].strip(" .,:;-")
+        tail = re.sub(
+            r"\b(?:ayuu|wuxuu|wuu|ayaa|iga|qaatay|qaatey|qaato|bixiyay|bixiyey|bixisay|"
+            r"celiyay|celiyey|soo|helay|lacag|bixin|paid|repaid|amaah|deyn|dayn|cusub)\b",
+            " ", tail, flags=re.I
+        )
+        tail = " ".join(tail.split()).strip(" .,:;-")
+        transaction_description = tail or None
+
     # Remove amount tokens, action words and common transaction filler to recover
     # the customer's name without allowing the parser to invent one.
     name_text = raw
     for m in reversed(amount_matches):
         name_text = name_text[:m.start()] + " " + name_text[m.end():]
+    if transaction_description:
+        name_text = re.sub(re.escape(transaction_description), " ", name_text, count=1, flags=re.I)
 
     name_text = re.sub(r"\b(?:\$|usd|dollars?|ayuu|ayuu\s+iga\s+qaatay)\b", " ", name_text, flags=re.I)
 
@@ -1068,7 +1099,7 @@ def local_fallback_parse(message_text):
     name_text = re.sub(r"^(?:waa|waxay ahayd|waxay aheyd)\s+", " ", name_text, flags=re.I)
 
     name_text = re.sub(
-        r"\b(?:history|taariikh|statement|xisaab(?:ta)?)\b",
+        r"\b(?:history|taariikh|statement|xisaab(?:ta)?|faahfaahin|faahfaahinta|description)\b",
         " ",
         name_text,
         flags=re.I
@@ -1098,12 +1129,13 @@ def local_fallback_parse(message_text):
             else "UNKNOWN"
         )
         return [{**base, "action": "PAY", "customer_name": name, "amount": amount,
-                 "payment_type": payment_type}]
+                 "payment_type": payment_type, "description": transaction_description}]
     if amount is not None and is_replace:
         return [{**base, "action": "EDIT", "customer_name": name,
                  "amount": amount, "new_amount": amount}]
     if amount is not None and (currency_marked or re.search(r"\b(?:iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|added|add)\b", low)):
-        return [{**base, "action": "ADD", "customer_name": name, "amount": amount}]
+        return [{**base, "action": "ADD", "customer_name": name, "amount": amount,
+                 "description": transaction_description}]
     return None
 
 
@@ -1635,10 +1667,11 @@ def _commit_import(admin_phone, session):
         saved = 0
         try:
             for item, debtor in prepared:
-                rpc_result = supabase.rpc("record_debt_payment", {
+                rpc_result = supabase.rpc("record_debt_payment_with_history", {
                     "p_customer_id": str(debtor["id"]),
                     "p_business_user_id": str(business_user_id),
                     "p_amount": round(float(item["amount"]), 2),
+                    "p_description": str(item.get("description") or "-").strip() or "-",
                 }).execute()
                 rpc_data = rpc_result.data
                 if isinstance(rpc_data, list):
@@ -1737,16 +1770,16 @@ def _commit_import(admin_phone, session):
                     skipped += 1
                     continue
 
-            row = {
-                "business_user_id": business_user_id,
-                "name": item["name"],
-                "amount": amount,
-                "original_amount": amount,
-                "promised_date": item.get("promised_date"),
-                "phone_number": item.get("phone_number"),
-                "is_paid": False,
-            }
-            result = supabase.table("customers").insert(row).select("id").execute()
+            result = supabase.rpc("record_debt_addition", {
+                "p_customer_id": None,
+                "p_business_user_id": str(business_user_id),
+                "p_name": str(item["name"]),
+                "p_amount": round(amount, 2),
+                "p_description": str(item.get("description") or "-").strip() or "-",
+                "p_promised_date": item.get("promised_date"),
+                "p_phone_number": item.get("phone_number"),
+                "p_created_at": None,
+            }).execute()
             if not result.data:
                 raise RuntimeError(f"Deynta {item['name']} lama xaqiijin in la kaydiyey.")
             added += 1
@@ -3257,8 +3290,19 @@ async def whatsapp_webhook(request: Request):
     original_text = str(message_text or "").strip()
     lower_text = original_text.casefold()
     is_history_request = any(word in lower_text for word in (
-        "history", "taariikh", "statement", "xisaab"
+        "history", "taariikh", "statement", "xisaab", "faahfaahin", "faahfaahinta", "description"
     ))
+    detail_prefix = re.match(
+        r"^\s*(?:faahfaahin(?:ta)?|description|history|taariikh|statement|xisaab(?:ta)?)\b\s*[:,-]?\s*(.+?)\s*$",
+        original_text,
+        flags=re.IGNORECASE,
+    )
+    if detail_prefix:
+        explicit_history_name = detail_prefix.group(1).strip()
+        if explicit_history_name:
+            print(f"📒 Explicit transaction-detail request detected: {explicit_history_name!r}")
+            entries = [{"action": "HISTORY", "customer_name": explicit_history_name}]
+
     search_prefix = re.match(
         r"^\s*(?:search|find|lookup|look up|raadi|raadso)\b\s*[:,-]?\s*(.+?)\s*$",
         original_text,
@@ -3453,40 +3497,42 @@ async def whatsapp_webhook(request: Request):
                             continue
 
                         old_amount = float(existing.get("amount") or 0)
-                        update_data = {"amount": round(old_amount + add_amount, 2), "is_paid": False}
-                        old_original_amount = existing.get("original_amount")
-                        if old_original_amount is not None:
-                            try:
-                                original_value = float(old_original_amount)
-                                if math.isfinite(original_value) and original_value >= 0:
-                                    update_data["original_amount"] = round(original_value + add_amount, 2)
-                            except (TypeError, ValueError):
-                                print(f"⚠️ Invalid original_amount for customer row {existing.get('id')}; leaving it unchanged.")
                         if promised_date:
                             try:
-                                update_data["promised_date"] = datetime.strptime(str(promised_date), "%Y-%m-%d").date().isoformat()
+                                promised_date = datetime.strptime(str(promised_date), "%Y-%m-%d").date().isoformat()
                             except (TypeError, ValueError):
                                 send_whatsapp(sender_phone, "❌ Taariikh khaldan. Isticmaal YYYY-MM-DD.")
                                 continue
-                        if new_phone:
-                            update_data["phone_number"] = new_phone
-                        if description:
-                            update_data["description"] = description
+                        parsed_created_at = None
+                        if transaction_date:
+                            parsed_transaction_date = _parse_somali_date(transaction_date)
+                            if parsed_transaction_date is None:
+                                send_whatsapp(sender_phone, "❌ Taariikhda macaamilka ma saxna. Isticmaal DD/MM/YYYY.")
+                                failed_inserts.append({"name": name, "reason": "Invalid transaction date"})
+                                continue
+                            parsed_created_at = datetime.combine(
+                                parsed_transaction_date, datetime.min.time(), tzinfo=EAT
+                            ).isoformat()
 
-                        updated_result = (
-                            supabase.table("customers")
-                            .update(update_data)
-                            .eq("id", existing["id"])
-                            .eq("business_user_id", business_user_id)
-                            .select("id, name, amount, promised_date, is_paid")
-                            .execute()
-                        )
-                        if not updated_result.data:
+                        updated_result = supabase.rpc("record_debt_addition", {
+                            "p_customer_id": str(existing["id"]),
+                            "p_business_user_id": str(business_user_id),
+                            "p_name": str(existing.get("name") or name),
+                            "p_amount": round(add_amount, 2),
+                            "p_description": description or "-",
+                            "p_promised_date": promised_date,
+                            "p_phone_number": new_phone,
+                            "p_created_at": parsed_created_at,
+                        }).execute()
+                        updated_data = updated_result.data
+                        if isinstance(updated_data, list):
+                            updated_data = updated_data[0] if updated_data else None
+                        if not isinstance(updated_data, dict) or not updated_data.get("id"):
                             send_whatsapp(sender_phone, "❌ Lacagta laguma darin. Database-ku wax jawaab ah ma soo celin.")
-                            failed_inserts.append({"name": name, "reason": "Add-to-existing update returned no rows"})
+                            failed_inserts.append({"name": name, "reason": "record_debt_addition returned no customer row"})
                             continue
 
-                        updated = updated_result.data[0]
+                        updated = updated_data
                         send_whatsapp(
                             sender_phone,
                             f"✅ Lacag ayaa lagu daray deyntii hore!\n\n"
@@ -3505,32 +3551,30 @@ async def whatsapp_webhook(request: Request):
                         name = matches[0].get("name") or name
                         entry["customer_name"] = name
 
-                debtor_data = {
-                    'business_user_id': business_user_id,
-                    'name': name,
-                    'amount': float(amount) if amount is not None else 0,
-                    'original_amount': float(amount) if amount is not None else 0,
-                    'promised_date': promised_date,
-                    'phone_number': new_phone if new_phone else None,
-                    'is_paid': False
-                }
-                if description:
-                    debtor_data["description"] = description
+                parsed_created_at = None
                 if transaction_date:
                     parsed_transaction_date = _parse_somali_date(transaction_date)
                     if parsed_transaction_date is None:
                         send_whatsapp(sender_phone, "❌ Taariikhda macaamilka ma saxna. Isticmaal DD/MM/YYYY.")
                         failed_inserts.append({"name": name, "reason": "Invalid transaction date"})
                         continue
-                    # Store the stated transaction date in the existing created_at timestamp.
-                    debtor_data["created_at"] = datetime.combine(
+                    parsed_created_at = datetime.combine(
                         parsed_transaction_date, datetime.min.time(), tzinfo=EAT
                     ).isoformat()
 
-                result = supabase.table("customers").insert(debtor_data).execute()
+                result = supabase.rpc("record_debt_addition", {
+                    "p_customer_id": None,
+                    "p_business_user_id": str(business_user_id),
+                    "p_name": str(name),
+                    "p_amount": round(float(amount), 2) if amount is not None else 0,
+                    "p_description": description or "-",
+                    "p_promised_date": promised_date,
+                    "p_phone_number": new_phone,
+                    "p_created_at": parsed_created_at,
+                }).execute()
                 if not result.data:
                     send_whatsapp(sender_phone, f"❌ Deynta {name} lama diiwaangelin. Database-ku wax jawaab ah ma soo celin.")
-                    failed_inserts.append({"name": name, "reason": "Insert returned no rows"})
+                    failed_inserts.append({"name": name, "reason": "record_debt_addition returned no rows"})
                     continue
                 successful_inserts.append(entry)
                 
@@ -3605,10 +3649,11 @@ async def whatsapp_webhook(request: Request):
 
                 # Atomically insert the payment and update the balance inside PostgreSQL.
                 # Apply the companion SQL migration file before deploying this version.
-                rpc_result = supabase.rpc("record_debt_payment", {
+                rpc_result = supabase.rpc("record_debt_payment_with_history", {
                     "p_customer_id": str(debtor["id"]),
                     "p_business_user_id": str(business_user_id),
                     "p_amount": actual_payment,
+                    "p_description": description or "-",
                 }).execute()
                 rpc_data = rpc_result.data
                 if isinstance(rpc_data, list):
@@ -4108,80 +4153,48 @@ async def whatsapp_webhook(request: Request):
                             []
                         ).append(payment)
 
+                    total_balance = sum(
+                        max(float(debt.get("amount") or 0), 0.0)
+                        for debt in history_matches
+                    )
+                    total_paid = sum(float(payment.get("amount") or 0) for payment in payment_rows)
+
+                    # Transaction-level detail is visible only through HISTORY /
+                    # FAAHFAAHIN. Ordinary lists and searches never include it.
+                    transaction_result = (
+                        supabase.table("customer_transactions")
+                        .select("transaction_type, amount, description, created_at")
+                        .eq("business_user_id", business_user_id)
+                        .in_("customer_id", customer_ids)
+                        .order("created_at")
+                        .execute()
+                    )
+                    transaction_rows = transaction_result.data or []
+
                     lines = [
-                        f"📒 *STATEMENT / XISAABTA MACMIILKA: {history_matches[0].get('name', name)}*",
-                        ""
+                        f"📒 *FAAHFAAHINTA XISAABTA: {history_matches[0].get('name', name)}*",
+                        "",
                     ]
 
-                    total_balance = 0.0
-                    total_paid = 0.0
-
-                    for index, debt in enumerate(history_matches, 1):
-                        balance = float(debt.get("amount") or 0)
-                        debt_paid = (
-                            bool(debt.get("is_paid"))
-                            or balance <= 0
-                        )
-
-                        total_balance += max(balance, 0.0)
-
-                        lines.append(
-                            f"*Deyn #{index}* — "
-                            f"{str(debt.get('created_at') or '')[:10] or 'Taariikh lama hayo'}"
-                        )
-
-                        lines.append(
-                            f"  • Haraaga hadda: ${max(balance, 0.0):.2f}"
-                        )
-
-                        due_date = debt.get("promised_date")
-
-                        lines.append(
-                            f"  • Ballan: {due_date if due_date else 'Lama cayimin'}"
-                        )
-
-                        lines.append(
-                            f"  • Xaalad: "
-                            f"{'✅ LA BIXIYAY' if debt_paid else '⏳ WELI LAMA BIXIN'}"
-                        )
-
-                        debt_payments = payments_by_debt.get(
-                            str(debt.get("id")),
-                            []
-                        )
-
-                        if debt_payments:
-                            lines.append("  • Lacag-bixinnada:")
-
-                            for payment in debt_payments:
-                                paid_amount = float(
-                                    payment.get("amount") or 0
-                                )
-
-                                total_paid += paid_amount
-
-                                paid_date = (
-                                    str(payment.get("paid_at") or "")[:10]
-                                    or "Taariikh lama hayo"
-                                )
-
-                                lines.append(
-                                    f"    - {paid_date}: ${paid_amount:.2f}"
-                                )
-
-                        else:
+                    if transaction_rows:
+                        for transaction in transaction_rows:
+                            transaction_type = str(transaction.get("transaction_type") or "").upper()
+                            label = "Deyn cusub" if transaction_type == "ADD" else "Lacag-bixin"
+                            sign = "+" if transaction_type == "ADD" else "-"
+                            amount_value = float(transaction.get("amount") or 0)
+                            transaction_date_value = str(transaction.get("created_at") or "")[:10] or "Taariikh lama hayo"
+                            detail = str(transaction.get("description") or "-").strip() or "-"
                             lines.append(
-                                "  • Lacag-bixin hore: Ma jirto"
+                                f"• {transaction_date_value} — {label}: {sign}${amount_value:.2f}\n"
+                                f"  Faahfaahin: {detail}"
                             )
-
-                        lines.append("")
-
-                    if not payment_rows:
-                        total_paid = 0.0
+                    else:
+                        lines.append("Weli ma jiraan macaamillo faahfaahsan.")
 
                     lines.extend([
+                        "",
                         "━━━━━━━━━━━━━━",
-                        f"💵 *Wadarta lacagta la bixiyay ee diiwaangashan:* ${total_paid:.2f}",
+                        f"💵 *Wadarta lacagta la bixiyay:* ${total_paid:.2f}",
                         f"📌 *Wadarta hadhaaga deynta:* ${total_balance:.2f}",
                     ])
 
@@ -4509,7 +4522,6 @@ async def whatsapp_webhook(request: Request):
                     f"👤 Macmiilka: *{entry.get('customer_name') or '—'}*\n"
                     f"💵 Lacagta: *${float(entry.get('amount') or 0):.2f}*\n"
                     f"📱 Telefoon: *{entry.get('customer_phone') or entry.get('new_phone') or 'Lama sheegin'}*\n"
-                    f"📝 Faahfaahin: *{entry.get('description') or 'Lama sheegin'}*\n"
                     f"📅 Ballanta: *{entry.get('promised_date') or 'Lama sheegin'}*\n"
                     f"🗓️ Taariikhda: *{entry.get('transaction_date') or 'Maanta'}*"
                 )
