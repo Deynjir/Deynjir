@@ -865,12 +865,15 @@ def is_missing_value(value):
 
 
 def is_explicit_list_request(message_text):
-    """Only route a LIST intent when the user's text contains a clear list command."""
+    """Recognize explicit debt-list and appointment-list commands."""
     raw = normalize_customer_name(message_text)
     return bool(re.fullmatch(
         r"(?:deyn|dayn|liis|liiska|liiska deynta|liiska daynta|"
         r"liiska daynta iyo balamaha|liiska deynta iyo balamaha|"
-        r"deynaha liiskooda|list|list debts?|debt list|show debts?)",
+        r"deynaha liiskooda|list|list debts?|debt list|show debts?|"
+        r"balamaha(?: maanta| beri)?|ballamaha(?: maanta| beri)?|"
+        r"balanta(?: maanta| beri)?|ballanta(?: maanta| beri)?|"
+        r"balan(?:ta)?(?: maanta| beri)?)",
         raw,
         flags=re.I,
     )) or is_fuzzy_debt_list_command(message_text)
@@ -3109,8 +3112,13 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, deynjir_help_message())
             return {"status": "help_sent"}
         else:
-            send_whatsapp(sender_phone, "Fadlan soo qor lambar 1 ilaa 6.\n\n" + deynjir_main_menu())
-            return {"status": "invalid_menu_choice"}
+            # A menu session must not swallow a real text command. For example,
+            # "Ballamaha maanta" is option 5 expressed in words, not an invalid
+            # numeric choice. Clear the menu state and let normal command parsing
+            # handle the user's actual message.
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            guided = None
+            message_text = guided_text
 
     if guided and guided.get("stage") in {"debt_name", "payment_name"}:
         if is_missing_value(guided_text) or len(guided_text) < 2 or len(guided_text) > 100 or re.search(r"\d", guided_text):
