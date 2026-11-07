@@ -4866,7 +4866,7 @@ async def whatsapp_webhook(request: Request):
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
                 "*Hadii aad ula jeedo*\n\n"
                 "*DEYN CUSUB* - Taabo 1\n\n"
-                "*LACAG BIXIN* - Taabo 2.\n"
+                "*LACAG BIXIN* - Taabo 2.\n\n"
                 "Soo qor *JOOJI* haddii aad rabto inaad ka baxdo.\n\n"
                 "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
              )
