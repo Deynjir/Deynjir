@@ -1328,12 +1328,29 @@ def parse_transaction_clarification(message_text):
         flags=re.I,
     ).strip()
 
+    # Natural follow-up answers to the pending ADD/PAY question.
+    # These are direction-only signals; the original saved name and amount
+    # remain authoritative unless the user explicitly corrects them.
     if re.fullmatch(
         r"(?:deyn cusub|dayn cusub|deyn cusub oo baxday|dayn cusub oo baxday|"
-        r"lacag baxday|deyn baa baxday|add|new debt)",
+        r"lacag baxday|deyn baa baxday|add|new debt|"
+        r"(?:wuu|wuxuu|ayuu|ayaa|waxay|way)\s+qaatay|"
+        r"(?:deyn|dayn)\s+(?:(?:ayuu|ayaa|wuu|wuxuu|way|waxay)\s+)?"
+        r"(?:qaatay|qaadatay|qaatey)|"
+        r"(?:deyn|dayn)\s+ayuu\s+qaatay)",
         text,
         re.I,
     ):
+        return "ADD"
+
+    # Common conversational forms, including a follow-up that repeats
+    # the amount/product after the original multiline entry.
+    if re.search(
+        r"\b(?:wuu|wuxuu|ayuu|ayaa|waxay|way)\s+qaatay\b|"
+        r"\b(?:deyn|dayn)\s+(?:ayuu|ayaa|wuu|wuxuu)\s+qaatay\b",
+        text,
+        re.I,
+    ) and not re.search(r"\b(?:bixiyay|bixisay|bixiyey|bixiyeen)\b", text, re.I):
         return "ADD"
 
     if re.fullmatch(
@@ -3970,6 +3987,22 @@ async def whatsapp_webhook(request: Request):
                 if not isinstance(entries, list) or not entries:
                     raise ValueError("Saved pending entries are empty or invalid")
                 forced_transaction_action = clarification_action
+
+                # Keep optional product/detail information from the clarification
+                # reply, while preserving the saved customer and amount.
+                if clarification_action == "ADD":
+                    detail_match = re.search(
+                        r"\boo\s+(.+?)\s*$",
+                        normalize_customer_name(str(message_text or "")),
+                        re.I,
+                    )
+                    if detail_match:
+                        clarification_detail = detail_match.group(1).strip(" .,:;-")
+                        for saved_entry in entries:
+                            if isinstance(saved_entry, dict) and saved_entry.get("action") in {"ADD", "PAY"}:
+                                saved_entry["description"] = clarification_detail[:160]
+                                break
+
                 message_text = pending_clarification.get("original_message") or message_text
                 supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).eq("business_user_id", business_user_id).execute()
                 print(f"✅ Clarification received; replaying saved message as {forced_transaction_action}")
@@ -4528,7 +4561,12 @@ async def whatsapp_webhook(request: Request):
             if parsed_entry.get("action") in {"ADD", "PAY"}:
                 parsed_entry["action"] = forced_transaction_action
     elif not pdf_only_requested:
-        explicit_direction = classify_transaction_direction(message_text)
+        # In this multiline menu format, option 1 explicitly means a new
+        # debt. Do not ask the ADD/PAY clarification a second time.
+        explicit_direction = (
+            "ADD" if multiline_transaction else
+            classify_transaction_direction(message_text)
+        )
         has_financial_entries = any(
             isinstance(item, dict)
             and item.get("action") in {"ADD", "PAY"}
