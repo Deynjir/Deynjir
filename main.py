@@ -591,6 +591,7 @@ def _process_pending_payment_confirmation(pending_id, actor_phone, admin=False):
             .select("id, name, amount, is_paid")
             .eq("id", str(pending.get("customer_id")))
             .eq("business_user_id", str(pending.get("business_user_id")))
+            .eq("is_archived", False)
             .limit(1)
             .execute()
         )
@@ -882,7 +883,7 @@ def remember_selected_customer(sender_phone, business_user_id, customer_name):
     }
 
 
-def get_recent_selected_customer(sender_phone, business_user_id, max_age_minutes=15):
+def get_recent_selected_customer(sender_phone, business_user_id, max_age_minutes=2):
     """Return the recently selected customer only for the same shop and short time window."""
     saved = LAST_SELECTED_CUSTOMERS.get(str(sender_phone)) or {}
     if str(saved.get("business_user_id") or "") != str(business_user_id):
@@ -1308,8 +1309,14 @@ def parse_structured_somali_transaction(message_text):
 
 
 def parse_transaction_clarification(message_text):
-    """Recognize natural Somali/English answers to a pending ADD-vs-PAY question."""
+    """Recognize natural Somali/English answers to a pending ADD-vs-PAY question.
+
+    This parser is intentionally limited to the direction of the pending
+    transaction. It never changes the saved customer name or amount.
+    """
     text = normalize_customer_name(str(message_text or ""))
+    text = re.sub(r"[.!؟?،,:;]+", " ", text)
+    text = " ".join(text.split()).strip()
 
     # Numbered WhatsApp choices: 1 = new debt, 2 = payment, 3 = cancel.
     if text == "1":
@@ -1319,51 +1326,53 @@ def parse_transaction_clarification(message_text):
     if text == "3":
         return "CANCEL"
 
-    # People commonly answer in a sentence, not with the exact menu wording:
-    # "Waa lacag bixin", "waa deyn cusub", "lacag-bixin bay ahayd", etc.
+    # Remove conversational wrappers without removing the transaction meaning.
     text = re.sub(
-        r"^(?:waa|waxay ahayd|waxay aheyd|taasi waa|taas waa|waxaan ula jeedaa)\s+",
+        r"^(?:waa|taasi waa|taas waa|waxaan ula jeedaa|waxaan ka wadaa|"
+        r"waxay ahayd|waxay aheyd)\s+",
         "",
         text,
         flags=re.I,
     ).strip()
 
-    # Natural follow-up answers to the pending ADD/PAY question.
-    # These are direction-only signals; the original saved name and amount
-    # remain authoritative unless the user explicitly corrects them.
-    if re.fullmatch(
-        r"(?:deyn cusub|dayn cusub|deyn cusub oo baxday|dayn cusub oo baxday|"
-        r"lacag baxday|deyn baa baxday|add|new debt|"
-        r"(?:wuu|wuxuu|ayuu|ayaa|waxay|way)\s+qaatay|"
-        r"(?:deyn|dayn)\s+(?:(?:ayuu|ayaa|wuu|wuxuu|way|waxay)\s+)?"
-        r"(?:qaatay|qaadatay|qaatey)|"
-        r"(?:deyn|dayn)\s+ayuu\s+qaatay)",
-        text,
-        re.I,
-    ):
+    # Somali answers often end with "weeye/waaye", "baa", or "bay ahayd".
+    text = re.sub(r"\s+(?:weeye|waaye|weeyaan|baa|bay ahayd|bay aheyd|"
+                  r"ayay ahayd|ayay aheyd|weeye.)$", "", text, flags=re.I).strip()
+
+    # ADD: new debt / customer took or borrowed money.
+    add_patterns = (
+        r"^(?:deyn|dayn)\s*(?:cusub|baxday|cusub oo baxday)$",
+        r"^(?:deyn|dayn)\s+(?:(?:ayuu|ayaa|wuu|wuxuu|way|waxay)\s+)?"
+        r"(?:qaatay|qaadatay|qaatey)$",
+        r"^(?:(?:wuu|wuxuu|ayuu|ayaa|way|waxay)\s+)?qaatay$",
+        r"^(?:iga qaatay|wuxuu iga qaatay|amaah|add|new debt)$",
+    )
+    if any(re.fullmatch(pattern, text, re.I) for pattern in add_patterns):
         return "ADD"
 
-    # Common conversational forms, including a follow-up that repeats
-    # the amount/product after the original multiline entry.
-    if re.search(
-        r"\b(?:wuu|wuxuu|ayuu|ayaa|waxay|way)\s+qaatay\b|"
-        r"\b(?:deyn|dayn)\s+(?:ayuu|ayaa|wuu|wuxuu)\s+qaatay\b",
-        text,
-        re.I,
-    ) and not re.search(r"\b(?:bixiyay|bixisay|bixiyey|bixiyeen)\b", text, re.I):
-        return "ADD"
-
-    if re.fullmatch(
-        r"(?:lacag\s*bixin(?:ta)?|lacag soo xarootay|deyn soo xarootay|"
-        r"lacag baa soo gashay|lacag la helay|bixin|pay|payment|"
-        r"money received|received payment)",
-        text,
-        re.I,
-    ):
+    # PAY: payment received / deduct from the customer's outstanding balance.
+    pay_patterns = (
+        r"^(?:lacag\s*bixin(?:ta)?|lacag soo xarootay|deyn soo xarootay)$",
+        r"^(?:lacag baa soo gashay|lacag la helay|lacag ayaa la helay|"
+        r"lacagtii waa la helay|lacag ayuu bixiyay|lacag ayu(u|y) bixiyay)$",
+        r"^(?:ka jar|ka jarey|ka reeb|ka reebay|ka reebtay|"
+        r"bixiyay|bixiyey|bixisay|bixiyeen|wuu bixiyay|wuxuu bixiyay|"
+        r"soo celiyay|soo celiyey|lacag bixin weeye)$",
+        r"^(?:pay|payment|money received|received payment|paid|paid back)$",
+    )
+    if any(re.fullmatch(pattern, text, re.I) for pattern in pay_patterns):
         return "PAY"
 
     if re.fullmatch(r"(?:jooji|cancel|baaji|stop)", text, re.I):
         return "CANCEL"
+
+    # A clarification reply may itself be a complete natural transaction
+    # phrase, e.g. "ka jar Xasan Dhakaawe 308". Only infer direction here;
+    # the saved original customer/amount remain unchanged and payment still
+    # goes through the normal confirmation workflow.
+    explicit_direction = classify_transaction_direction(text)
+    if explicit_direction in {"ADD", "PAY"}:
+        return explicit_direction
     return None
 
 
@@ -1725,6 +1734,7 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
         supabase.table("customers")
         .select("name")
         .eq("business_user_id", business_user_id)
+        .eq("is_archived", False)
         .execute()
     )
     stored_names = {}
@@ -1780,7 +1790,7 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
     return None
 
 
-def find_debtor_matches(business_user_id, name):
+def find_debtor_matches(business_user_id, name, include_archived=False):
     """Find exact names first, then aligned partial names, then safe fuzzy matches.
 
     A fuzzy match is not silently selected when another distinct customer name is
@@ -1790,13 +1800,16 @@ def find_debtor_matches(business_user_id, name):
     if not requested:
         return []
 
-    result = (
+    query = (
         supabase.table("customers")
         .select("*")
         .eq("business_user_id", business_user_id)
-        .order("name")
-        .execute()
     )
+    # Ordinary debt operations see active customers only. HISTORY deliberately
+    # includes archived rows so their statements remain retrievable.
+    if not include_archived:
+        query = query.eq("is_archived", False)
+    result = query.order("name").execute()
     rows = result.data or []
     if not rows:
         return []
@@ -1959,6 +1972,7 @@ def find_delete_customer_candidates(business_user_id, requested_name):
         supabase.table("customers")
         .select("id, name, amount, business_user_id")
         .eq("business_user_id", business_user_id)
+        .eq("is_archived", False)
         .order("name")
         .execute()
     )
@@ -2069,7 +2083,8 @@ def begin_delete_flow(sender_phone, business_user_id, requested_name):
         f"Wadarta deynta: *${balance:.2f}*\n"
         f"Inta laga jarayo: *{len(rows)}*\n\n"
         "Haddii ay sax tahay, soo qor *HAA, TIRTIR*.\n"
-        "Haddii kale, soo qor *JOOJI*."
+        "Haddii macmiilku leeyahay lacag-bixin ama taariikh macaamil, waa la archive-gareynayaa; haddii kale waa la tirtirayaa.\n"
+        "Qor *JOOJI* si aad uga baxdo."
     )
     return {"status": "delete_confirmation_required", "customer": candidate["name"], "rows": len(rows)}
 
@@ -2128,8 +2143,10 @@ def handle_delete_session(sender_phone, business_user_id, message_text):
             sender_phone,
             f"⚠️ *Xaqiiji tirtiridda*\n\nMacmiil: *{chosen['name']}*\n"
             f"Wadarta deynta: *${balance:.2f}*\n"
-            f"Diiwaannada la tirtirayo: *{len(candidate_rows)}*\n\n"
-            "Haddii tani sax tahay, soo qor *HAA, TIRTIR*.\nHaddii kale, soo qor *JOOJI*."
+            f"Diiwaannada macmiilka: *{len(candidate_rows)}*\n\n"
+            "Haddii tani sax tahay, soo qor *HAA, TIRTIR*.\n"
+            "Haddii uu leeyahay lacag-bixin ama taariikh macaamil, waa la archive-gareynayaa; haddii kale waa la tirtirayaa.\n"
+            "Qor *JOOJI* si aad uga baxdo."
         )
         return {"status": "delete_confirmation_required", "customer": chosen["name"]}
 
@@ -2146,6 +2163,44 @@ def handle_delete_session(sender_phone, business_user_id, message_text):
             return {"status": "delete_missing_ids"}
 
         try:
+            # Financial history is authoritative: any payment OR transaction
+            # means the customer row must be retained and archived.
+            payment_history = (
+                supabase.table("payments")
+                .select("customer_id")
+                .eq("business_user_id", business_user_id)
+                .in_("customer_id", customer_ids)
+                .limit(1)
+                .execute()
+            )
+            transaction_history = (
+                supabase.table("customer_transactions")
+                .select("customer_id")
+                .eq("business_user_id", business_user_id)
+                .in_("customer_id", customer_ids)
+                .limit(1)
+                .execute()
+            )
+            has_history = bool(payment_history.data or transaction_history.data)
+
+            if has_history:
+                result = (
+                    supabase.table("customers")
+                    .update({"is_archived": True, "archived_at": datetime.now(timezone.utc).isoformat()})
+                    .eq("business_user_id", business_user_id)
+                    .in_("id", customer_ids)
+                    .eq("is_archived", False)
+                    .select("id")
+                    .execute()
+                )
+                affected = len(result.data or [])
+                DELETE_SESSIONS.pop(sender_phone, None)
+                if affected != len(customer_ids):
+                    send_whatsapp(sender_phone, f"⚠️ Macmiilka *{customer_name}* qayb ahaan ayaa loo archive-gareeyay ({affected}/{len(customer_ids)}). Fadlan hubi liiska.")
+                    return {"status": "archive_partial", "archived": affected}
+                send_whatsapp(sender_phone, f"✅ *{customer_name}* waa la archive-gareeyay. Deymihii iyo lacag-bixinnadii hore way kaydsan yihiin; magaca waxaad ka heli kartaa markaad codsato taariikhdiisa.")
+                return {"status": "customer_archived", "archived": affected}
+
             deleted_count = 0
             for customer_id in customer_ids:
                 result = (
@@ -2153,6 +2208,7 @@ def handle_delete_session(sender_phone, business_user_id, message_text):
                     .delete()
                     .eq("id", customer_id)
                     .eq("business_user_id", business_user_id)
+                    .eq("is_archived", False)
                     .select("id")
                     .execute()
                 )
@@ -2161,12 +2217,12 @@ def handle_delete_session(sender_phone, business_user_id, message_text):
             if deleted_count != len(customer_ids):
                 send_whatsapp(sender_phone, f"⚠️ {customer_name}: {deleted_count} ka mid ah {len(customer_ids)} diiwaan ayaa la tirtiray. Fadlan hubi liiska daynta.")
                 return {"status": "delete_partial", "deleted": deleted_count}
-            send_whatsapp(sender_phone, f"✅ Deynta *{customer_name}* waa la tirtiray.")
+            send_whatsapp(sender_phone, f"✅ *{customer_name}* waa la tirtiray. Ma lahayn lacag-bixin ama taariikh macaamil.")
             return {"status": "delete_confirmed", "deleted": deleted_count}
         except Exception as exc:
-            print(f"❌ Confirmed delete failed: {type(exc).__name__}: {exc}")
+            print(f"❌ Confirmed delete/archive failed: {type(exc).__name__}: {exc}")
             DELETE_SESSIONS.pop(sender_phone, None)
-            send_whatsapp(sender_phone, "❌ Tirtiriddu way fashilantay. Diiwaanka lama xaqiijin inuu tirtirmay; fadlan hubi liiska daynta.")
+            send_whatsapp(sender_phone, "❌ Tirtiridda/archiving-ku way fashilantay. Waxba lama xaqiijin; fadlan hubi database-ka.")
             return {"status": "delete_error"}
 
     DELETE_SESSIONS.pop(sender_phone, None)
@@ -2355,6 +2411,7 @@ def _import_duplicate_groups(business_user_id, entries):
     existing_result = (supabase.table("customers")
         .select("id, name, amount, promised_date")
         .eq("business_user_id", business_user_id)
+        .eq("is_archived", False)
         .eq("is_paid", False).execute())
     existing_rows = existing_result.data or []
     duplicates = []
@@ -2531,6 +2588,7 @@ def _commit_import(admin_phone, session):
                     supabase.table("customers")
                     .select("id")
                     .eq("business_user_id", business_user_id)
+                    .eq("is_archived", False)
                     .eq("name", item["name"])
                     .eq("amount", amount)
                     .eq("is_paid", False)
@@ -3780,13 +3838,13 @@ async def whatsapp_webhook(request: Request):
                 new_name = rename_state["new_name"]
                 try:
                     collision = (supabase.table("customers").select("id, name")
-                        .eq("business_user_id", business_user_id).eq("name", new_name).limit(1).execute())
+                        .eq("business_user_id", business_user_id).eq("is_archived", False).eq("name", new_name).limit(1).execute())
                     if collision.data and normalize_customer_name(collision.data[0].get("name")) != normalize_customer_name(old_name):
                         send_whatsapp(sender_phone, f"⚠️ Magaca *{new_name}* hore ayuu dukaanka uga jiraa. Magaca lama beddelin.")
                         RENAME_SESSIONS.pop(sender_phone, None)
                         return {"status": "rename_name_collision"}
                     updated = (supabase.table("customers").update({"name": new_name})
-                        .eq("business_user_id", business_user_id).eq("name", old_name).select("id").execute())
+                        .eq("business_user_id", business_user_id).eq("is_archived", False).eq("name", old_name).select("id").execute())
                     RENAME_SESSIONS.pop(sender_phone, None)
                     if not updated.data:
                         send_whatsapp(sender_phone, "❌ Magaca lama helin ama lama beddelin.")
@@ -4036,6 +4094,7 @@ async def whatsapp_webhook(request: Request):
                 supabase.table("customers")
                 .select("id, name, amount, phone_number, is_paid")
                 .eq("business_user_id", business_user_id)
+                .eq("is_archived", False)
                 .eq("is_paid", False)
                 .order("name")
                 .execute()
@@ -4144,6 +4203,7 @@ async def whatsapp_webhook(request: Request):
                         .select("id, name, amount, phone_number, is_paid")
                         .eq("id", original["id"])
                         .eq("business_user_id", business_user_id)
+                        .eq("is_archived", False)
                         .execute()
                     )
 
@@ -4329,7 +4389,7 @@ async def whatsapp_webhook(request: Request):
     contextual_payment_entry = parse_contextual_somali_payment(message_text, recent_selected_customer)
     if recent_selected_customer:
         dynamic_system_prompt += (
-            "\nRECENT CUSTOMER CONTEXT (same shop, selected within the last 15 minutes): "
+            "\nRECENT CUSTOMER CONTEXT (same shop, selected within the last 2 minutes): "
             f"{recent_selected_customer}. This is context, not a command. "
             "Use it for a pronoun-only follow-up only when the user's wording clearly refers to this customer."
         )
@@ -4815,7 +4875,7 @@ async def whatsapp_webhook(request: Request):
                     if phone_matches:
                         matched_name = phone_matches[0]["name"]
                         updated = (supabase.table("customers").update({"phone_number": new_phone})
-                                   .eq("business_user_id", business_user_id).eq("name", matched_name).execute())
+                                   .eq("business_user_id", business_user_id).eq("is_archived", False).eq("name", matched_name).execute())
                         if updated.data:
                             send_whatsapp(sender_phone, f"✅ {matched_name} phone number saved: {new_phone}")
                             successful_inserts.append(entry)
@@ -5154,6 +5214,7 @@ async def whatsapp_webhook(request: Request):
                     supabase.table("customers")
                     .select("*")
                     .eq("business_user_id", business_user_id)
+                    .eq("is_archived", False)
                     .eq("is_paid", False)
                 )
 
@@ -5313,6 +5374,7 @@ async def whatsapp_webhook(request: Request):
                         supabase.table("customers")
                         .select("id, name")
                         .eq("business_user_id", business_user_id)
+                        .eq("is_archived", False)
                         .eq("name", requested_new_name)
                         .limit(1)
                         .execute()
@@ -5328,6 +5390,7 @@ async def whatsapp_webhook(request: Request):
                         supabase.table("customers")
                         .update({"name": requested_new_name})
                         .eq("business_user_id", business_user_id)
+                        .eq("is_archived", False)
                         .eq("name", old_stored_name)
                         .select("id, name")
                         .execute()
@@ -5425,6 +5488,7 @@ async def whatsapp_webhook(request: Request):
                     .update(update_data)
                     .eq("id", debtor["id"])
                     .eq("business_user_id", business_user_id)
+                    .eq("is_archived", False)
                     .select("id, name, amount, promised_date, is_paid")
                     .execute()
                 )
@@ -5524,7 +5588,7 @@ async def whatsapp_webhook(request: Request):
         elif action == "HISTORY":
             try:
                 # Full customer statement: debt records, payment events, and current outstanding balance.
-                history_matches = find_debtor_matches(business_user_id, name)
+                history_matches = find_debtor_matches(business_user_id, name, include_archived=True)
 
                 if not history_matches:
                     send_whatsapp(
@@ -5702,6 +5766,7 @@ async def whatsapp_webhook(request: Request):
                     supabase.table("customers")
                     .select("*")
                     .eq("business_user_id", business_user_id)
+                    .eq("is_archived", False)
                     .execute()
                 )
 
@@ -5845,6 +5910,7 @@ async def whatsapp_webhook(request: Request):
                     supabase.table("customers")
                     .select("*")
                     .eq("business_user_id", business_user_id)
+                    .eq("is_archived", False)
                     .order("promised_date", desc=False)
                     .execute()
                 )
@@ -6154,6 +6220,7 @@ async def daily_digest(request: Request):
                 supabase.table("customers")
                 .select("name, amount, promised_date")
                 .eq("business_user_id", business_user_id)
+                .eq("is_archived", False)
                 .eq("is_paid", False)
                 .order("promised_date", desc=False)
                 .execute()
@@ -6257,6 +6324,7 @@ def _report_period_data(business_user_id, start_date, end_date):
     current_result = (supabase.table("customers")
         .select("id, amount, promised_date, is_paid")
         .eq("business_user_id", business_user_id)
+        .eq("is_archived", False)
         .eq("is_paid", False).execute())
     current_open = [row for row in (current_result.data or []) if _safe_money(row.get("amount")) > 0]
 
