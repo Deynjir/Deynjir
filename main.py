@@ -41,6 +41,9 @@ app = FastAPI()
 # Remembers the most recent customer statement so the user can request its PDF
 # by sending "PDF" as a follow-up WhatsApp message. Cleared on server restart.
 LAST_HISTORY_REQUESTS = {}
+# Remembers the last customer added, searched, or opened for this sender.
+# This lets a standalone FAAHFAAHIN command refer to the active customer.
+LAST_SELECTED_CUSTOMERS = {}
 # First-contact onboarding choices are temporary per-sender conversations.
 ONBOARDING_SESSIONS = {}
 
@@ -3048,6 +3051,25 @@ async def whatsapp_webhook(request: Request):
             return {"status": "missing_pdf_customer_name"}
         print(f"📄 PDF-only request detected for {pdf_customer_name!r}")
 
+    # A standalone FAAHFAAHIN command refers to the most recently added,
+    # searched, or opened customer for this sender and shop. It must not ask
+    # for a name again when that context is already known.
+    standalone_detail_request = bool(re.fullmatch(
+        r"\s*(?:faahfaahin(?:ta)?|description|history|taariikh|statement|xisaab(?:ta)?)\s*[.!?]*\s*",
+        str(message_text or ""),
+        flags=re.IGNORECASE,
+    ))
+    standalone_detail_customer = None
+    if standalone_detail_request:
+        recent_customer = LAST_SELECTED_CUSTOMERS.get(sender_phone) or LAST_HISTORY_REQUESTS.get(sender_phone)
+        if recent_customer and recent_customer.get("business_user_id") == business_user_id:
+            standalone_detail_customer = recent_customer.get("customer_name")
+        if standalone_detail_customer:
+            print(f"📒 Standalone FAAHFAAHIN using last selected customer: {standalone_detail_customer!r}")
+        else:
+            send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca ii sheeg. Tusaale: *FAAHFAAHIN Sakariye*.")
+            return {"status": "history_customer_name_required"}
+
     # Explicit customer rename is parsed locally; it must not depend on Gemini.
     rename_request = parse_customer_rename_command(message_text)
 
@@ -3060,6 +3082,9 @@ async def whatsapp_webhook(request: Request):
     if pdf_only_requested:
         entries = [{"action": "HISTORY", "customer_name": pdf_customer_name}]
         print(f"📄 Skipping Gemini for PDF follow-up; using saved customer {pdf_customer_name!r}")
+    elif standalone_detail_customer:
+        entries = [{"action": "HISTORY", "customer_name": standalone_detail_customer}]
+        print(f"📒 Skipping Gemini for standalone FAAHFAAHIN; using {standalone_detail_customer!r}")
     elif rename_request:
         old_customer_name, new_customer_name = rename_request
         entries = [{
@@ -3541,6 +3566,10 @@ async def whatsapp_webhook(request: Request):
                             f"💵 Deynta cusub: ${float(updated.get('amount') or 0):.2f}\n"
                             f"📅 Ballanta: {updated.get('promised_date') or 'lama gelin'}"
                         )
+                        LAST_SELECTED_CUSTOMERS[sender_phone] = {
+                            "business_user_id": business_user_id,
+                            "customer_name": updated.get("name") or name,
+                        }
                         entry["action"] = "ADJUST"
                         successful_inserts.append(entry)
                         continue
@@ -3576,6 +3605,11 @@ async def whatsapp_webhook(request: Request):
                     send_whatsapp(sender_phone, f"❌ Deynta {name} lama diiwaangelin. Database-ku wax jawaab ah ma soo celin.")
                     failed_inserts.append({"name": name, "reason": "record_debt_addition returned no rows"})
                     continue
+                created_customer = result.data[0] if isinstance(result.data, list) else result.data
+                LAST_SELECTED_CUSTOMERS[sender_phone] = {
+                    "business_user_id": business_user_id,
+                    "customer_name": (created_customer or {}).get("name") or name,
+                }
                 successful_inserts.append(entry)
                 
             except Exception as e:
@@ -4074,6 +4108,10 @@ async def whatsapp_webhook(request: Request):
                     continue
 
                 matched_name = search_matches[0].get("name", name)
+                LAST_SELECTED_CUSTOMERS[sender_phone] = {
+                    "business_user_id": business_user_id,
+                    "customer_name": matched_name,
+                }
 
                 total_debt = sum(
                     float(d.get("amount") or 0)
@@ -4213,6 +4251,10 @@ async def whatsapp_webhook(request: Request):
                     )
 
                     LAST_HISTORY_REQUESTS[sender_phone] = {
+                        "business_user_id": business_user_id,
+                        "customer_name": matched_customer_name,
+                    }
+                    LAST_SELECTED_CUSTOMERS[sender_phone] = {
                         "business_user_id": business_user_id,
                         "customer_name": matched_customer_name,
                     }
