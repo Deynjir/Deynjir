@@ -2357,11 +2357,16 @@ async def whatsapp_webhook(request: Request):
 
     type_webhook = data.get("typeWebhook")
 
-    # Only messages received from a WhatsApp contact are user input.
-    # outgoingMessageReceived is sent from the linked WhatsApp account;
-    # outgoingAPIMessageReceived is sent by this bot. Ignore both to avoid
-    # treating outbound messages as new commands.
-    allowed_types = {"incomingMessageReceived"}
+    # Accept messages received from WhatsApp contacts AND messages manually
+    # sent from the linked WhatsApp phone. Green-API uses
+    # outgoingMessageReceived for phone-originated messages, while messages
+    # sent by this bot through Green-API use outgoingAPIMessageReceived.
+    # Ignore outgoingAPIMessageReceived to prevent the bot processing its
+    # own replies as fresh commands.
+    allowed_types = {
+        "incomingMessageReceived",
+        "outgoingMessageReceived",
+    }
 
     if type_webhook not in allowed_types:
         return {"status": "ignored"}
@@ -4080,8 +4085,8 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(
                 sender_phone,
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
-                "*Ma Waxaad ula jeedaa*\n\n"
-                "Deyn cusub mise lacag-bixin?\n\n"
+                "*Hadii aad ula jeedo*\n\n"
+                "Deyn cusub baa mise lacag-bixin?\n\n"
                 "Soo qor *DEYN CUSUB* ama *LACAG BIXIN*.\n"
                 "Soo qor *JOOJI* haddii aad rabto inaad ka baxdo.\n\n"
                 "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
@@ -4422,8 +4427,8 @@ async def whatsapp_webhook(request: Request):
                             sender_phone,
                             f"✅ Lacag ayaa lagu daray deyntii hore!\n\n"
                             f"👤 Macmiilka: {updated['name']}\n"
-                            f"💵 Lacag ku biirtay: ${add_amount:.2f}\n"
-                            f"💵 Totalka: ${float(updated.get('amount') or 0):.2f}\n"
+                            f"➕ Lacag lagu daray: ${add_amount:.2f}\n"
+                            f"💵 Deynta cusub: ${float(updated.get('amount') or 0):.2f}\n"
                             f"📅 Ballanta: {updated.get('promised_date') or 'lama gelin'}"
                         )
                         LAST_SELECTED_CUSTOMERS[sender_phone] = {
