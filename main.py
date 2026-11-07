@@ -2787,133 +2787,17 @@ async def whatsapp_webhook(request: Request):
         onboarding_text = str(message_text or "").strip()
         onboarding_command = onboarding_text.casefold().strip(" .!؟?")
 
-        # Existing approved users must not be intercepted by onboarding.
+        # TEMPORARY SILENT MODE:
+        # Unknown, pending, and rejected users receive no automated replies.
+        # The owner can still approve/reject applicants using the admin commands
+        # handled immediately above this lookup. No approval records are changed.
         if not business_user or approval_status != "approved":
-            # JOIN explicitly restarts the welcome flow, including for pending applicants.
-            if onboarding_command == "join":
-                ONBOARDING_SESSIONS[sender_phone] = "awaiting_choice"
-                hour_eat = now_eat().hour
-                greeting = "MAALIN WANAAGSAN if 5 <= hour_eat <= 17 else "HABEEN WANAAGSAN"
-                send_whatsapp(
-                    sender_phone,
-                    f"🌟 *{greeting}!*\n\n"
-                    "Waxaan jeclaan lahaa inaad tijaabiso nidaam WhatsApp ah oo lagu maamulo deymaha, lacag-bixinta iyo ballamaha, kaas oo kuu fududaynaya hawl-maalmeedka ganacsigaaga.\n\n"
-                    "Haddii aad diyaar u tahay, waan kugu soo darayaa si aad u tijaabiso.   Mahadsanid."
-                )
-                return {"status": "onboarding_restarted"}
-
-            onboarding_state = ONBOARDING_SESSIONS.get(sender_phone)
-
-            if onboarding_state == "awaiting_choice":
-                if onboarding_text == "1":
-                    try:
-                        if business_user:
-                            # Reuse the existing record; do not create a duplicate applicant.
-                            if approval_status == "rejected":
-                                supabase.table("business_users").update(
-                                    {"approval_status": "pending"}
-                                ).eq("phone_number", sender_phone).execute()
-                        else:
-                            # IDs in this project are short text IDs. Check for collisions
-                            # before inserting the new pending applicant.
-                            applicant_id = None
-                            for _ in range(10):
-                                candidate_id = "".join(
-                                    secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-                                    for _ in range(5)
-                                )
-                                collision = (
-                                    supabase.table("business_users")
-                                    .select("id")
-                                    .eq("id", candidate_id)
-                                    .limit(1)
-                                    .execute()
-                                )
-                                if not collision.data:
-                                    applicant_id = candidate_id
-                                    break
-                            if not applicant_id:
-                                raise RuntimeError("Could not generate a unique applicant ID")
-
-                            supabase.table("business_users").insert({
-                                "id": applicant_id,
-                                "phone_number": sender_phone,
-                                "name": "Codsi cusub",
-                                "approval_status": "pending",
-                            }).execute()
-
-                        ONBOARDING_SESSIONS.pop(sender_phone, None)
-                        send_whatsapp(
-                            sender_phone,
-                            "✅ Codsigaaga waa la diray. Sug Fariinta Ogolaanshaha."
-                        )
-                        if owner_phone:
-                            owner_notified = send_whatsapp(
-                                owner_phone,
-                                "📩 *CODSI CUSUB AYAA SOO DHACAY*\n\n"
-                                f"Lambarka codsadaha: *{sender_phone}*\n\n"
-                                f"Si aad u oggolaato: *APPROVE {sender_phone}*\n"
-                                f"Si aad u diiddo: *REJECT {sender_phone}*"
-                            )
-                            print(
-                                f"📨 New applicant notification: phone={sender_phone}, "
-                                f"owner_notified={owner_notified}"
-                            )
-                        else:
-                            print("⚠️ OWNER_PHONE is empty; applicant notification was not sent.")
-                        return {"status": "application_submitted"}
-                    except Exception as registration_err:
-                        print(
-                            f"❌ APPLICANT REGISTRATION ERROR: "
-                            f"{type(registration_err).__name__}: {registration_err}"
-                        )
-                        send_whatsapp(
-                            sender_phone,
-                            "❌ Codsiga lama diri karin. Fadlan mar kale isku day."
-                        )
-                        return {"status": "application_registration_error"}
-
-                if onboarding_text == "2":
-                    ONBOARDING_SESSIONS.pop(sender_phone, None)
-                    send_whatsapp(
-                        sender_phone,
-                        "Mahadsanid, hadii aad u baahato Nidaamkan Mar kale soo qor *JOIN*."
-                    )
-                    return {"status": "onboarding_declined"}
-
-                send_whatsapp(
-                    sender_phone,
-                    "Si aad u isticmaasho soo qor *1*. Haddii aad rabto inaad ka baxdo soo qor *2*."
-                )
-                return {"status": "onboarding_invalid_choice"}
-
-            # No active choice session: any message from an unknown/pending user
-            # starts (or restarts after choosing 2) with the welcome message.
-            if not business_user:
-                ONBOARDING_SESSIONS[sender_phone] = "awaiting_choice"
-                hour_eat = now_eat().hour
-                greeting = "MAALIN WANAAGSAN" if 5 <= hour_eat <= 17 else "HABEEN WANAAGSAN"
-                send_whatsapp(
-                    sender_phone,
-                    f"🌟 *{greeting}!*\n\n"
-                    "Halkan waxaa loogu talagalay in Shirkadaha & Ganacsiyada yaryar ay ku maamulaan "
-                    "Soo xaraynta Daymaha ka maqan iyo La socodka kuwa ka baxaya, iyo Adeegyo kale oo badan.\n\n"
-                    "Haddii aad rabto inaad isticmaasho soo qor *1*. Haddii kale soo qor *2*."
-                )
-                return {"status": "onboarding_welcome_sent"}
-
-            if approval_status == "rejected":
-                send_whatsapp(
-                    sender_phone,
-                    "❌ Codsigaaga waa la diiday. Haddii aad rabto inaad mar kale codsato, soo qor *JOIN*."
-                )
-                return {"status": "application_rejected"}
-
-            send_whatsapp(
-                sender_phone,
-                "⏳ Codsigaaga weli waa la sugayaa. Fadlan sug inta maamulka ka oggolaanayo."
+            ONBOARDING_SESSIONS.pop(sender_phone, None)
+            print(
+                f"🔕 UNAPPROVED USER SILENCED: phone={sender_phone}, "
+                f"status={approval_status or 'not_registered'}"
             )
-            return {"status": "not_approved"}
+            return {"status": "unapproved_user_silenced"}
 
         business_user_id = business_user["id"]
 
