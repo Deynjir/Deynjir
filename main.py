@@ -1615,8 +1615,8 @@ def begin_delete_flow(sender_phone, business_user_id, requested_name):
         f"⚠️ *Xaqiiji tirtiridda*\n\n"
         f"Macmiil: *{candidate['name']}*\n"
         f"Wadarta deynta: *${balance:.2f}*\n"
-        f"Diiwaannada la tirtirayo: *{len(rows)}*\n\n"
-        "Haddii tani sax tahay, soo qor *HAA, TIRTIR*.\n"
+        f"Inta laga jarayo: *{len(rows)}*\n\n"
+        "Haddii ay sax tahay, soo qor *HAA, TIRTIR*.\n"
         "Haddii kale, soo qor *JOOJI*."
     )
     return {"status": "delete_confirmation_required", "customer": candidate["name"], "rows": len(rows)}
