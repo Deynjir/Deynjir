@@ -2906,12 +2906,11 @@ async def whatsapp_webhook(request: Request):
     print(f"📩 INCOMING MESSAGE TYPE: {type_message}")
     print(f"💬 EXTRACTED MESSAGE TEXT: {message_text!r}")
 
-    # A standalone checkmark is an intentional silent acknowledgement.
-    if str(message_text or "").strip() == "✅":
-        return {"status": "checkmark_ignored"}
+    # Emoji-only messages (including checkmarks/reactions) are acknowledgements,
+    # not requests. Ignore them silently: never send "Fadlan Qoraal soo qor."
     if is_emoji_only_message(message_text):
-        send_whatsapp(sender_phone, "Fadlan Qoraal soo qor.")
-        return {"status": "emoji_only_rejected"}
+        print(f"ℹ️ Emoji-only acknowledgement ignored: {message_text!r}")
+        return {"status": "emoji_only_ignored"}
 
     if not message_text:
         return {"status": "empty_text"}
