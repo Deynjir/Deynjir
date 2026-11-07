@@ -335,8 +335,9 @@ SYSTEM_PROMPT = """You are {APP_NAME}, a Somali debt management assistant for sm
 Extract transaction intent from chaotic, unstructured Somali text into raw JSON. 
 Do not include any conversational filler, markdown syntax, or backticks.
 
-Extract ALL debt entries from the message.
+Extract ALL debt entries from the message. Understand informal, messy, phonetic, regional, and misspelled Somali; interpret intent from the whole sentence rather than requiring exact command words. Do not guess financial intent when unclear.
 For each entry, extract: customer_name, amount, promised_date (YYYY-MM-DD), transaction_date (YYYY-MM-DD), phone_number, description. transaction_date is the date the ADD or PAY actually happened when the user explicitly provides it (including labelled notes such as "Taariikhda 06/11/2026"); interpret Somali numeric dates as DD/MM/YYYY. Do not substitute today's date when an explicit transaction date is present. Description is the item/reason text belonging to that specific debt or payment; use null when none is stated.
+IMPORTANT DATE-ONLY EDIT RULE: If a message names an existing customer and gives a new due/promised date but no amount, return action EDIT, set new_date and promised_date to that date, and keep amount and new_amount null. Apply this independently to EVERY customer in a comma-separated or multi-line message. A date's day number is never an amount. Never turn "Xasan 8 Nov" into an $8 transaction.
 
 ALWAYS return a JSON array, even for single entries.
 
@@ -1363,7 +1364,12 @@ def parse_transaction_clarification(message_text):
     if any(re.fullmatch(pattern, text, re.I) for pattern in pay_patterns):
         return "PAY"
 
-    if re.fullmatch(r"(?:jooji|cancel|baaji|stop)", text, re.I):
+    if re.fullmatch(
+        r"(?:jooji|cancel|baaji|stop|midna|midna maaha|midna ma ahan|"
+        r"midna ma aha|midna ma ahan|midna midna|midna ma rabo)",
+        text,
+        re.I,
+    ):
         return "CANCEL"
 
     # A clarification reply may itself be a complete natural transaction
@@ -4374,12 +4380,23 @@ async def whatsapp_webhook(request: Request):
         f"{SYSTEM_PROMPT}\nToday's date is strictly: {today_str}. "
         "Use this to calculate calendar targets or relative days offsets like 'berri'.\n\n"
         "NATURAL SOMALI UNDERSTANDING: Interpret the user's intended meaning, not just exact keywords. "
-        "Understand everyday spoken Somali, formal Somali, regional wording, omitted subjects, pronouns, "
-        "word-order changes, spelling mistakes, repeated letters, missing punctuation, and mixed Somali/English. "
+        "Understand messy everyday Somali writing, informal and regional wording, phonetic spelling, "
+        "missing or extra letters, repeated letters, joined or separated words, omitted subjects, pronouns, "
+        "word-order changes, missing punctuation, and mixed Somali/English. Do not require exact command phrases. "
+        "Use the surrounding sentence to identify whether the user means a new debt, a payment, a date change, "
+        "a search, or another supported action. If meaning is genuinely unclear, ask one short clarification; "
+        "never guess transaction direction or invent amounts. "
         "Examples: 'Aamina waxay bixisay 20', 'Aamina 20 ayay bixisay', 'Aamina way soo celisay 20', "
         "'Aamina lacagtii way keentay', 'Cali 50 ayuu iga qaatay', 'Cali maanta 50 buu qaatay', "
         "'lacagtii Aamina waa la helay', 'Aamina deyntii oo dhan way bixisay'. "
-        "Extract the full customer name and amount. Never invent a name, amount, date, or transaction direction. "
+        "DUE-DATE CHANGES: If the user gives one or more existing customer names with new promised dates and "
+        "no debt/payment amount, treat EVERY name-date pair as EDIT of that customer's promised_date only. "
+        "Return one EDIT object per customer, with new_date and promised_date set to the requested date, "
+        "and amount/new_amount null. This includes comma-separated or line-separated batches, for example "
+        "'Cabdilaahi Ciise 8 Nov, Aamina Axmed Shire 10 Nov' and separate lines with one name and date each. "
+        "Never interpret a day number inside a date (such as 8 in '8 Nov') as money. Do not combine customers "
+        "or apply one person's date to another. Extract the full customer name and amount. "
+        "Never invent a name, amount, date, or transaction direction. "
         "When the user uses a pronoun and a recent customer context is supplied below, use that customer only "
         "when the message is clearly a direct follow-up about that customer. Otherwise ask a clarification. "
         "For read-only requests, recognize natural questions such as 'yaa lacagta igu leh', "
@@ -4761,8 +4778,46 @@ async def whatsapp_webhook(request: Request):
             entry["amount"] = None
         # If the user gave a due date but no amount in their own message, treat
         # this as a date-only edit even if the AI hallucinated/copied an amount.
+        # Gemini sometimes labels a bare "Customer 8 nov" as transaction_date;
+        # for a name + date with no source amount, recover that date as promised_date.
+        if (
+            action == "ADD"
+            and not source_has_amount
+            and promised_date is None
+            and transaction_date
+            and re.search(
+                r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+                r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+                r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|"
+                r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b",
+                str(message_text or ""),
+                re.I,
+            )
+        ):
+            promised_date = transaction_date
+            entry["promised_date"] = promised_date
+            print(f"🗓️ Recovered date-only request as promised_date for {name!r}: {promised_date}")
+
+        # Models may return EDIT directly for a date-only request. Mark it as a
+        # date-only update too, so the safe unique-debt selection rules apply.
+        if (
+            action == "EDIT"
+            and not source_has_amount
+            and amount is None
+            and new_amount is None
+            and (new_date is not None or promised_date is not None)
+        ):
+            date_only_update = True
+            new_date = new_date or promised_date
+            amount = None
+            new_amount = None
+            entry["amount"] = None
+            entry["new_amount"] = None
+            entry["new_date"] = new_date
+            print(f"🗓️ Date-only EDIT recognized for {name!r}: {new_date} (balance preserved)")
+
         date_intent_without_amount = (
-            (promised_date is not None or days_until_due is not None)
+            (promised_date is not None or new_date is not None or days_until_due is not None)
             and not source_has_amount
         )
         # Reject missing/null-like customer names before any amount prompt or write.
