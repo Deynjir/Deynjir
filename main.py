@@ -88,7 +88,7 @@ def deynjir_unrecognized_message():
     """One concise menu prompt for text the bot cannot understand."""
     return (
         "Qoraalkaaga ma fahmin.\n\n"
-        "Maxaad rabtaa inaad samayso?\n\n"
+        "Fadlan raac tilmaamahan?\n\n"
         "1️⃣ Deyn cusub\n"
         "2️⃣ Lacag bixin\n"
         "3️⃣ Eeg liiska daynta\n"
@@ -2135,7 +2135,7 @@ def begin_delete_flow(sender_phone, business_user_id, requested_name):
     candidates = find_delete_customer_candidates(business_user_id, requested_name)
     if not candidates:
         DELETE_SESSIONS.pop(sender_phone, None)
-        send_whatsapp(sender_phone, f"❌ Lama helin macmiil u dhigma *{requested_name}*. Hubi magaca oo mar kale isku day.")
+        send_whatsapp(sender_phone, f"❌ Ma hayo *{requested_name}*. Hubi magaca oo mar kale isku day.")
         return {"status": "delete_customer_not_found"}
 
     if len(candidates) > 1:
@@ -2240,7 +2240,7 @@ def handle_delete_session(sender_phone, business_user_id, message_text):
 
     if stage == "confirm":
         if not re.fullmatch(r"(?:haa\s*,?\s*tirtir|tirtir|confirm\s+delete|yes\s+delete)", folded, re.I):
-            send_whatsapp(sender_phone, "Fadlan xaqiiji adigoo qoraya *HAA, TIRTIR*, ama qor *JOOJI*. Waxba lama tirtirin.")
+            send_whatsapp(sender_phone, "Fadlan xaqiiji adigoo qoraya *HAA, TIRTIR*, ama soo qor *JOOJI*. si aan loo tirtirin.")
             return {"status": "delete_waiting_confirmation"}
 
         customer_name = state.get("customer_name") or "macmiilka"
@@ -3994,7 +3994,7 @@ async def whatsapp_webhook(request: Request):
             rename_state["new_name"] = proposed
             rename_state["stage"] = "confirm"
             rename_state["expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=10)
-            send_whatsapp(sender_phone, f"Hubi magaca cusub:\n\nHore: *{rename_state['old_name']}*\nCusub: *{proposed}*\n\nQor *OK* si loo beddelo ama *CANCEL* si loo joojiyo.")
+            send_whatsapp(sender_phone, f"Hubi magaca cusub:\n\nMagac Hore: *{rename_state['old_name']}*\nMagaca Cusub: *{proposed}*\n\nQor *OK* si loo beddelo ama *CANCEL* si loo joojiyo.")
             return {"status": "rename_confirmation_required"}
         elif rename_state.get("stage") == "confirm":
             if re.fullmatch(r"\s*OK\s*", str(message_text or ""), re.I):
@@ -4543,7 +4543,7 @@ async def whatsapp_webhook(request: Request):
     ):
         send_whatsapp(
             sender_phone,
-            "Ma jiraan tirtirid macmiil oo sugaya.\n\n"
+            "Ma hayo macmiilka aad doonayso in la tirtiro.\n\n"
             "Qor *DELETE [magaca macmiilka]* si aad u bilowdo tirtirid cusub."
         )
         return {"status": "orphan_delete_confirmation_ignored"}
@@ -4865,8 +4865,8 @@ async def whatsapp_webhook(request: Request):
                 sender_phone,
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
                 "*Hadii aad ula jeedo*\n\n"
-                "Deyn cusub baa mise lacag-bixin?\n\n"
-                "Soo qor *DEYN CUSUB* ama *LACAG BIXIN*.\n"
+                "*DEYN CUSUB* - Taabo 1"\n\n"
+                "*LACAG BIXIN* - Taabo 2.\n"
                 "Soo qor *JOOJI* haddii aad rabto inaad ka baxdo.\n\n"
                 "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
             )
@@ -5599,7 +5599,7 @@ async def whatsapp_webhook(request: Request):
                 matches = find_debtor_matches(business_user_id, name)
 
                 if len(matches) == 0:
-                    send_whatsapp(sender_phone, f"❌ Lama helin deynta aan weli la bixin ee {name}.")
+                    send_whatsapp(sender_phone, f"❌ Ma hayo deynta aan weli la bixin ee {name}.")
                     failed_inserts.append({"name": name, "reason": "Debtor not found"})
                     continue
 
