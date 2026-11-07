@@ -4865,11 +4865,11 @@ async def whatsapp_webhook(request: Request):
                 sender_phone,
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
                 "*Hadii aad ula jeedo*\n\n"
-                "*DEYN CUSUB* - Taabo 1"\n\n"
+                "*DEYN CUSUB* - Taabo 1\n\n"
                 "*LACAG BIXIN* - Taabo 2.\n"
                 "Soo qor *JOOJI* haddii aad rabto inaad ka baxdo.\n\n"
                 "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
-            )
+             )
             return {"status": "awaiting_transaction_clarification"}
         elif has_financial_entries and explicit_direction:
             for parsed_entry in entries:
