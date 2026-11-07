@@ -85,7 +85,8 @@ def deynjir_main_menu():
 def deynjir_unrecognized_message():
     """One concise menu prompt for text the bot cannot understand."""
     return (
-        "Fadlan dooro waxa aad rabto inaad samayso:\n\n"
+        "Qoraalkaaga ma fahmin.\n\n"
+        "Maxaad rabtaa inaad samayso?\n\n"
         "1️⃣ Deyn cusub\n"
         "2️⃣ Lacag bixin\n"
         "3️⃣ Eeg liiska daynta\n"
@@ -327,13 +328,13 @@ Extract transaction intent from chaotic, unstructured Somali text into raw JSON.
 Do not include any conversational filler, markdown syntax, or backticks.
 
 Extract ALL debt entries from the message.
-For each entry, extract: customer_name, amount, promised_date (YYYY-MM-DD), phone_number, description. Description is the item/reason text belonging to that specific debt or payment; use null when none is stated.
+For each entry, extract: customer_name, amount, promised_date (YYYY-MM-DD), transaction_date (YYYY-MM-DD), phone_number, description. transaction_date is the date the ADD or PAY actually happened when the user explicitly provides it (including labelled notes such as "Taariikhda 06/11/2026"); interpret Somali numeric dates as DD/MM/YYYY. Do not substitute today's date when an explicit transaction date is present. Description is the item/reason text belonging to that specific debt or payment; use null when none is stated.
 
 ALWAYS return a JSON array, even for single entries.
 
 Response format (JSON array):
 [
-  {"action": "ADD" or "PAY" or "LIST" or "SEARCH" or "EDIT" or "DELETE" or "HISTORY" or "REPORT" or "EXPORT", "customer_name": "string or null", "amount": number or null, "days_until_due": number or null, "customer_phone": "string or null", "promised_date": "YYYY-MM-DD or null", "filter_date": "YYYY-MM-DD or null", "filter_type": "today" or "tomorrow" or "date" or "week" or "month" or null, "new_amount": number or null, "new_date": "YYYY-MM-DD or null", "new_name": "string or null", "new_phone": "string or null", "payment_type": "FULL" or "PARTIAL" or "UNKNOWN" or null, "description": "short transaction detail or null"}
+  {"action": "ADD" or "PAY" or "LIST" or "SEARCH" or "EDIT" or "DELETE" or "HISTORY" or "REPORT" or "EXPORT", "customer_name": "string or null", "amount": number or null, "days_until_due": number or null, "customer_phone": "string or null", "promised_date": "YYYY-MM-DD or null", "transaction_date": "YYYY-MM-DD or null", "filter_date": "YYYY-MM-DD or null", "filter_type": "today" or "tomorrow" or "date" or "week" or "month" or null, "new_amount": number or null, "new_date": "YYYY-MM-DD or null", "new_name": "string or null", "new_phone": "string or null", "payment_type": "FULL" or "PARTIAL" or "UNKNOWN" or null, "description": "short transaction detail or null"}
 ]
 
 Examples - ADD:
@@ -393,6 +394,8 @@ Somali casual-language rules (understand spelling mistakes and informal phrasing
 - "Cali ka jar $10" -> PAY, customer_name="Cali", amount=10, payment_type="PARTIAL".
 - "Cali waan ka helay $10" -> PAY, customer_name="Cali", amount=10, payment_type="PARTIAL".
 - "Cali wuxuu bixiyay $10" -> PAY, customer_name="Cali", amount=10, payment_type="PARTIAL".
+- Treat these as PAY when the context says money was received: "bixiyay", "bixiyey", "bixisay", "bixiyeen", "bixin", "lacag bixin", "lacag qabasho", "lacag soo xarootay", "wuu bixiyay", "wuxuu bixiyay", "waan ka helay", "ka jar", "ka reeb", "soo celiyay", "soo celiyey", "celiyay", "celiyey", "lacagtii wuu keenay", "lacagtii waa la helay".
+- Also understand common Somali spelling mistakes, shortened forms, repeated letters, and informal word order. Do not classify as PAY if the message clearly says the customer took/borrowed new money.
 - "Cali wuu bixiyay" or "Cali deyntii oo dhan wuu bixiyay" -> PAY, customer_name="Cali", amount=null, payment_type="FULL".
 - "Cali waan ka helay" without an amount -> PAY, customer_name="Cali", amount=null, payment_type="UNKNOWN". Do not assume full payment; ask how much was received.
 - "Cali deyntiisa ka dhig $50" -> EDIT, customer_name="Cali", new_amount=50.
@@ -485,6 +488,132 @@ def send_whatsapp_file(to_phone: str, filename: str, content: bytes, mime_type: 
     except Exception as exc:
         print(f"❌ Could not send WhatsApp file {filename}: {type(exc).__name__}: {exc}")
         return False
+
+def _process_pending_payment_confirmation(pending_id, actor_phone, admin=False):
+    """Claim, validate, and atomically record one staged payment exactly once."""
+    lookup = (
+        supabase.table("pending_payment_confirmations")
+        .select("*")
+        .eq("id", str(pending_id))
+        .limit(1)
+        .execute()
+    )
+    if not lookup.data:
+        return False, "Lacag-bixinta sugaysa lama helin."
+    pending = lookup.data[0]
+    if not admin and str(pending.get("sender_phone")) != str(actor_phone):
+        return False, "Lacag-bixintan adiga kuma xirna."
+    current_status = str(pending.get("status") or "")
+    if current_status != "pending" and not (admin and current_status == "rejected"):
+        return False, f"Xaaladda lacag-bixintan waa {current_status}; mar kale lama diiwaangelin karo."
+    if admin and current_status == "rejected":
+        newer_active = (
+            supabase.table("pending_payment_confirmations")
+            .select("id")
+            .eq("sender_phone", str(pending.get("sender_phone")))
+            .eq("business_user_id", str(pending.get("business_user_id")))
+            .in_("status", ["pending", "processing"])
+            .limit(1)
+            .execute()
+        )
+        if newer_active.data:
+            return False, "Waxaa jira saxitaan cusub oo sugaya xaqiijin. Fadlan dib u eeg ID-ga saxitaanka cusub."
+    expires_raw = pending.get("expires_at")
+    expires = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00")) if expires_raw else None
+    if expires and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if current_status == "pending" and (not expires or datetime.now(timezone.utc) > expires):
+        supabase.table("pending_payment_confirmations").update({"status": "expired"}).eq("id", str(pending_id)).eq("status", "pending").execute()
+        return False, "Waqtigii xaqiijinta wuu dhammaaday. Lacag lama kaydin. Fadlan macaamilka mar kale dir."
+
+    # Conditional update is the one-time claim. A second HAA cannot claim it.
+    try:
+        claimed = (
+            supabase.table("pending_payment_confirmations")
+            .update({"status": "processing", "actor_phone": str(actor_phone)})
+            .eq("id", str(pending_id))
+            .eq("status", current_status)
+            .select("id")
+            .execute()
+        )
+    except Exception as claim_error:
+        print(f"⚠️ Could not claim pending payment {pending_id}: {claim_error}")
+        return False, "Lacag-bixinta lama qaban karin si ammaan ah. Waxba lama diiwaangelin; maamulka ha hubiyo."
+    if not claimed.data:
+        return False, "Lacag-bixintan hore ayaa loo xaqiijiyey ama waa la farsamaynayaa."
+
+    payment_rpc_succeeded = False
+    try:
+        customer_result = (
+            supabase.table("customers")
+            .select("id, name, amount, is_paid")
+            .eq("id", str(pending.get("customer_id")))
+            .eq("business_user_id", str(pending.get("business_user_id")))
+            .limit(1)
+            .execute()
+        )
+        if not customer_result.data:
+            raise ValueError("Macmiilka lama helin dukaanka saxda ah.")
+        debtor = customer_result.data[0]
+        balance = float(debtor.get("amount") or 0)
+        amount = float(pending.get("amount") or 0)
+        if not math.isfinite(balance) or not math.isfinite(amount) or amount <= 0:
+            raise ValueError("Lacagta ama haraaga ma saxna.")
+        if debtor.get("is_paid") is True or balance <= 0:
+            raise ValueError("Deyntan hore ayaa loo bixiyey.")
+        if amount - balance > 0.009:
+            raise ValueError(f"Lacagta ${amount:.2f} waxay ka badan tahay haraaga ${balance:.2f}.")
+
+        rpc_result = supabase.rpc("record_debt_payment_with_history", {
+            "p_customer_id": str(debtor["id"]),
+            "p_business_user_id": str(pending.get("business_user_id")),
+            "p_amount": round(amount, 2),
+            "p_description": str(pending.get("description") or "-").strip() or "-",
+        }).execute()
+        rpc_data = rpc_result.data
+        if isinstance(rpc_data, list):
+            rpc_data = rpc_data[0] if rpc_data else None
+        if not isinstance(rpc_data, dict) or not rpc_data.get("id"):
+            raise RuntimeError("Payment RPC did not return the updated customer")
+        payment_rpc_succeeded = True
+        supabase.table("pending_payment_confirmations").update({
+            "status": "confirmed",
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", str(pending_id)).eq("status", "processing").execute()
+        return True, (
+            f"✅ Lacag-bixinta waa la diiwaangeliyey.\n"
+            f"{rpc_data.get('name') or pending.get('customer_name')}: ${amount:.2f}\n"
+            f"Baaqiga: ${float(rpc_data.get('amount') or 0):.2f}"
+        )
+    except Exception as exc:
+        print(f"❌ Pending payment confirmation failed: {type(exc).__name__}: {exc}")
+        if payment_rpc_succeeded:
+            # The ledger RPC committed. Never make this proposal confirmable again,
+            # even if updating its status failed; that could duplicate the payment.
+            return False, (
+                "⚠️ Lacag-bixinta database-ka waa la qoray, balse xaaladda xaqiijinta "
+                "lama cusboonaysiin. Ha ku celin HAA. Maamulka ha hubiyo Supabase."
+            )
+        supabase.table("pending_payment_confirmations").update({"status": "pending", "actor_phone": None}).eq("id", str(pending_id)).eq("status", "processing").execute()
+        return False, f"❌ Lacag-bixinta lama diiwaangelin: {str(exc)[:220]}"
+
+
+def _reject_pending_payment_confirmation(pending_id, actor_phone, admin=False):
+    query = supabase.table("pending_payment_confirmations").select("*").eq("id", str(pending_id)).limit(1).execute()
+    if not query.data:
+        return False, "Lacag-bixinta sugaysa lama helin."
+    pending = query.data[0]
+    if not admin and str(pending.get("sender_phone")) != str(actor_phone):
+        return False, "Lacag-bixintan adiga kuma xirna."
+    updated = (
+        supabase.table("pending_payment_confirmations")
+        .update({"status": "rejected", "actor_phone": str(actor_phone), "processed_at": datetime.now(timezone.utc).isoformat()})
+        .eq("id", str(pending_id)).eq("status", "pending").select("id").execute()
+    )
+    if not updated.data:
+        return False, "Lacag-bixintan hore ayaa looga jawaabay ama waa la farsamaynayaa."
+    return True, pending
+
 
 def build_statement_pdf(customer_name, debts, payments_by_debt, total_paid, total_balance, business_name=None):
     """Create a clean, compact one-page customer statement PDF in memory."""
@@ -699,6 +828,54 @@ def normalize_customer_name(value):
     return " ".join(value.split())
 
 
+def is_emoji_only_message(value):
+    """True when text contains only emoji/symbols, whitespace, or punctuation."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    allowed_format = {"\u200d", "\ufe0e", "\ufe0f", "\u20e3"}
+    saw_emoji = False
+    for char in text:
+        if char.isspace() or unicodedata.category(char).startswith("P"):
+            continue
+        if char in allowed_format:
+            continue
+        category = unicodedata.category(char)
+        code = ord(char)
+        if category.startswith("S") or 0x1F1E6 <= code <= 0x1F1FF:
+            saw_emoji = True
+            continue
+        # Keycap emoji contain a digit followed by VS16 + COMBINING ENCLOSING KEYCAP.
+        if char.isdigit() and "\u20e3" in text:
+            saw_emoji = True
+            continue
+        return False
+    return saw_emoji
+
+
+def is_missing_value(value):
+    """Reject empty values and literal null-like strings returned by an AI parser."""
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    return normalize_customer_name(value) in {
+        "", "none", "null", "undefined", "unknown", "n a", "na"
+    }
+
+
+def is_explicit_list_request(message_text):
+    """Only route a LIST intent when the user's text contains a clear list command."""
+    raw = normalize_customer_name(message_text)
+    return bool(re.fullmatch(
+        r"(?:deyn|dayn|liis|liiska|liiska deynta|liiska daynta|"
+        r"liiska daynta iyo balamaha|liiska deynta iyo balamaha|"
+        r"deynaha liiskooda|list|list debts?|debt list|show debts?)",
+        raw,
+        flags=re.I,
+    )) or is_fuzzy_debt_list_command(message_text)
+
+
 def parse_customer_rename_command(message_text):
     """Parse an explicit customer rename without relying on AI interpretation.
 
@@ -798,10 +975,18 @@ def classify_transaction_direction(message_text):
         r"\b(?:took|borrowed)\b",
     ]
     pay_patterns = [
-        r"\b(?:ka\s+jar|ka\s+jarey|ka\+jar)\b",
-        r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|soo celiyay|soo celiyey|celiyay|celiyey)\b",
-        r"\b(?:waan ka helay|waxaan ka helay|lacag ayuu soo celiyay|lacag\s*bixin(?:ta)?)\b",
-        r"\b(?:paid|payment received|paid back|repaid|returned the money)\b",
+        r"\b(?:ka\s+jar|ka\s+jarey|ka\s+reeb|ka\s+reebay|ka\s+reebtay|ka\s+reebeen)\b",
+        r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|bixiya|bixiyaa|bixiyo|bixin|bixinta|"
+        r"bixiyayaa|bixisay|bixiye|bixiyeen|soo\s+celiyay|soo\s+celiyey|"
+        r"soo\s+celisay|soo\s+celiyeen|celiyay|celiyey|celisay|celiyeen)\b",
+        r"\b(?:lacag\s*bixin(?:ta)?|lacag\s*qabasho|lacag\s+qabtay|"
+        r"lacag\s+soo\s+xarootay|lacagtii\s+(?:waa\s+la\s+helay|wuu\s+keenay)|"
+        r"lacag\s+(?:ayaa\s+la\s+helay|waa\s+la\s+helay)|"
+        r"waan\s+ka\s+helay|waxaan\s+ka\s+helay|lacag\s+uu\s+bixiyay)\b",
+        r"\b(?:wuu\s+bixiyay|wuxuu\s+bixiyay|ayaa\s+bixiyay|ayuu\s+bixiyay|"
+        r"wuu\s+bixiyey|wuxuu\s+bixiyey|ayaa\s+bixiyey|ayuu\s+bixiyey|"
+        r"lacag\s+ayuu\s+bixiyay|lacag\s+ayuu\s+bixiyey)\b",
+        r"\b(?:paid|payment received|paid back|repaid|returned the money|received payment|collected payment)\b",
     ]
     has_add = any(re.search(pattern, text, flags=re.I) for pattern in add_patterns)
     has_pay = any(re.search(pattern, text, flags=re.I) for pattern in pay_patterns)
@@ -826,7 +1011,7 @@ def _parse_somali_date(value):
 
 
 def parse_structured_somali_transaction(message_text):
-    """Parse labelled multiline Somali new-debt notes without depending on Gemini.
+    """Parse labelled multiline Somali debt/payment notes without depending on Gemini.
 
     Supported shape includes Taariikhda, Dayn qaato, Magaca,
     Numberkisa/Lambarkiisa, and Lacagta. It deliberately requires a name,
@@ -862,11 +1047,6 @@ def parse_structured_somali_transaction(message_text):
     if is_add == is_pay:  # neither clear nor both directions
         return None
     action = "ADD" if is_add else "PAY"
-    # This deterministic labelled parser writes to the customers table. Let
-    # payment notes continue through the established payment parser/RPC path.
-    if action != "ADD":
-        return None
-
     name = None
     phone = None
     amount = None
@@ -2177,16 +2357,11 @@ async def whatsapp_webhook(request: Request):
 
     type_webhook = data.get("typeWebhook")
 
-    # Green-API reports messages typed/sent from the WhatsApp phone
-    # as outgoingMessageReceived.
-    #
-    # Messages sent by our bot through the API are
-    # outgoingAPIMessageReceived, so ignore those to prevent
-    # the bot from processing its own replies.
-    allowed_types = {
-        "incomingMessageReceived",
-        "outgoingMessageReceived",
-    }
+    # Only messages received from a WhatsApp contact are user input.
+    # outgoingMessageReceived is sent from the linked WhatsApp account;
+    # outgoingAPIMessageReceived is sent by this bot. Ignore both to avoid
+    # treating outbound messages as new commands.
+    allowed_types = {"incomingMessageReceived"}
 
     if type_webhook not in allowed_types:
         return {"status": "ignored"}
@@ -2202,6 +2377,11 @@ async def whatsapp_webhook(request: Request):
 
     message_data = data.get("messageData", {})
     type_message = message_data.get("typeMessage")
+
+    # Voice notes/audio are intentionally not transcribed or sent to Gemini.
+    if type_message in {"audioMessage", "pttMessage", "voiceMessage", "voiceNoteMessage"}:
+        send_whatsapp(sender_phone, "Fadlan Qoraal soo qor.")
+        return {"status": "audio_not_supported"}
 
     message_text = ""
         
@@ -2340,6 +2520,13 @@ async def whatsapp_webhook(request: Request):
     print(f"📩 INCOMING MESSAGE TYPE: {type_message}")
     print(f"💬 EXTRACTED MESSAGE TEXT: {message_text!r}")
 
+    # A standalone checkmark is an intentional silent acknowledgement.
+    if str(message_text or "").strip() == "✅":
+        return {"status": "checkmark_ignored"}
+    if is_emoji_only_message(message_text):
+        send_whatsapp(sender_phone, "Fadlan Qoraal soo qor.")
+        return {"status": "emoji_only_rejected"}
+
     if not message_text:
         return {"status": "empty_text"}
 
@@ -2349,6 +2536,25 @@ async def whatsapp_webhook(request: Request):
     # Normalize sender; GREEN-API chat IDs may include "@c.us".
     sender_phone = str(sender_phone).replace("+", "").split("@")[0].strip()
     owner_phone = str(OWNER_PHONE).replace("+", "").split("@")[0].strip()
+
+    # Owner-only intervention works even if the owner is not a normal shop user.
+    admin_command = re.fullmatch(r"\s*(APPROVE|REJECT)\s+PAYMENT\s+([0-9a-fA-F-]{36})\s*", str(message_text or ""), re.I)
+    if sender_phone == owner_phone and admin_command:
+        admin_action, pending_id = admin_command.groups()
+        if admin_action.upper() == "APPROVE":
+            pending_owner = supabase.table("pending_payment_confirmations").select("sender_phone").eq("id", pending_id).limit(1).execute()
+            ok, result_text = _process_pending_payment_confirmation(pending_id, sender_phone, admin=True)
+            send_whatsapp(sender_phone, result_text)
+            if ok and pending_owner.data:
+                send_whatsapp(pending_owner.data[0]["sender_phone"], result_text)
+            return {"status": "admin_payment_approved" if ok else "admin_payment_approval_failed"}
+        ok, pending_or_text = _reject_pending_payment_confirmation(pending_id, sender_phone, admin=True)
+        if ok:
+            send_whatsapp(sender_phone, "Lacag-bixinta waa la diiday. Waxba lama kaydin.")
+            send_whatsapp(pending_or_text.get("sender_phone"), "Maamulka ayaa diiday lacag-bixintan. Waxba lama kaydin. Fadlan sax faahfaahinta oo mar kale dir.")
+            return {"status": "admin_payment_rejected"}
+        send_whatsapp(sender_phone, pending_or_text)
+        return {"status": "admin_payment_rejection_failed"}
 
     # Approved users import into their own shop with IMPORT. The owner may
     # additionally select another approved shop using IMPORT +252... .
@@ -2704,6 +2910,107 @@ async def whatsapp_webhook(request: Request):
 
         business_user_id = business_user["id"]
 
+        # Resolve the sender's persisted payment confirmation before parsing new commands.
+        pending_payment_result = (
+            supabase.table("pending_payment_confirmations")
+            .select("id, customer_name, amount, status, expires_at")
+            .eq("sender_phone", sender_phone)
+            .eq("business_user_id", str(business_user_id))
+            .in_("status", ["pending", "processing"])
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if pending_payment_result.data:
+            pending_payment = pending_payment_result.data[0]
+            if pending_payment.get("status") == "processing":
+                send_whatsapp(sender_phone, "Lacag-bixintan hadda waa la farsamaynayaa. Fadlan sug; ha ku celin xaqiijinta.")
+                return {"status": "payment_confirmation_processing"}
+            pending_expiry_raw = pending_payment.get("expires_at")
+            pending_expiry = datetime.fromisoformat(str(pending_expiry_raw).replace("Z", "+00:00")) if pending_expiry_raw else None
+            if pending_expiry and pending_expiry.tzinfo is None:
+                pending_expiry = pending_expiry.replace(tzinfo=timezone.utc)
+            if not pending_expiry or datetime.now(timezone.utc) > pending_expiry:
+                supabase.table("pending_payment_confirmations").update({"status": "expired"}).eq("id", pending_payment["id"]).eq("status", "pending").execute()
+                send_whatsapp(sender_phone, "Waqtigii xaqiijinta wuu dhammaaday. Waxba lama kaydin. Fadlan lacag-bixinta mar kale soo dir.")
+                return {"status": "payment_confirmation_expired"}
+            answer = normalize_customer_name(message_text)
+            if answer in {"1", "haa", "h", "yes", "y", "ok", "sax"}:
+                ok, result_text = _process_pending_payment_confirmation(pending_payment["id"], sender_phone)
+                send_whatsapp(sender_phone, result_text)
+                return {"status": "payment_confirmed" if ok else "payment_confirmation_failed"}
+            if answer in {"2", "maya", "may", "no", "n", "cancel", "jooji"}:
+                ok, rejected = _reject_pending_payment_confirmation(pending_payment["id"], sender_phone)
+                if not ok:
+                    send_whatsapp(sender_phone, rejected)
+                    return {"status": "payment_rejection_failed"}
+                send_whatsapp(
+                    sender_phone,
+                    "Lacag-bixinta waa la diiday. Waxba lama kaydin.\n\n"
+                    "Haddii magaca ama lacagtu khaldan yihiin, sax oo soo qor: *SAX Axmed $40*."
+                )
+                if owner_phone:
+                    send_whatsapp(
+                        owner_phone,
+                        "⚠️ *LACAG-BIXIN LA DIIDAY — DIB U EEGIS*\n"
+                        f"Dukaan: {business_user_id}\n"
+                        f"Macmiil: {rejected.get('customer_name')}\n"
+                        f"Lacag: ${float(rejected.get('amount') or 0):.2f}\n"
+                        f"Qofka diray: {sender_phone}\n"
+                        f"ID: {rejected.get('id')}\n"
+                        f"Haddii xogtu sax tahay: APPROVE PAYMENT {rejected.get('id')}"
+                    )
+                return {"status": "payment_rejected"}
+            send_whatsapp(sender_phone, "Fadlan ku jawaab *1 / HAA* ama *2 / MAYA*. Waxba lama kaydin.")
+            return {"status": "payment_confirmation_answer_required"}
+
+        # A rejected proposal remains available for a corrected name/amount.
+        if re.match(r"^\s*sax\s+", str(message_text or ""), re.I):
+            rejected_result = (
+                supabase.table("pending_payment_confirmations")
+                .select("id, customer_name, business_user_id")
+                .eq("sender_phone", sender_phone)
+                .eq("business_user_id", str(business_user_id))
+                .eq("status", "rejected")
+                .order("created_at", desc=True)
+                .limit(1).execute()
+            )
+            correction = re.match(r"^\s*sax\s+(.+?)\s+\$\s*(\d+(?:[.,]\d{1,2})?)\s*$", str(message_text or ""), re.I)
+            if rejected_result.data and correction:
+                corrected_name = correction.group(1).strip()
+                corrected_amount = float(correction.group(2).replace(",", "."))
+                corrected_matches = find_debtor_matches(business_user_id, corrected_name)
+                corrected_matches = [row for row in corrected_matches if row.get("is_paid") is not True and _safe_money(row.get("amount")) > 0]
+                if len(corrected_matches) != 1:
+                    send_whatsapp(sender_phone, "Magaca cusub si gaar ah looma aqoonsan. Fadlan qor magaca buuxa ee macmiilka ama la xiriir maamulka. Waxba lama kaydin.")
+                    if owner_phone:
+                        send_whatsapp(owner_phone, f"⚠️ Saxitaanka lacag-bixinta ee {sender_phone} wuxuu u baahan yahay faragelin: {corrected_name} ${corrected_amount:.2f}.")
+                    return {"status": "payment_correction_needs_admin"}
+                corrected_debtor = corrected_matches[0]
+                corrected_balance = _safe_money(corrected_debtor.get("amount"))
+                if corrected_amount <= 0 or corrected_amount - corrected_balance > 0.009:
+                    send_whatsapp(sender_phone, f"Lacagta saxda ahi waa inay ka badnaan weydo haraaga ${corrected_balance:.2f}. Waxba lama kaydin.")
+                    return {"status": "payment_correction_amount_invalid"}
+                inserted = supabase.table("pending_payment_confirmations").insert({
+                    "sender_phone": sender_phone,
+                    "business_user_id": str(business_user_id),
+                    "customer_id": str(corrected_debtor["id"]),
+                    "customer_name": str(corrected_debtor.get("name") or corrected_name),
+                    "amount": round(corrected_amount, 2),
+                    "description": "-",
+                    "original_message": str(message_text),
+                    "status": "pending",
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+                }).execute()
+                if not inserted.data:
+                    send_whatsapp(sender_phone, "Saxitaanka lama diyaarin karin. Waxba lama kaydin.")
+                    return {"status": "payment_correction_save_failed"}
+                corrected_pending = inserted.data[0]
+                send_whatsapp(sender_phone, f"*Xaqiiji saxitaanka*\n\n{corrected_debtor.get('name')} ma wuxuu bixiyay *${corrected_amount:.2f}*?\n\n1. *HAA*\n2. *MAYA*\n\nWaxba lama kaydin ilaa aad xaqiijiso.")
+                if owner_phone:
+                    send_whatsapp(owner_phone, f"📝 Saxitaan cusub oo sugaya xaqiijin: {corrected_debtor.get('name')} ${corrected_amount:.2f}. ID: {corrected_pending.get('id')}")
+                return {"status": "corrected_payment_pending_confirmation"}
+
     except Exception as db_err:
         print(f"❌ DATABASE ERROR (Business User Lookup): {db_err}")
         return {"status": "business_user_db_error"}
@@ -2801,7 +3108,7 @@ async def whatsapp_webhook(request: Request):
             return {"status": "invalid_menu_choice"}
 
     if guided and guided.get("stage") in {"debt_name", "payment_name"}:
-        if len(guided_text) < 2 or len(guided_text) > 100 or re.search(r"\d", guided_text):
+        if is_missing_value(guided_text) or len(guided_text) < 2 or len(guided_text) > 100 or re.search(r"\d", guided_text):
             send_whatsapp(sender_phone, "Fadlan qor magaca qofka oo keliya. Tusaale: *Cali Xasan*.")
             return {"status": "guided_invalid_name"}
         guided["customer_name"] = guided_text.strip()
@@ -2820,11 +3127,20 @@ async def whatsapp_webhook(request: Request):
         # Do not add an unnecessary final "Ma sax baa?" confirmation step.
         name = guided.get("customer_name")
         transaction_type = guided.get("transaction_type")
-        GUIDED_SESSIONS.pop(sender_phone, None)
-        if not name or transaction_type not in {"debt", "payment"}:
+        if is_missing_value(name):
+            guided["stage"] = "debt_name" if transaction_type == "debt" else "payment_name"
+            guided.pop("customer_name", None)
+            guided.pop("amount", None)
+            guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+            prompt = "Magaca qofka daynta qaatay?" if transaction_type == "debt" else "Magaca qofka lacagta bixiyey?"
+            send_whatsapp(sender_phone, prompt)
+            return {"status": "guided_customer_name_required"}
+        if transaction_type not in {"debt", "payment"}:
+            GUIDED_SESSIONS.pop(sender_phone, None)
             activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "guided_session_invalid"}
+        GUIDED_SESSIONS.pop(sender_phone, None)
         saved_description = str(guided.get("description") or "").strip()
         description_part = f" {saved_description}" if saved_description and saved_description != "-" else ""
         message_text = (
@@ -3696,12 +4012,25 @@ async def whatsapp_webhook(request: Request):
         for parsed_item in entries:
             parsed_item["action"] = str(parsed_item.get("action") or "").upper()
 
+        # Do not let Gemini turn unrelated text such as "none" into a debt list.
+        # Keep short, established list commands such as "deyn" working.
+        if any(item.get("action") == "LIST" for item in entries) and not is_explicit_list_request(message_text):
+            print(f"⚠️ Rejected LIST intent without an explicit list command: {message_text!r}")
+            activate_guided_menu(sender_phone)
+            send_whatsapp(sender_phone, deynjir_unrecognized_message())
+            return {"status": "unrecognized_message"}
+
+        # Treat literal null-like names exactly like missing names.
+        for parsed_item in entries:
+            if "customer_name" in parsed_item and is_missing_value(parsed_item.get("customer_name")):
+                parsed_item["customer_name"] = None
+
         # A SEARCH action without a name is not a search. Ask for the name only
         # when the user actually issued a search command; otherwise treat the
         # model's empty SEARCH classification as an unrecognized message.
         for item in entries:
             action = str(item.get("action") or "").upper()
-            if action == "SEARCH" and not str(item.get("customer_name") or "").strip():
+            if action == "SEARCH" and is_missing_value(item.get("customer_name")):
                 explicit_search = bool(re.match(
                     r"^\s*(?:search|find|lookup|look\s+up|raadi|raadso)\b",
                     str(message_text or ""), flags=re.IGNORECASE
@@ -3751,8 +4080,8 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(
                 sender_phone,
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
-                "*Hadii aad ula jeedo*\n\n"
-                "Deyn cusub baa mise lacag-bixin?\n\n"
+                "*Ma Waxaad ula jeedaa*\n\n"
+                "Deyn cusub mise lacag-bixin?\n\n"
                 "Soo qor *DEYN CUSUB* ama *LACAG BIXIN*.\n"
                 "Soo qor *JOOJI* haddii aad rabto inaad ka baxdo.\n\n"
                 "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
@@ -3864,6 +4193,11 @@ async def whatsapp_webhook(request: Request):
             (promised_date is not None or days_until_due is not None)
             and not source_has_amount
         )
+        # Reject missing/null-like customer names before any amount prompt or write.
+        if action not in {"LIST", "REPORT", "EXPORT"} and is_missing_value(name):
+            print(f"⚠️ Missing/invalid customer name; action={action!r}; value={name!r}; message={message_text!r}")
+            send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca macmiilka ii sheeg.")
+            continue
         if action == "ADD" and not new_phone and (amount is None or date_intent_without_amount):
             date_only = promised_date
             if not date_only and days_until_due is not None:
@@ -3916,9 +4250,19 @@ async def whatsapp_webhook(request: Request):
             except Exception as name_err:
                 print(f"⚠️ Original-message name resolution failed: {name_err}")
         
-        if not name and action not in ["LIST", "REPORT", "EXPORT"]:
+        if is_missing_value(name) and action not in ["LIST", "REPORT", "EXPORT"]:
             print(f"⚠️ Transaction skipped because customer name is missing: action={action!r}; message={message_text!r}")
-            send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca ii sheeg.")
+            if action in {"ADD", "PAY"}:
+                clear_direction = classify_transaction_direction(message_text)
+                explicit_transaction_command = bool(re.match(
+                    r"^\s*(?:add|lacag\s*bixin|pay|deyn\s+c cusub|deyn\s+cusub|dayn\s+cusub)\b",
+                    str(message_text or ""), flags=re.I
+                ))
+                if clear_direction is None and not explicit_transaction_command:
+                    activate_guided_menu(sender_phone)
+                    send_whatsapp(sender_phone, deynjir_unrecognized_message())
+                    return {"status": "unrecognized_message"}
+            send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca macmiilka ii sheeg.")
             continue
         
         if action == "ADD":
@@ -4078,8 +4422,8 @@ async def whatsapp_webhook(request: Request):
                             sender_phone,
                             f"✅ Lacag ayaa lagu daray deyntii hore!\n\n"
                             f"👤 Macmiilka: {updated['name']}\n"
-                            f"➕ Lacag lagu daray: ${add_amount:.2f}\n"
-                            f"💵 Deynta cusub: ${float(updated.get('amount') or 0):.2f}\n"
+                            f"💵 Lacag ku biirtay: ${add_amount:.2f}\n"
+                            f"💵 Totalka: ${float(updated.get('amount') or 0):.2f}\n"
                             f"📅 Ballanta: {updated.get('promised_date') or 'lama gelin'}"
                         )
                         LAST_SELECTED_CUSTOMERS[sender_phone] = {
@@ -4222,35 +4566,59 @@ async def whatsapp_webhook(request: Request):
                 new_balance = round(max(0.0, current_balance - actual_payment), 2)
                 is_now_paid = new_balance <= 0
 
-                # Atomically insert the payment and update the balance inside PostgreSQL.
-                # Apply the companion SQL migration file before deploying this version.
-                rpc_result = supabase.rpc("record_debt_payment_with_history", {
-                    "p_customer_id": str(debtor["id"]),
-                    "p_business_user_id": str(business_user_id),
-                    "p_amount": actual_payment,
-                    "p_description": description or "-",
-                }).execute()
-                rpc_data = rpc_result.data
-                if isinstance(rpc_data, list):
-                    rpc_data = rpc_data[0] if rpc_data else None
-                if not isinstance(rpc_data, dict) or not rpc_data.get("id"):
-                    raise RuntimeError("record_debt_payment returned no debt row; apply supabase_record_debt_payment.sql and check RLS")
-                updated_debtor = rpc_data
-                new_balance = float(updated_debtor.get("amount") or 0)
-                is_now_paid = bool(updated_debtor.get("is_paid")) or new_balance <= 0
-                if is_now_paid:
+                # AI-interpreted payments always require explicit human confirmation.
+                # Store the proposal in Supabase first; do not alter the debt balance here.
+                try:
+                    existing_pending = (
+                        supabase.table("pending_payment_confirmations")
+                        .select("id, customer_name, amount, status")
+                        .eq("sender_phone", sender_phone)
+                        .eq("business_user_id", business_user_id)
+                        .in_("status", ["pending", "processing"])
+                        .limit(1)
+                        .execute()
+                    )
+                    if existing_pending.data:
+                        pending_item = existing_pending.data[0]
+                        send_whatsapp(
+                            sender_phone,
+                            f"Waxaa jira lacag-bixin kale oo sugaysa xaqiijin: "
+                            f"{pending_item.get('customer_name')} ${float(pending_item.get('amount') or 0):.2f}.\n"
+                            "Marka hore ka jawaab xaqiijintaas (1/HAA ama 2/MAYA)."
+                        )
+                        continue
+                    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+                    pending_insert = supabase.table("pending_payment_confirmations").insert({
+                        "sender_phone": sender_phone,
+                        "business_user_id": str(business_user_id),
+                        "customer_id": str(debtor["id"]),
+                        "customer_name": str(debtor.get("name") or name),
+                        "amount": actual_payment,
+                        "description": description or "-",
+                        "original_message": str(message_text or ""),
+                        "status": "pending",
+                        "expires_at": expires_at,
+                    }).execute()
+                    pending_row = pending_insert.data[0] if pending_insert.data else None
+                    if not pending_row or not pending_row.get("id"):
+                        raise RuntimeError("Pending payment row was not created")
                     send_whatsapp(
                         sender_phone,
-                        f"✅ {updated_debtor['name']} deyntii oo dhan waa la bixiyay. "
-                        f"Lacagta la diiwaangeliyay: ${actual_payment:.2f}."
+                        "*Xaqiiji lacag-bixinta*\n\n"
+                        f"{debtor.get('name') or name} ma wuxuu bixiyay *${actual_payment:.2f}*?\n\n"
+                        "1. *HAA*\n"
+                        "2. *MAYA*\n\n"
+                        "Waxba lama kaydin ilaa aad xaqiijiso."
                     )
-                else:
+                    continue
+                except Exception as pending_payment_error:
+                    print(f"❌ Could not stage payment confirmation: {pending_payment_error}")
                     send_whatsapp(
                         sender_phone,
-                        f"✅ {updated_debtor['name']}\n"
-                        f"Lacag-bixin: ${actual_payment:.2f}\n"
-                        f"Baaqiga: ${float(updated_debtor['amount']):.2f}."
+                        "❌ Xaqiijinta lacag-bixinta lama diyaarin karin. Waxba lama kaydin. Fadlan mar kale isku day."
                     )
+                    failed_inserts.append({"name": name, "reason": "Could not stage payment confirmation"})
+                    continue
 
             except Exception as e:
                 print(f"❌ Payment error: {type(e).__name__}: {e}")
