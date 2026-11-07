@@ -336,6 +336,17 @@ Extract transaction intent from chaotic, unstructured Somali text into raw JSON.
 Do not include any conversational filler, markdown syntax, or backticks.
 
 Extract ALL debt entries from the message. Understand informal, messy, phonetic, regional, and misspelled Somali; interpret intent from the whole sentence rather than requiring exact command words. Do not guess financial intent when unclear.
+
+SOMALI UNDERSTANDING (IMPORTANT): Understand the whole sentence, not only exact command phrases. Accept natural Somali word order, dialects, gender/number verb forms, omitted pronouns, and common spelling variations. Examples:
+- "Muna 100 ayay qaadatay", "Muna waxay iga qaadatay 100", "Muna 100 bay qaadatay" -> ADD 100 (new debt).
+- "Yuusuf 50 ayuu qaatay", "Yuusuf 50 buu amaahday", "50 ayaan Yuusuf ka siiyay" -> ADD 50 when the context says the customer received/borrowed credit.
+- "Axmed 20 ayaan ka qabtay", "Axmed 20 ayuu ii keenay", "Axmed lacag buu ii keenay", "Axmed 20 ayuu soo celiyay" -> PAY 20 (money received).
+- "Muna 20 ayay iga soo celisay", "Muna 20 ayay bixisay", "Muna 20 ayay soo shubtay" -> PAY 20.
+- Understand forms such as qaatay, qaadatay, qaateen, qaadanayo; bixiyay, bixisay, bixiyeen; keenay, keentay; qabtay, qabatay; celiyay, celisay; shubay, shubtay.
+- "ka siiyay" can mean the shop gave the customer credit; classify as ADD only when the sentence clearly describes money given to that customer as a debt. Do not confuse it with money the customer paid back.
+- Remove grammatical filler (wuu, wuxuu, ayay, waxay, ayaan, baan, buu, bay) from the customer name, but preserve every actual name part.
+- If a sentence says only that a customer has not paid, do not create a transaction. If the direction or amount is unclear, ask a short clarification. Never invent an amount or mark a partial payment as full.
+
 For each entry, extract: customer_name, amount, promised_date (YYYY-MM-DD), transaction_date (YYYY-MM-DD), phone_number, description. transaction_date is the date the ADD or PAY actually happened when the user explicitly provides it (including labelled notes such as "Taariikhda 06/11/2026"); interpret Somali numeric dates as DD/MM/YYYY. Do not substitute today's date when an explicit transaction date is present. Description is the item/reason text belonging to that specific debt or payment; use null when none is stated.
 IMPORTANT DATE-ONLY EDIT RULE: If a message names an existing customer and gives a new due/promised date but no amount, return action EDIT, set new_date and promised_date to that date, and keep amount and new_amount null. Apply this independently to EVERY customer in a comma-separated or multi-line message. A date's day number is never an amount. Never turn "Xasan 8 Nov" into an $8 transaction.
 
@@ -1108,22 +1119,29 @@ def classify_transaction_direction(message_text):
     text = normalize_customer_name(str(message_text or ""))
     add_patterns = [
         r"\b(?:deyn cusub|dayn cusub|new debt|add debt|added debt)\b",
-        r"\b(?:iga qaatay|wuu qaatay|ayaa qaatay|ayuu qaatay|qaatey|qaato|qaatay|"
+        r"\b(?:iga\s+qaatay|wuu\s+qaatay|wuxuu\s+qaatay|ayaa\s+qaatay|ayuu\s+qaatay|"
+        r"way\s+qaadatay|waxay\s+qaadatay|ayay\s+qaadatay|ayaan\s+qaadatay|"
+        r"qaatey|qaadatay|qaateen|qaadan(?:ayaa|ey| doonaan)?|qaato|qaatay|"
         r"dayn\s+qaato|deyn\s+qaato|dayn\s+qaatay|deyn\s+qaatay|"
         r"dayn\s+qaadatay|deyn\s+qaadatay|dayn\s+qaatey|deyn\s+qaatey|"
-        r"dayn\s+qaadasho|deyn\s+qaadasho|amaah)\b",
+        r"dayn\s+qaadasho|deyn\s+qaadasho|amaah|"
+        r"ka\s+siiyay|ka\s+siiyey|u\s+siiyay|u\s+siiyey)\b",
         r"\b(?:ku\s+dar|kudar|ku\s+biir|ku\s+biiri|ku\s+darid|add\s+to\s+(?:the\s+)?existing)\b",
         r"\b(?:took|borrowed)\b",
     ]
     pay_patterns = [
-        r"\b(?:ka\s+jar|ka\s+jarey|ka\s+reeb|ka\s+reebay|ka\s+reebtay|ka\s+reebeen)\b",
+        r"\b(?:ka\s+jar|ka\s+jarey|ka\s+reeb|ka\s+reebay|ka\s+reebtay|ka\s+reebeen|"
+        r"ka\s+qabatay|ka\s+qabtay|ka\s+qabteen|ka\s+qabtay)\b",
         r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|bixiya|bixiyaa|bixiyo|bixin|bixinta|"
         r"bixiyayaa|bixisay|bixiye|bixiyeen|soo\s+celiyay|soo\s+celiyey|"
-        r"soo\s+celisay|soo\s+celiyeen|celiyay|celiyey|celisay|celiyeen)\b",
+        r"soo\s+celisay|soo\s+celiyeen|celiyay|celiyey|celisay|celiyeen|"
+        r"keenay|keentay|ii\s+keenay|ii\s+keentay|ii\s+keeneen|"
+        r"soo\s+shubay|soo\s+shubtay|shubay|shubtay|xareeyay|xareysay)\b",
         r"\b(?:lacag\s*bixin(?:ta)?|lacag\s*qabasho|lacag\s+qabtay|"
         r"lacag\s+soo\s+xarootay|lacagtii\s+(?:waa\s+la\s+helay|wuu\s+keenay)|"
         r"lacag\s+(?:ayaa\s+la\s+helay|waa\s+la\s+helay)|"
-        r"waan\s+ka\s+helay|waxaan\s+ka\s+helay|lacag\s+uu\s+bixiyay)\b",
+        r"waan\s+ka\s+helay|waxaan\s+ka\s+helay|lacag\s+uu\s+bixiyay|"
+        r"lacag\s+buu\s+ii\s+keenay|lacag\s+ayay\s+ii\s+keentay)\b",
         r"\b(?:wuu\s+bixiyay|wuxuu\s+bixiyay|ayaa\s+bixiyay|ayuu\s+bixiyay|"
         r"wuu\s+bixiyey|wuxuu\s+bixiyey|ayaa\s+bixiyey|ayuu\s+bixiyey|"
         r"lacag\s+ayuu\s+bixiyay|lacag\s+ayuu\s+bixiyey)\b",
@@ -1343,9 +1361,9 @@ def parse_transaction_clarification(message_text):
     # ADD: new debt / customer took or borrowed money.
     add_patterns = (
         r"^(?:deyn|dayn)\s*(?:cusub|baxday|cusub oo baxday)$",
-        r"^(?:deyn|dayn)\s+(?:(?:ayuu|ayaa|wuu|wuxuu|way|waxay)\s+)?"
-        r"(?:qaatay|qaadatay|qaatey)$",
-        r"^(?:(?:wuu|wuxuu|ayuu|ayaa|way|waxay)\s+)?qaatay$",
+        r"^(?:deyn|dayn)\s+(?:(?:ayuu|ayaa|wuu|wuxuu|way|waxay|ayay|ayaan)\s+)?"
+        r"(?:qaatay|qaadatay|qaatey|qaateen)$",
+        r"^(?:(?:wuu|wuxuu|ayuu|ayaa|way|waxay|ayay|ayaan)\s+)?(?:qaatay|qaadatay|qaatey|qaateen)$",
         r"^(?:iga qaatay|wuxuu iga qaatay|amaah|add|new debt)$",
     )
     if any(re.fullmatch(pattern, text, re.I) for pattern in add_patterns):
@@ -1356,8 +1374,9 @@ def parse_transaction_clarification(message_text):
         r"^(?:lacag\s*bixin(?:ta)?|lacag soo xarootay|deyn soo xarootay)$",
         r"^(?:lacag baa soo gashay|lacag la helay|lacag ayaa la helay|"
         r"lacagtii waa la helay|lacag ayuu bixiyay|lacag ayu(u|y) bixiyay)$",
-        r"^(?:ka jar|ka jarey|ka reeb|ka reebay|ka reebtay|"
+        r"^(?:ka jar|ka jarey|ka reeb|ka reebay|ka reebtay|ka qabtay|ka qabatay|"
         r"bixiyay|bixiyey|bixisay|bixiyeen|wuu bixiyay|wuxuu bixiyay|"
+        r"ii keenay|ii keentay|keenay|keentay|soo shubay|soo shubtay|"
         r"soo celiyay|soo celiyey|lacag bixin weeye)$",
         r"^(?:pay|payment|money received|received payment|paid|paid back)$",
     )
@@ -1519,9 +1538,9 @@ def local_fallback_parse(message_text):
     amount_matches = list(re.finditer(r"\$\s*(\d+(?:[.,]\d{1,2})?)|(?<!\w)(\d+(?:[.,]\d{1,2})?)\s*\$", raw))
     currency_marked = bool(amount_matches)
     if not amount_matches:
-        if re.search(r"\b(?:iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|added|add)\b", low):
+        if classify_transaction_direction(raw) == "ADD":
             amount_matches = list(re.finditer(r"(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-])", raw))
-        elif re.search(r"\b(?:bixiyay|bixisay|paid|payment|lacag\s*bixin(?:ta)?)\b", low):
+        elif classify_transaction_direction(raw) == "PAY":
             amount_matches = list(re.finditer(r"(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-])", raw))
     # Do not guess if there are multiple amounts in a message.
     if len(amount_matches) > 1:
@@ -1533,7 +1552,12 @@ def local_fallback_parse(message_text):
     is_history = bool(re.search(r"\b(?:history|taariikh|statement|xisaab(?:ta)?|faahfaahin|faahfaahinta|description)\b",
         low
     ))
-    is_payment = bool(re.search(r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|wuu\s+bixiyay|wuxuu\s+bixiyay|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|lacag\s*bixin(?:ta)?|paid|payment|repaid|paid\s+back)\b", low))
+    is_payment = classify_transaction_direction(raw) == "PAY" or bool(re.search(
+        r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|wuu\s+bixiyay|wuxuu\s+bixiyay|"
+        r"soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|"
+        r"waxaan\s+ka\s+helay|lacag\s*bixin(?:ta)?|paid|payment|repaid|paid\s+back)\b",
+        low
+    ))
 
     if not amount_matches and not any((is_delete, is_search, is_history, is_payment)):
         # A bare name can be searched safely only if the caller verifies it exists.
@@ -1556,10 +1580,15 @@ def local_fallback_parse(message_text):
     # from stored customer data or from words that indicate transaction direction.
     transaction_description = None
     if amount_matches and (is_payment or classify_transaction_direction(raw) == "ADD"):
-        tail = raw[amount_matches[0].end():].strip(" .,:;-")
+        # In amount-first Somali sentences ("50 ayaan Yuusuf ka siiyay"),
+        # the words after the amount contain the customer's name, not a detail.
+        amount_first = bool(re.match(r"^\s*(?:\$\s*)?\d", raw))
+        tail = "" if amount_first else raw[amount_matches[0].end():].strip(" .,:;-")
         tail = re.sub(
-            r"\b(?:ayuu|wuxuu|wuu|ayaa|iga|qaatay|qaatey|qaato|bixiyay|bixiyey|bixisay|"
-            r"celiyay|celiyey|soo|helay|lacag|bixin|paid|repaid|amaah|deyn|dayn|cusub)\b",
+            r"\b(?:ayuu|wuxuu|wuu|ayaa|ayay|ayaan|waxay|way|buu|bay|iga|"
+            r"qaatay|qaadatay|qaateen|qaatey|qaato|bixiyay|bixiyey|bixisay|"
+            r"celiyay|celiyey|celisay|celiyeen|soo|helay|keenay|keentay|qabatay|qabtay|"
+            r"shubay|shubtay|xareeyay|xareysay|ii|ka|lacag|bixin|paid|repaid|amaah|deyn|dayn|cusub)\b",
             " ", tail, flags=re.I
         )
         tail = " ".join(tail.split()).strip(" .,:;-")
@@ -1579,7 +1608,19 @@ def local_fallback_parse(message_text):
 
     name_text = re.sub(r"\b(?:deyntiisa|deynta|deynteeda|balance|amount)\s+(?:ka\s+dhig|kadhig|ka\s+dhigo)\b", " ", name_text, flags=re.I)
 
-    name_text = re.sub(r"\b(?:ka\s+dhig|kadhig|ka\s+dhigo|wuu|wuxuu|ayuu|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|waan\s+ka\s+helay|waxaan\s+ka\s+helay|bixiyay|bixiyey|bixisay|bixiyeen|paid|payment|repaid|iga\s+soo|iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|deyntii|deynta|oo\s+dhan|added|add)\b", " ", name_text, flags=re.I)
+    name_text = re.sub(
+        r"\b(?:ka\s+dhig|kadhig|ka\s+dhigo|wuu|wuxuu|ayuu|ayaa|ayay|ayaan|"
+        r"way|waxay|waan|waxaan|iga|buu|bay|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|"
+        r"waan\s+ka\s+helay|waxaan\s+ka\s+helay|bixiyay|bixiyey|bixisay|bixiyeen|"
+        r"qaadatay|qaateen|qaadanayaa|qaadaney|qaatey|qaatay|qaato|"
+        r"ka\s+qabatay|ka\s+qabtay|ka\s+qabteen|qabatay|qabtay|keenay|keentay|"
+        r"ii\s+keenay|ii\s+keentay|soo\s+shubay|soo\s+shubtay|shubay|shubtay|"
+        r"celisay|celiyeen|soo|ii|lacag|xareeyay|xareysay|"
+        r"ka\s+siiyay|ka\s+siiyey|u\s+siiyay|u\s+siiyey|"
+        r"paid|payment|repaid|iga\s+soo|iga\s+qaatay|wuxuu\s+iga\s+qaatay|"
+        r"amaah|deyn\s+ah|deyntii|deynta|oo\s+dhan|added|add)\b",
+        " ", name_text, flags=re.I
+    )
     name_text = re.sub(r"\b(?:lacag\s*bixin(?:ta)?|lacagta\s+soo\s+xarootay)\b", " ", name_text, flags=re.I)
     name_text = re.sub(r"^(?:waa|waxay ahayd|waxay aheyd)\s+", " ", name_text, flags=re.I)
 
@@ -1618,7 +1659,7 @@ def local_fallback_parse(message_text):
     if amount is not None and is_replace:
         return [{**base, "action": "EDIT", "customer_name": name,
                  "amount": amount, "new_amount": amount}]
-    if amount is not None and (currency_marked or re.search(r"\b(?:iga\s+qaatay|wuxuu\s+iga\s+qaatay|qaatey|amaah|deyn\s+ah|added|add)\b", low)):
+    if amount is not None and (currency_marked or classify_transaction_direction(raw) == "ADD"):
         return [{**base, "action": "ADD", "customer_name": name, "amount": amount,
                  "description": transaction_description}]
     return None
