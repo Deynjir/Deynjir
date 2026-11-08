@@ -67,6 +67,11 @@ CUSTOMER_MATCH_SESSIONS = {}
 # Explicit, confirmed DELETE workflow; sender/shop scoped and temporary.
 DELETE_SESSIONS = {}
 DELETE_SESSION_TTL = timedelta(minutes=15)
+# Short-lived, sender/shop-scoped confirmation before reversing a financial transaction.
+UNDO_CONFIRMATION_SESSIONS = {}
+UNDO_CONFIRMATION_TTL = timedelta(minutes=5)
+# Only a transaction actually recorded by this sender can trigger disagreement follow-up.
+LAST_TRANSACTION_CONTEXT = {}
 
 
 def deynjir_main_menu():
@@ -638,6 +643,9 @@ def _process_pending_payment_confirmation(pending_id, actor_phone, admin=False):
         if not isinstance(rpc_data, dict) or not rpc_data.get("id"):
             raise RuntimeError("Payment RPC did not return the updated customer")
         payment_rpc_succeeded = True
+        transaction_sender = str(pending.get("sender_phone") or actor_phone)
+        remember_selected_customer(transaction_sender, pending.get("business_user_id"), debtor.get("name") or pending.get("customer_name"))
+        remember_recent_transaction(transaction_sender, pending.get("business_user_id"), debtor.get("id"), debtor.get("name") or pending.get("customer_name"))
         supabase.table("pending_payment_confirmations").update({
             "status": "confirmed",
             "processed_at": datetime.now(timezone.utc).isoformat(),
@@ -1060,6 +1068,44 @@ def get_recent_selected_customer(sender_phone, business_user_id, max_age_minutes
         return None
     name = str(saved.get("customer_name") or "").strip()
     return name or None
+
+
+def remember_recent_transaction(sender_phone, business_user_id, customer_id, customer_name):
+    """Remember a real committed transaction for a brief disagreement follow-up."""
+    if not customer_id:
+        return
+    LAST_TRANSACTION_CONTEXT[str(sender_phone)] = {
+        "business_user_id": str(business_user_id),
+        "customer_id": str(customer_id),
+        "customer_name": str(customer_name or "Macmiilka"),
+        "created_at": datetime.now(timezone.utc),
+    }
+
+
+def is_transaction_disagreement(message_text):
+    """Conservative Somali/English disagreement detector; never performs an undo."""
+    text = normalize_customer_name(str(message_text or ""))
+    patterns = (
+        r"\bmaya\b", r"\bkhalad\b", r"\bqalad\b",
+        r"\bsidaas\s+ma\s+aha\b", r"\bsax\s+ma\s+aha\b",
+        r"\bma\s+saxna\b", r"\bwaa\s+qalad\b",
+        r"\bka\s+noqo\b", r"\bka\s+noqon\b", r"\bkanoqoto\b", r"\bkanoqon\b",
+        r"\bka\s+laabo\b", r"\bka\s+laabato\b", r"\bkalaabato\b",
+        r"\bka\s+laab\b", r"\bdib\s+u\s+celi\b",
+        r"\bwaan\s+ka\s+noqday\b", r"\bi\s+ka\s+noqo\b",
+        r"\bundo\b", r"\bnot\s+correct\b", r"\bwrong\b",
+    )
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def undo_confirmation_answer(message_text):
+    """Return yes/no/None for an active undo confirmation response."""
+    text = normalize_customer_name(str(message_text or "")).strip(" .!؟?")
+    if text in {"1", "haa", "h", "yes", "y", "undo", "ka noqo", "ka noqon", "kanoqoto", "kanoqon", "ka laabo", "ka laabato", "dib u celi", "haa ka noqo", "haa undo"}:
+        return "yes"
+    if text in {"2", "maya", "no", "n", "sax", "waa sax", "xaree", "hay", "iska daa", "jooji"}:
+        return "no"
+    return None
 
 
 def parse_contextual_somali_payment(message_text, recent_customer_name):
@@ -3160,7 +3206,7 @@ async def whatsapp_webhook(request: Request):
 
     # Resolve UNDO only after the approved business account is known.
     undo_match = re.fullmatch(
-        r"\s*(?:undo(?:\s+last)?|ka\s+noqo|ka\s+noqo\s+kii\s+ugu\s+dambeeyay|ka\s+noqo\s+tii\s+ugu\s+dambeeysay)(?:\s+(.+?))?\s*[.!]?\s*",
+        r"\s*(?:undo(?:\s+last)?|ka\s*noqo(?:to|n)?|ka\s+laab(?:o|ato)|dib\s+u\s+celi|ka\s+noqo\s+kii\s+ugu\s+dambeeyay|ka\s+noqo\s+tii\s+ugu\s+dambeeysay)(?:\s+(.+?))?\s*[.!]?\s*",
         str(message_text or ""), re.I
     )
 
@@ -3432,6 +3478,112 @@ async def whatsapp_webhook(request: Request):
 
         business_user_id = business_user["id"]
 
+        # Resolve an already-open UNDO confirmation before interpreting this reply
+        # as a new command. Only explicit 1/HAA or 2/MAYA responses are accepted.
+        pending_undo = UNDO_CONFIRMATION_SESSIONS.get(sender_phone)
+        if pending_undo and pending_undo.get("business_user_id") == str(business_user_id):
+            if datetime.now(timezone.utc) > pending_undo.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
+                UNDO_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "Waqtigii xaqiijinta ka-noqoshadu wuu dhammaaday. Waxba lama beddelin. Haddii loo baahdo, codsiga mar kale dir.")
+                return {"status": "undo_confirmation_expired"}
+            answer = undo_confirmation_answer(message_text)
+            if answer == "no":
+                UNDO_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "✅ Waa hagaag. Macaamilka sidii uu ahaa ayaan u reebay. Waxba lama beddelin.")
+                return {"status": "undo_cancelled"}
+            if answer == "yes":
+                UNDO_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                try:
+                    undo_result = supabase.rpc("undo_customer_transaction_confirmed", {
+                        "p_customer_id": pending_undo["customer_id"],
+                        "p_business_user_id": str(business_user_id),
+                        "p_expected_transaction_id": pending_undo["transaction_id"],
+                    }).execute()
+                    undo_data = undo_result.data
+                    if isinstance(undo_data, list):
+                        undo_data = undo_data[0] if undo_data else None
+                    if not isinstance(undo_data, dict) or not undo_data.get("success"):
+                        raise RuntimeError("Database-ku ma xaqiijin ka-noqoshada.")
+                    customer_after = undo_data.get("customer") or {}
+                    undone_type = str(undo_data.get("transaction_type") or "").upper()
+                    type_so = {"ADD": "deyn lagu daray", "PAY": "lacag-bixin", "DEPOSIT": "dhigaal", "ADD + DHIGAAL": "deyn iyo isticmaalka dhigaalka"}.get(undone_type, "macaamil")
+                    restored_credit = undo_data.get("restored_credit_balance")
+                    credit_line = f"\nHaraaga dhigaalka: ${float(restored_credit):.2f}" if restored_credit is not None else ""
+                    send_whatsapp(sender_phone,
+                        f"✅ Macaamilkii waa laga noqday.\n\nMacmiil: *{customer_after.get('name') or pending_undo.get('customer_name')}*\n"
+                        f"Nooca: {type_so}\nLacagta: *${float(undo_data.get('amount') or 0):.2f}*\n"
+                        f"Haraaga deynta: *${float(customer_after.get('amount') or 0):.2f}*{credit_line}\n\n"
+                        "Taariikhda waa la hayey si raad-raac loo helo.")
+                    LAST_TRANSACTION_CONTEXT.pop(sender_phone, None)
+                    return {"status": "undo_completed", "transaction_type": undone_type}
+                except Exception as undo_error:
+                    print(f"❌ Confirmed UNDO error: {type(undo_error).__name__}: {undo_error}")
+                    send_whatsapp(sender_phone, "⚠️ Macaamilka lama celin. Waxaa laga yaabaa in macaamil cusub dhacay ama diiwaanku aanu ammaan u ahayn in la celiyo. Waxba lama beddelin.")
+                    return {"status": "undo_failed"}
+            send_whatsapp(sender_phone, "Fadlan ku jawaab *1* = HAA, ka noqo; ama *2* = MAYA, xaree oo sii hay.\nWaqtigu waa 5 daqiiqo.")
+            return {"status": "undo_confirmation_waiting"}
+
+        # A disagreement shortly after a committed transaction opens a confirmation;
+        # the bot never reverses anything based on AI classification alone.
+        recent_tx = LAST_TRANSACTION_CONTEXT.get(sender_phone) or {}
+        has_other_active_session = any(sender_phone in session_map for session_map in (
+            IMPORT_SESSIONS, CUSTOMER_MATCH_SESSIONS, GUIDED_SESSIONS,
+            AMOUNT_EDIT_SESSIONS, RENAME_SESSIONS, DELETE_SESSIONS,
+            PAYMENT_EXPORT_SESSIONS, REMINDER_SESSIONS,
+        ))
+        has_active_payment_confirmation = False
+        if (recent_tx.get("business_user_id") == str(business_user_id)
+                and isinstance(recent_tx.get("created_at"), datetime)
+                and datetime.now(timezone.utc) - recent_tx["created_at"] <= UNDO_CONFIRMATION_TTL
+                and is_transaction_disagreement(message_text)):
+            # Do not steal a HAA/MAYA reply that belongs to the existing PAY confirmation.
+            try:
+                active_payment_check = (supabase.table("pending_payment_confirmations")
+                    .select("id")
+                    .eq("sender_phone", sender_phone)
+                    .eq("business_user_id", str(business_user_id))
+                    .in_("status", ["pending", "processing"])
+                    .limit(1).execute())
+                has_active_payment_confirmation = bool(active_payment_check.data)
+            except Exception as pending_check_error:
+                print(f"⚠️ Could not check pending payment before disagreement detection: {pending_check_error}")
+                has_active_payment_confirmation = True
+        if (not has_other_active_session
+                and not has_active_payment_confirmation
+                and recent_tx.get("business_user_id") == str(business_user_id)
+                and isinstance(recent_tx.get("created_at"), datetime)
+                and datetime.now(timezone.utc) - recent_tx["created_at"] <= UNDO_CONFIRMATION_TTL
+                and is_transaction_disagreement(message_text)):
+            try:
+                preview_result = supabase.rpc("get_latest_customer_transaction_for_undo", {
+                    "p_customer_id": recent_tx["customer_id"],
+                    "p_business_user_id": str(business_user_id),
+                }).execute()
+                preview = preview_result.data
+                if isinstance(preview, list):
+                    preview = preview[0] if preview else None
+                if isinstance(preview, dict) and preview.get("transaction_id"):
+                    UNDO_CONFIRMATION_SESSIONS[sender_phone] = {
+                        "business_user_id": str(business_user_id),
+                        "customer_id": str(recent_tx["customer_id"]),
+                        "customer_name": str(preview.get("customer_name") or recent_tx.get("customer_name")),
+                        "transaction_id": str(preview["transaction_id"]),
+                        "transaction_type": str(preview.get("transaction_type") or ""),
+                        "amount": float(preview.get("amount") or 0),
+                        "expires_at": datetime.now(timezone.utc) + UNDO_CONFIRMATION_TTL,
+                    }
+                    send_whatsapp(sender_phone,
+                        f"⚠️ Waxaad u muuqataa inaadan ku qanacsanayn macaamilkii ugu dambeeyay.\n\n"
+                        f"Macmiil: *{preview.get('customer_name') or recent_tx.get('customer_name')}*\n"
+                        f"Lacagta: *${float(preview.get('amount') or 0):.2f}*\n\n"
+                        "*Ma rabtaa inaad ka noqoto macaamilkan?*\n\n"
+                        "1️⃣ HAA — Ka noqo (UNDO)\n"
+                        "2️⃣ MAYA — Waa sax, xaree oo sii hay\n\n"
+                        "Waxba lama beddelayo ilaa aad xaqiijiso. Ku jawaab 1 ama 2 (5 daqiiqo).")
+                    return {"status": "undo_confirmation_requested"}
+            except Exception as preview_error:
+                print(f"⚠️ Could not preview latest transaction for disagreement: {type(preview_error).__name__}: {preview_error}")
+
         if undo_match:
             undo_key = str(undo_match.group(1) or "").strip()
             if not undo_key:
@@ -3474,37 +3626,29 @@ async def whatsapp_webhook(request: Request):
                         return {"status": "undo_customer_ambiguous"}
                     undo_customer = undo_matches[0]
 
-                undo_result = supabase.rpc("undo_last_customer_transaction", {
+                preview_result = supabase.rpc("get_latest_customer_transaction_for_undo", {
                     "p_customer_id": str(undo_customer["id"]),
                     "p_business_user_id": str(business_user_id),
                 }).execute()
-                undo_data = undo_result.data
-                if isinstance(undo_data, list):
-                    undo_data = undo_data[0] if undo_data else None
-                if not isinstance(undo_data, dict) or not undo_data.get("success"):
-                    raise RuntimeError("Database-ku ma xaqiijin ka-noqoshada.")
-                undone_amount = float(undo_data.get("amount") or 0)
-                undone_type = str(undo_data.get("transaction_type") or "").upper()
-                customer_after = undo_data.get("customer") or {}
-                type_so = {
-                    "ADD": "deyn lagu daray",
-                    "PAY": "lacag-bixin",
-                    "DEPOSIT": "dhigaal",
-                }.get(undone_type, "macaamil")
-                credit_restored = undo_data.get("restored_credit_balance")
-                credit_note = (
-                    f"\nHaraaga dhigaalka kadib ka-noqoshada: ${float(credit_restored):.2f}"
-                    if credit_restored is not None else ""
-                )
-                send_whatsapp(
-                    sender_phone,
-                    f"✅ Macaamilkii ugu dambeeyay waa laga noqday.\n\n"
-                    f"Macmiil: *{customer_after.get('name') or undo_customer.get('name')}*\n"
-                    f"Nooca: {type_so}\nLacagta: *${undone_amount:.2f}*\n"
-                    f"Haraaga deynta hadda: *${float(customer_after.get('amount') or 0):.2f}*"
-                    f"{credit_note}\n\nTaariikhda macaamilka waa la hayey si loo helo raad-raac."
-                )
-                return {"status": "undo_completed", "transaction_type": undone_type, "amount": undone_amount}
+                preview = preview_result.data
+                if isinstance(preview, list):
+                    preview = preview[0] if preview else None
+                if not isinstance(preview, dict) or not preview.get("transaction_id"):
+                    raise RuntimeError("Ma jiro macaamil ammaan ah oo la celin karo.")
+                UNDO_CONFIRMATION_SESSIONS[sender_phone] = {
+                    "business_user_id": str(business_user_id),
+                    "customer_id": str(undo_customer["id"]),
+                    "customer_name": str(preview.get("customer_name") or undo_customer.get("name")),
+                    "transaction_id": str(preview["transaction_id"]),
+                    "transaction_type": str(preview.get("transaction_type") or ""),
+                    "amount": float(preview.get("amount") or 0),
+                    "expires_at": datetime.now(timezone.utc) + UNDO_CONFIRMATION_TTL,
+                }
+                send_whatsapp(sender_phone,
+                    f"⚠️ *Xaqiiji ka-noqoshada macaamilka*\n\nMacmiil: *{preview.get('customer_name') or undo_customer.get('name')}*\n"
+                    f"Nooca: *{preview.get('transaction_type')}*\nLacagta: *${float(preview.get('amount') or 0):.2f}*\n\n"
+                    "1️⃣ HAA — Ka noqo\n2️⃣ MAYA — Xaree oo sii hay\n\nWaxba lama beddelin. Ku jawaab 1 ama 2 (5 daqiiqo).")
+                return {"status": "undo_confirmation_requested"}
             except Exception as undo_error:
                 print(f"❌ UNDO error: {type(undo_error).__name__}: {undo_error}")
                 send_whatsapp(
@@ -3593,6 +3737,8 @@ async def whatsapp_webhook(request: Request):
                     deposit_data = deposit_data[0] if deposit_data else None
                 if not isinstance(deposit_data, dict) or not deposit_data.get("success"):
                     raise RuntimeError("Database-ku ma xaqiijin dhigaalka.")
+                remember_selected_customer(sender_phone, business_user_id, customer_row.get("name") or customer_key)
+                remember_recent_transaction(sender_phone, business_user_id, customer_row.get("id"), customer_row.get("name") or customer_key)
                 send_whatsapp(
                     sender_phone,
                     f"✅ *Dhigaal waa la diiwaangeliyey.*\n\n"
@@ -5613,6 +5759,7 @@ async def whatsapp_webhook(request: Request):
                             f"{credit_note}"
                         )
                         remember_selected_customer(sender_phone, business_user_id, updated.get("name") or name)
+                        remember_recent_transaction(sender_phone, business_user_id, updated.get("id"), updated.get("name") or name)
                         entry["action"] = "ADJUST"
                         successful_inserts.append(entry)
                         continue
@@ -5650,6 +5797,7 @@ async def whatsapp_webhook(request: Request):
                     continue
                 created_customer = result.data[0] if isinstance(result.data, list) else result.data
                 remember_selected_customer(sender_phone, business_user_id, (created_customer or {}).get("name") or name)
+                remember_recent_transaction(sender_phone, business_user_id, (created_customer or {}).get("id"), (created_customer or {}).get("name") or name)
                 credit_used = float((created_customer or {}).get("credit_used") or 0)
                 if credit_used > 0:
                     entry["credit_used"] = credit_used
