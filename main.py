@@ -93,14 +93,16 @@ def deynjir_main_menu():
 def deynjir_unrecognized_message():
     """One short fallback; the active guided menu accepts the numeric choices."""
     return (
-        "*Ma Fahmin, Fadlan Raac tilmaamahan:*\n\n"
-        "Deyn cusub – Taabo 1️⃣\n"
-        "Lacag bixin – Taabo 2️⃣\n"
-        "liiska daynta – Taabo 3️⃣\n"
-        "Raadi macmiil – Taabo 4️⃣\n"
-        "Balanta maanta – Taabo 5️⃣\n"
-        "Caawimaad – Taabo 6️⃣\n\n"
-    )
+    "❓ *Waan fahmi waayay fariintaada.*\n\n"
+    "Fadlan Raac Tilmaamahan:\n\n"
+    "1️⃣  Deyn cusub\n"
+    "2️⃣  Lacag bixin\n"
+    "3️⃣  Liiska deymaha\n"
+    "4️⃣  Raadi macmiil\n"
+    "5️⃣  Ballamaha maanta\n"
+    "6️⃣  Caawimaad\n\n"
+    "✍️ *Dooro 1-6.*"
+)
 
 def activate_guided_menu(sender_phone):
     """Make the next numeric reply a valid choice after showing the action menu."""
