@@ -84,7 +84,7 @@ def deynjir_main_menu():
         "Lacag bixin – Taabo 2️⃣\n"
         "liiska daynta – Taabo 3️⃣\n"
         "Raadi macmiil – Taabo 4️⃣\n"
-        "Ballamaha maanta – Taabo 5️⃣\n"
+        "Balanta maanta – Taabo 5️⃣\n"
         "Caawimaad – Taabo 6️⃣\n\n"
         "Amarro kale: *DHIGAAL Cali $100* ama *UNDO Cali*.\n"
         "Soo qor lambar 1 ilaa 6."
@@ -93,12 +93,12 @@ def deynjir_main_menu():
 def deynjir_unrecognized_message():
     """One short fallback; the active guided menu accepts the numeric choices."""
     return (
-        "Ma Fahmin, Fadlan Raac tilmaamahan: "
+        "*Ma Fahmin, Fadlan Raac tilmaamahan:*\n\n"
         "Deyn cusub – Taabo 1️⃣\n"
         "Lacag bixin – Taabo 2️⃣\n"
         "liiska daynta – Taabo 3️⃣\n"
         "Raadi macmiil – Taabo 4️⃣\n"
-        "Ballamaha maanta – Taabo 5️⃣\n"
+        "Balanta maanta – Taabo 5️⃣\n"
         "Caawimaad – Taabo 6️⃣\n\n"
     )
 
@@ -2370,12 +2370,10 @@ def begin_delete_flow(sender_phone, business_user_id, requested_name):
     send_whatsapp(
         sender_phone,
         f"⚠️ *Xaqiiji tirtiridda*\n\n"
-        f"Macmiil: *{candidate['name']}*\n"
+        f"Macmiilka: *{candidate['name']}*\n"
         f"Wadarta deynta: *${balance:.2f}*\n"
-        f"Inta laga jarayo: *{len(rows)}*\n\n"
-        "Haddii ay sax tahay, soo qor *HAA, TIRTIR*.\n"
-        "Haddii macmiilku leeyahay lacag-bixin ama taariikh macaamil, waa la archive-gareynayaa; haddii kale waa la tirtirayaa.\n"
-        "Qor *JOOJI* si aad uga baxdo."
+        "Soo qor *HAA, TIRTIR*.\n"
+        "ama Qor *JOOJI* si aan loo Tirtirin."
     )
     return {"status": "delete_confirmation_required", "customer": candidate["name"], "rows": len(rows)}
 
@@ -2489,7 +2487,7 @@ def handle_delete_session(sender_phone, business_user_id, message_text):
                 if affected != len(customer_ids):
                     send_whatsapp(sender_phone, f"⚠️ Macmiilka *{customer_name}* qayb ahaan ayaa loo archive-gareeyay ({affected}/{len(customer_ids)}). Fadlan hubi liiska.")
                     return {"status": "archive_partial", "archived": affected}
-                send_whatsapp(sender_phone, f"✅ *{customer_name}* waa la archive-gareeyay. Deymihii iyo lacag-bixinnadii hore way kaydsan yihiin; magaca waxaad ka heli kartaa markaad codsato taariikhdiisa.")
+                send_whatsapp(sender_phone, f"✅ *{customer_name}* waa laga saaray liiska Rasmiga ah. Balse Deymihii iyo lacag-bixinnadiisii hore way kaydsan yihiin; waxaad ka heli kartaa markaad codsato xisaabtiisa.")
                 return {"status": "customer_archived", "archived": affected}
 
             deleted_count = 0
