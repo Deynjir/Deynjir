@@ -131,8 +131,8 @@ def deynjir_help_message():
 
 def deynjir_confusion_help_message():
     return (
-        "😊 Dhib ma leh, waan ku caawinayaa.\n\n"
-        "Nidaamkan wuxuu kaa caawinayaa inaad\n"
+        "*Dhib ma leh, waan ku caawinayaa*.\n\n"
+        "Nidaamkan wuxuu kaa Sahlayaa inaad\n"
         "diiwaangeliso daymaha, lacag-bixinta iyo balamaha Ganacsigaaga.\n\n"
         "Tusaale:\n"
         "Waxaad Dayn $10 ku leedahay Qof lagu magacaabo Cali.\n"
