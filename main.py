@@ -99,8 +99,8 @@ def deynjir_recovery_menu_message(intro=None):
         lines.append(str(intro).strip())
         lines.append("")
     lines.extend([
-        "🤝 *Waxay u muuqataa in isticmaalka nidaamku kugu adkaaday.*",
-        "Si aan kuugu fududeeyo, fadlan raac tallaabooyinkan:",
+        "🤝 *Si aad u fahanto habka uu nidaamkani u shaqeeyo.*",
+        "Raac tallaabooyinkan:",
         "",
         "1️⃣  Deyn cusub",
         "2️⃣  Lacag bixin",
