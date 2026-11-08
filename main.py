@@ -72,6 +72,8 @@ UNDO_CONFIRMATION_SESSIONS = {}
 UNDO_CONFIRMATION_TTL = timedelta(minutes=5)
 # Only a transaction actually recorded by this sender can trigger disagreement follow-up.
 LAST_TRANSACTION_CONTEXT = {}
+# After a short search result, remembers whether the shopkeeper wants the full customer statement.
+SEARCH_DETAIL_SESSIONS = {}
 
 
 def deynjir_main_menu():
@@ -90,19 +92,32 @@ def deynjir_main_menu():
         "Soo qor lambar 1 ilaa 6."
     )
 
+def deynjir_recovery_menu_message(intro=None):
+    """Short recovery menu used when the bot is confused or an operation fails."""
+    lines = []
+    if intro:
+        lines.append(str(intro).strip())
+        lines.append("")
+    lines.extend([
+        "🤝 *Waxay u muuqataa in isticmaalka nidaamku kugu adkaaday.*",
+        "Si aan kuugu fududeeyo, fadlan raac tallaabooyinkan:",
+        "",
+        "1️⃣  Deyn cusub",
+        "2️⃣  Lacag bixin",
+        "3️⃣  Liiska deymaha",
+        "4️⃣  Raadi macmiil",
+        "5️⃣  Ballamaha maanta",
+        "6️⃣  Caawimaad",
+        "",
+        "✍️ *Dooro 1-6.*",
+    ])
+    return "\n".join(lines)
+
+
 def deynjir_unrecognized_message():
-    """One short fallback; the active guided menu accepts the numeric choices."""
-    return (
-    "❓ *Waan fahmi waayay fariintaada.*\n\n"
-    "Fadlan Raac Tilmaamahan:\n\n"
-    "1️⃣  Deyn cusub\n"
-    "2️⃣  Lacag bixin\n"
-    "3️⃣  Liiska deymaha\n"
-    "4️⃣  Raadi macmiil\n"
-    "5️⃣  Ballamaha maanta\n"
-    "6️⃣  Caawimaad\n\n"
-    "✍️ *Dooro 1-6.*"
-)
+    """Use the same concise recovery menu for unsupported messages."""
+    return deynjir_recovery_menu_message("❓ *Waan fahmi waayay fariintaada.*")
+
 
 def activate_guided_menu(sender_phone):
     """Make the next numeric reply a valid choice after showing the action menu."""
@@ -159,6 +174,80 @@ def is_somali_confusion_request(message_text):
         r"\bsidee\s+nidaamkan\s+u\s+shaqeeyaa\b",
     )
     return any(re.search(pattern, text, flags=re.I) for pattern in patterns)
+
+
+
+def is_explicit_exit_or_block_request(message_text):
+    """Detect clear requests to leave/stop/block before customer-name or AI parsing."""
+    text = normalize_customer_name(str(message_text or "")).strip()
+    exact_phrases = {
+        "naga tag", "naga daa", "iga tag", "bax", "ka bax", "iska daa",
+        "i dhaaf", "block", "block garee", "i block garee", "block me",
+        "leave me alone", "stop messaging", "stop contacting me",
+        "ha ii soo qorin", "ha i soo qorin", "ha ii soo dirin",
+        "jooji wada hadalka", "jooji isticmaalka",
+    }
+    return text in exact_phrases or bool(re.fullmatch(
+        r"(?:fadlan\s+)?(?:naga\s+tag|iga\s+tag|i\s+dhaaf|ka\s+bax|"
+        r"block(?:\s+garee)?|i\s+block\s+garee|leave\s+me\s+alone|"
+        r"stop\s+(?:messaging|contacting\s+me)|ha\s+(?:ii|i)\s+soo\s+(?:qorin|dirin))",
+        text, re.I
+    ))
+
+
+def is_user_frustrated(message_text):
+    """Conservative frustration detector; does not treat every 'maya' as anger."""
+    text = normalize_customer_name(str(message_text or ""))
+    patterns = (
+        r"\bwaan\s+xanaaqay\b", r"\bwaan\s+ku\s+daalay\b",
+        r"\bwaad\s+i\s+wareerisay\b", r"\bi\s+wareerisay\b",
+        r"\bwaan\s+ku\s+wareeray\b", r"\bnidaamku\s+wuu\s+i\s+wareeriyay\b",
+        r"\bway\s+igu\s+adagtahay\b", r"\bwaa\s+igu\s+adag\b",
+        r"\bma\s+shaqeynayo\b", r"\bma\s+shaqaynayo\b",
+        r"\bwaxba\s+ma\s+shaqeeyaan\b", r"\bwaxba\s+ma\s+shaqeynayaan\b",
+        r"\bwaxba\s+ma\s+shaqaynayaan\b", r"\bma\s+fahmaysid\b",
+        r"\bwaad\s+fahmi\s+la\s+dahay\b", r"\bwaa\s+iga\s+wareer\b",
+    )
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def clear_sender_workflow_sessions(sender_phone):
+    """Clear only unfinished conversations; never touch committed financial records."""
+    for session_map in (
+        IMPORT_SESSIONS, PAYMENT_EXPORT_SESSIONS, REMINDER_SESSIONS,
+        RENAME_SESSIONS, AMOUNT_EDIT_SESSIONS, GUIDED_SESSIONS,
+        CUSTOMER_MATCH_SESSIONS, DELETE_SESSIONS,
+        UNDO_CONFIRMATION_SESSIONS, SEARCH_DETAIL_SESSIONS,
+    ):
+        session_map.pop(sender_phone, None)
+    LAST_TRANSACTION_CONTEXT.pop(sender_phone, None)
+    LAST_SELECTED_CUSTOMERS.pop(sender_phone, None)
+    LAST_HISTORY_REQUESTS.pop(sender_phone, None)
+
+
+def cancel_sender_pending_database_work(sender_phone, business_user_id):
+    """Cancel uncommitted payment/transaction proposals for this sender and shop."""
+    try:
+        (supabase.table("pending_payment_confirmations")
+            .update({
+                "status": "rejected",
+                "actor_phone": str(sender_phone),
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+            })
+            .eq("sender_phone", str(sender_phone))
+            .eq("business_user_id", str(business_user_id))
+            .eq("status", "pending")
+            .execute())
+    except Exception as exc:
+        print(f"⚠️ Could not cancel pending payment proposals for exit request: {exc}")
+    try:
+        (supabase.table("pending_transaction_clarifications")
+            .delete()
+            .eq("sender_phone", str(sender_phone))
+            .eq("business_user_id", str(business_user_id))
+            .execute())
+    except Exception as exc:
+        print(f"⚠️ Could not clear pending transaction clarification for exit request: {exc}")
 
 
 def normalize_easy_command(value):
@@ -3207,6 +3296,32 @@ async def whatsapp_webhook(request: Request):
     sender_phone = str(sender_phone).replace("+", "").split("@")[0].strip()
     owner_phone = str(OWNER_PHONE).replace("+", "").split("@")[0].strip()
 
+
+    # Explicit leave/block requests must never be interpreted as customer names.
+    # Only approved shop users receive this response; unknown users remain silent.
+    if is_explicit_exit_or_block_request(message_text):
+        try:
+            exit_account = (supabase.table("business_users")
+                .select("id, approval_status")
+                .eq("phone_number", sender_phone)
+                .limit(1).execute())
+            if exit_account.data and str(exit_account.data[0].get("approval_status") or "").casefold() == "approved":
+                exit_business_id = str(exit_account.data[0]["id"])
+                clear_sender_workflow_sessions(sender_phone)
+                cancel_sender_pending_database_work(sender_phone, exit_business_id)
+                send_whatsapp(
+                    sender_phone,
+                    deynjir_recovery_menu_message(
+                        "Waan fahmay. Hawshii socotay waa la joojiyey; waxba cusub lama kaydin."
+                    )
+                )
+                return {"status": "exit_request_handled"}
+            return {"status": "unapproved_user_silenced"}
+        except Exception as exit_error:
+            print(f"⚠️ Exit request handling failed: {type(exit_error).__name__}: {exit_error}")
+            # Do not fall through to customer/AI parsing for a clear exit request.
+            return {"status": "exit_request_handling_error"}
+
     # Resolve UNDO only after the approved business account is known.
     undo_match = re.fullmatch(
         r"\s*(?:undo(?:\s+last)?|ka\s*noqo(?:to|n)?|ka\s+laab(?:o|ato)|dib\s+u\s+celi|ka\s+noqo\s+kii\s+ugu\s+dambeeyay|ka\s+noqo\s+tii\s+ugu\s+dambeeysay)(?:\s+(.+?))?\s*[.!]?\s*",
@@ -3251,9 +3366,12 @@ async def whatsapp_webhook(request: Request):
     if (sender_phone == owner_phone or sender_phone in IMPORT_SESSIONS or is_import_command) and not (
         is_payment_report_command(import_text) or sender_phone in PAYMENT_EXPORT_SESSIONS
     ):
-        if re.fullmatch(r"\s*CANCEL\s*", import_text, re.I) and sender_phone in IMPORT_SESSIONS:
+        if re.fullmatch(r"\s*(?:CANCEL|JOOJI|BAAJI)\s*", import_text, re.I) and sender_phone in IMPORT_SESSIONS:
             IMPORT_SESSIONS.pop(sender_phone, None)
-            send_whatsapp(sender_phone, "✅ Import waa la joojiyey. Hada Waxba lama kaydin.")
+            send_whatsapp(
+                sender_phone,
+                deynjir_recovery_menu_message("✅ Import-ka waa la joojiyey. Waxba lama kaydin.")
+            )
             return {"status": "import_cancelled"}
         session_for_choice = IMPORT_SESSIONS.get(sender_phone)
         if session_for_choice and session_for_choice.get("stage") == "duplicate_choice":
@@ -3586,6 +3704,21 @@ async def whatsapp_webhook(request: Request):
                     return {"status": "undo_confirmation_requested"}
             except Exception as preview_error:
                 print(f"⚠️ Could not preview latest transaction for disagreement: {type(preview_error).__name__}: {preview_error}")
+
+        # If the user is confused or frustrated, stop unfinished workflows and
+        # return one simple menu. A recent transaction disagreement is handled
+        # above first, so "khalad" can still open the safe UNDO confirmation.
+        if is_user_frustrated(message_text) or is_somali_confusion_request(message_text):
+            clear_sender_workflow_sessions(sender_phone)
+            cancel_sender_pending_database_work(sender_phone, business_user_id)
+            activate_guided_menu(sender_phone)
+            send_whatsapp(
+                sender_phone,
+                deynjir_recovery_menu_message(
+                    "Waan fahmay. Aan kuu fududeeyo isticmaalka Deynjir."
+                )
+            )
+            return {"status": "frustration_recovery_menu_sent"}
 
         if undo_match:
             undo_key = str(undo_match.group(1) or "").strip()
@@ -4111,11 +4244,32 @@ async def whatsapp_webhook(request: Request):
             GUIDED_SESSIONS.pop(sender_phone, None)
             guided = None
 
-    # Respond to common Somali expressions of confusion with a clear example.
-    # Clear an unfinished guided step so the user can restart without stale state.
+    # A short search result can be expanded into the full customer statement.
+    pending_search_detail = SEARCH_DETAIL_SESSIONS.get(sender_phone)
+    if pending_search_detail and pending_search_detail.get("business_user_id") == str(business_user_id):
+        if datetime.now(timezone.utc) > pending_search_detail.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
+            SEARCH_DETAIL_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "Waqtigii codsiga xisaabta wuu dhammaaday. Mar kale raadi macmiilka haddii aad u baahan tahay.")
+            return {"status": "search_detail_expired"}
+        search_answer = normalize_customer_name(guided_text).strip(" .!؟?")
+        if search_answer in {"1", "haa", "h", "yes", "y", "xisaab", "xisaabta", "faahfaahin", "faahfaahinta"}:
+            customer_for_statement = str(pending_search_detail.get("customer_name") or "").strip()
+            SEARCH_DETAIL_SESSIONS.pop(sender_phone, None)
+            if customer_for_statement:
+                message_text = f"FAAHFAAHIN {customer_for_statement}"
+                guided_text = message_text
+        elif search_answer in {"2", "maya", "no", "n"}:
+            SEARCH_DETAIL_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "Waa hagaag. Haddii aad mar dambe u baahato, qor *FAAHFAAHIN magaca macmiilka*.")
+            return {"status": "search_detail_declined"}
+        else:
+            # A different message starts a new request; it must not be swallowed.
+            SEARCH_DETAIL_SESSIONS.pop(sender_phone, None)
+
+    # Confusion requests receive the concise recovery menu, not a long explanation.
     if is_somali_confusion_request(guided_text):
         GUIDED_SESSIONS.pop(sender_phone, None)
-        send_whatsapp(sender_phone, deynjir_confusion_help_message())
+        send_whatsapp(sender_phone, deynjir_recovery_menu_message())
         return {"status": "somali_usage_help_sent"}
 
     menu_words = {"menu", "start", "hello", "hi", "hey", "help", "caawi", "caawimaad", "bilow"}
@@ -4141,7 +4295,10 @@ async def whatsapp_webhook(request: Request):
 
     if guided and re.fullmatch(r"\s*(?:jooji|cancel|baaji)\s*", guided_text, re.I):
         GUIDED_SESSIONS.pop(sender_phone, None)
-        send_whatsapp(sender_phone, "Waa la joojiyey. Waxba lama beddelin. Qor *MENU* haddii aad caawimaad rabto.")
+        send_whatsapp(
+            sender_phone,
+            deynjir_recovery_menu_message("Waa la joojiyey. Waxba lama beddelin.")
+        )
         return {"status": "guided_action_cancelled"}
 
     if guided and guided.get("stage") == "menu":
@@ -4699,7 +4856,10 @@ async def whatsapp_webhook(request: Request):
                 print(f"❌ Pending clarification cancellation failed: {pending_err}")
                 send_whatsapp(sender_phone, "❌ Joojinta way fashilantay. Fadlan mar kale isku day.")
                 return {"status": "pending_clarification_cancel_error"}
-            send_whatsapp(sender_phone, "Waa la joojiyay. Wax deyn ah lama diiwaangelin.")
+            send_whatsapp(
+                sender_phone,
+                deynjir_recovery_menu_message("Waa la joojiyey. Wax deyn ah lama diiwaangelin.")
+            )
             return {"status": "pending_clarification_cancelled"}
         elif clarification_action in {"ADD", "PAY"}:
             try:
@@ -6365,7 +6525,8 @@ async def whatsapp_webhook(request: Request):
                         str(message_text or ""), flags=re.IGNORECASE
                     ))
                     if explicit_search_request:
-                        send_whatsapp(sender_phone, "Ma heli karo qofkan. Hubi magaciisa?")
+                        send_whatsapp(sender_phone, "Ma helin macmiilkaas. Fadlan hubi magaca.")
+                        failed_inserts.append({"name": name, "reason": "Customer search returned no match"})
                     else:
                         print(
                             f"⚠️ Bare-word SEARCH did not match a customer; treating as unrecognized text: "
@@ -6408,16 +6569,18 @@ async def whatsapp_webhook(request: Request):
                             pass
                 nearest_due = min(due_dates).isoformat() if due_dates else None
 
+                SEARCH_DETAIL_SESSIONS[sender_phone] = {
+                    "business_user_id": str(business_user_id),
+                    "customer_name": str(matched_name),
+                    "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+                }
                 message = (
-                    f"🔎 *Natiijada raadinta: {matched_name}*\n\n"
-                    f"💰 Deynta hadhsan: *${total_debt:.2f}*\n"
-                    f"📋 Deyn aan weli la bixin: *{len(active_rows)}*\n"
-                    f"✅ Diiwaanno hore loo bixiyey: *{paid_count}*"
+                    f"🔎 *{matched_name}*\n"
+                    f"💰 Deyn hadhsan: *${total_debt:.2f}*\n\n"
+                    "Ma rabtaa xisaabta macmiilka oo faahfaahsan?\n"
+                    "1️⃣ Haa\n"
+                    "2️⃣ Maya"
                 )
-                if nearest_due:
-                    message += f"\n📅 Ballanta ugu dhow: *{nearest_due}*"
-
-                
                 send_whatsapp(sender_phone, message)
                 
             except Exception as e:
@@ -6843,9 +7006,16 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, success_message)
 
     if failed_inserts:
-        # Specific handlers already explain the failure. Do not send a second,
-        # confusing generic menu after an actionable error.
+        # Keep the specific error already sent, then offer one consistent way
+        # to restart. This applies to debt, payment, search, edit, list, report,
+        # export and other routed actions that did not complete.
         print(f"❌ Transaction failures ({len(failed_inserts)}): {failed_inserts}")
+        send_whatsapp(
+            sender_phone,
+            deynjir_recovery_menu_message(
+                "⚠️ Hawshii si buuxda looma dhammaystirin. Aan kuu fududeeyo tallaabada xigta."
+            )
+        )
     
     return {"status": "success"}
 
