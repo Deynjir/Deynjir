@@ -81,6 +81,7 @@ def deynjir_main_menu():
         "Raadi macmiil – Taabo 4️⃣\n"
         "Ballamaha maanta – Taabo 5️⃣\n"
         "Caawimaad – Taabo 6️⃣\n\n"
+        "Amarro kale: *DHIGAAL Cali $100* ama *UNDO Cali*.\n"
         "Soo qor lambar 1 ilaa 6."
     )
 
@@ -110,7 +111,10 @@ def deynjir_help_message():
         "• Raadi qof: qor *Raadi Cali*\n"
         "• Faahfaahin: qor *FAAHFAAHIN Cali*\n"
         "• Ballamaha: qor *Balamaha Maanta* ama *Balamaha Berri*\n"
-        "• Soo geli sawir/Excel: qor *IMPORT*\n\n"
+        "• Soo geli sawir/Excel: qor *IMPORT*\n"
+        "• Dhigaal macmiil: qor *DHIGAAL Cali $100*\n"
+        "• Hubi dhigaalka: qor *DHIGAAL Cali*\n"
+        "• Ka noqo macaamilkii ugu dambeeyay: qor *UNDO Cali*\n\n"
         "Soo Qor *MENU* marka aad u baahato hagid."
     )
 
@@ -342,6 +346,13 @@ SOMALI UNDERSTANDING (IMPORTANT): Understand the whole sentence, not only exact 
 - "ka siiyay" can mean the shop gave the customer credit; classify as ADD only when the sentence clearly describes money given to that customer as a debt. Do not confuse it with money the customer paid back.
 - Remove grammatical filler (wuu, wuxuu, ayay, waxay, ayaan, baan, buu, bay) from the customer name, but preserve every actual name part.
 - If a sentence says only that a customer has not paid, do not create a transaction. If the direction or amount is unclear, ask a short clarification. Never invent an amount or mark a partial payment as full.
+- Also understand common informal variants and typos: "wuu qaatay", "wuu qaaty", "qaatey", "qaadatay", "qaateen", "wuu soo celiyey", "soo celisay", "lacagtii wuu keenay", "lacag buu soo shubay", "lacagta waan ka qabtay", "wuu iga soo celiyey", and missing/extra spaces. Normalize spelling for intent, but preserve the customer's actual name as written.
+- Debt examples: "Cali maanta 50 buu qaatay", "Cali 50 ayuu iga qaaty", "Cali raashin ayuu ku qaatay 50", "Cali 50 ku dar xisaabtii hore". The last example is an addition to the existing customer's account, not a replacement of the balance.
+- Payment examples: "Cali 20 buu ii keenay", "Cali 20 ayuu soo celiyey", "Cali lacagtii qayb ayuu bixiyey", "Cali 15 ayaan ka qabtay". These are PAY only when the sentence clearly says money was received from the customer.
+- Do not classify "Cali lacag ma keenin", "Cali wali ma bixin", or "Cali ima soo celin" as a payment. A negative statement is not a transaction.
+- PHONE NUMBERS: A phone number is not a money amount. When the user says "Lambarka Cali waa +252...", "Cali numberkiisa +252...", "save Cali phone +252...", or sends "Cali +252...", extract the full customer name and phone number, with amount=null. Never add a debt from a phone-only message.
+- DUE DATES: Understand maanta, caawa, berri/bari, saaka, isniinta, talaadada, arbacada, khamiista, jimcaha, sabtida, axadda, toddobaadka dambe, usbuuca dambe, bisha dambe, and explicit DD/MM/YYYY dates. Resolve weekdays to the next upcoming occurrence after today's date; if the user says "isniinta soo socota", choose the next Monday, not a past date. If uncertain, ask instead of guessing.
+- DESCRIPTIONS: Keep item/reason words such as raashin, bariis, sonkor, shidaal, alaab, adeeg, iyo lacag hormaris as the transaction description; do not absorb them into the customer's name. Description is per transaction.
 
 For each entry, extract: customer_name, amount, promised_date (YYYY-MM-DD), transaction_date (YYYY-MM-DD), phone_number, description. transaction_date is the date the ADD or PAY actually happened when the user explicitly provides it (including labelled notes such as "Taariikhda 06/11/2026"); interpret Somali numeric dates as DD/MM/YYYY. Do not substitute today's date when an explicit transaction date is present. Description is the item/reason text belonging to that specific debt or payment; use null when none is stated.
 IMPORTANT DATE-ONLY EDIT RULE: If a message names an existing customer and gives a new due/promised date but no amount, return action EDIT, set new_date and promised_date to that date, and keep amount and new_amount null. Apply this independently to EVERY customer in a comma-separated or multi-line message. A date's day number is never an amount. Never turn "Xasan 8 Nov" into an $8 transaction.
@@ -942,6 +953,81 @@ def normalize_customer_name(value):
     return " ".join(value.split())
 
 
+def parse_customer_phone_update(message_text):
+    """Parse a clear customer + phone-only message before Gemini.
+
+    Only accepts a 9-15 digit phone token, rejects currency/date/transaction
+    wording, and returns the existing ADD phone-update shape (amount=None).
+    The ADD handler already updates phone_number without creating a debt.
+    """
+    raw = " ".join(str(message_text or "").strip().split())
+    if not raw:
+        return None
+    low = raw.casefold()
+    if re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", low):
+        return None
+    if classify_transaction_direction(raw) in {"ADD", "PAY"}:
+        return None
+    if re.search(r"\b(?:today|tomorrow|maanta|berri|bari|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b", low, re.I):
+        return None
+
+    phone_match = re.search(r"(?<!\w)(\+?\d[\d\s().-]{5,}\d)(?!\w)", raw)
+    if not phone_match:
+        return None
+    phone_raw = phone_match.group(1).strip()
+    digits = re.sub(r"\D", "", phone_raw)
+    if not 9 <= len(digits) <= 15:
+        return None
+    has_phone_context = bool(re.search(
+        r"\b(?:phone|phone\s+number|number|numberka|numberkiisa|numberkeeda|"
+        r"lambarka|lambarkiisa|lambarkeeda|telefoonka|save|update|ku\s+kaydi)\b",
+        low, re.I
+    ))
+    if not phone_raw.startswith("+") and len(digits) < 10 and not has_phone_context:
+        return None
+
+    before = raw[:phone_match.start()].strip(" ,:;-.")
+    after = raw[phone_match.end():].strip(" ,:;-.")
+    # Support both "Cali +252..." and "+252... waa Cali".
+    if before:
+        name_text = before
+    elif after:
+        name_text = after
+    else:
+        return None
+
+    name_text = re.sub(
+        r"^(?:(?:save|set|update|add|ku\s+kaydi|ii\s+keydi|ii\s+geli|lambarka|lambarka\s+macmiilka|numberka|number|phone(?:\s+number)?|telefoonka)\s+)+",
+        "", name_text, flags=re.I
+    )
+    name_text = re.sub(
+        r"\s+(?:waa|weeye|numberkiisa|numberkeeda|lambarkiisa|lambarkeeda|phone|number)$",
+        "", name_text, flags=re.I
+    ).strip(" ,:;-.")
+    name_text = re.sub(r"^(?:waa|weeye)\s+", "", name_text, flags=re.I).strip()
+    name_text = re.sub(r"['’]s$", "", name_text, flags=re.I).strip()
+    if len(name_text) < 2 or len(name_text) > 100 or not re.search(r"[A-Za-z\u0080-\uffff]", name_text):
+        return None
+    # Avoid treating generic phone labels as a customer's name.
+    if normalize_customer_name(name_text) in {"phone", "number", "lambarka", "numberka", "telefoonka"}:
+        return None
+
+    return [{
+        "action": "ADD",
+        "customer_name": name_text,
+        "amount": None,
+        "customer_phone": digits,
+        "new_phone": digits,
+        "promised_date": None,
+        "days_until_due": None,
+        "new_amount": None,
+        "new_date": None,
+        "payment_type": None,
+        "description": None,
+        "_phone_update_only": True,
+    }]
+
+
 def remember_selected_customer(sender_phone, business_user_id, customer_name):
     """Remember a customer briefly for clear, context-dependent follow-up messages."""
     clean_name = str(customer_name or "").strip()
@@ -1217,11 +1303,22 @@ def message_has_explicit_amount_for_name(message_text, customer_name):
 def classify_transaction_direction(message_text):
     """Return ADD/PAY only when the user's wording clearly states direction."""
     text = normalize_customer_name(str(message_text or ""))
+    # Negated statements describe an unpaid/undelivered state, not a payment.
+    # Check these before broad verb stems such as "bixin" or "keenay".
+    negative_transaction_patterns = (
+        r"\b(?:wali\s+)?ma\s+(?:bixin|bixinin|bixinayo|bixinay|bixin|keenin|keenay|soo\s+celin|soo\s+celinayo|soo\s+celinay)\b",
+        r"\b(?:ima|uma)\s+(?:bixin|keenin|soo\s+celin)\b",
+        r"\b(?:bixin\s+maayo|bixin\s+mayso|keenin\s+maayo|soo\s+celin\s+maayo)\b",
+        r"\b(?:ma\s+uusan|ma\s+aysan|ma\s+uu|ma\s+ay)\s+(?:bixin|keenin|soo\s+celin)\b",
+        r"\b(?:not\s+paid|hasn.t\s+paid|didn.t\s+pay|unpaid|payment\s+not\s+received)\b",
+    )
+    if any(re.search(pattern, text, re.I) for pattern in negative_transaction_patterns):
+        return None
     add_patterns = [
         r"\b(?:deyn cusub|dayn cusub|new debt|add debt|added debt)\b",
         r"\b(?:iga\s+qaatay|wuu\s+qaatay|wuxuu\s+qaatay|ayaa\s+qaatay|ayuu\s+qaatay|"
         r"way\s+qaadatay|waxay\s+qaadatay|ayay\s+qaadatay|ayaan\s+qaadatay|"
-        r"qaatey|qaadatay|qaateen|qaadan(?:ayaa|ey| doonaan)?|qaato|qaatay|"
+        r"qaatey|qaadatay|qaateen|qaaty|qaatay|qaadan(?:ayaa|ayo|ey| doonaan)?|qaato|"
         r"dayn\s+qaato|deyn\s+qaato|dayn\s+qaatay|deyn\s+qaatay|"
         r"dayn\s+qaadatay|deyn\s+qaadatay|dayn\s+qaatey|deyn\s+qaatey|"
         r"dayn\s+qaadasho|deyn\s+qaadasho|amaah|"
@@ -1234,8 +1331,8 @@ def classify_transaction_direction(message_text):
         r"ka\s+qabatay|ka\s+qabtay|ka\s+qabteen|ka\s+qabtay)\b",
         r"\b(?:bixiyay|bixiyey|bixisay|bixiyeen|bixiya|bixiyaa|bixiyo|bixin|bixinta|"
         r"bixiyayaa|bixisay|bixiye|bixiyeen|soo\s+celiyay|soo\s+celiyey|"
-        r"soo\s+celisay|soo\s+celiyeen|celiyay|celiyey|celisay|celiyeen|"
-        r"keenay|keentay|ii\s+keenay|ii\s+keentay|ii\s+keeneen|"
+        r"soo\s+celisay|soo\s+celiyeen|soo\s+celiyey|celiyay|celiyey|celisay|celiyeen|"
+        r"keenay|keentay|keeney|ii\s+keenay|ii\s+keentay|ii\s+keeneen|"
         r"soo\s+shubay|soo\s+shubtay|shubay|shubtay|xareeyay|xareysay)\b",
         r"\b(?:lacag\s*bixin(?:ta)?|lacag\s*qabasho|lacag\s+qabtay|"
         r"lacag\s+soo\s+xarootay|lacagtii\s+(?:waa\s+la\s+helay|wuu\s+keenay)|"
@@ -1684,7 +1781,7 @@ def local_fallback_parse(message_text):
         tail = "" if amount_first else raw[amount_matches[0].end():].strip(" .,:;-")
         tail = re.sub(
             r"\b(?:ayuu|wuxuu|wuu|ayaa|ayay|ayaan|waxay|way|buu|bay|iga|"
-            r"qaatay|qaadatay|qaateen|qaatey|qaato|bixiyay|bixiyey|bixisay|"
+            r"qaatay|qaadatay|qaateen|qaatey|qaaty|qaato|bixiyay|bixiyey|bixisay|bixiye|"
             r"celiyay|celiyey|celisay|celiyeen|soo|helay|keenay|keentay|qabatay|qabtay|"
             r"shubay|shubtay|xareeyay|xareysay|ii|ka|lacag|bixin|paid|repaid|amaah|deyn|dayn|cusub|usd|dollars?|dollar)\b",
             " ", tail, flags=re.I
@@ -1710,10 +1807,10 @@ def local_fallback_parse(message_text):
         r"\b(?:ka\s+dhig|kadhig|ka\s+dhigo|wuu|wuxuu|ayuu|ayaa|ayay|ayaan|"
         r"way|waxay|waan|waxaan|iga|buu|bay|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|"
         r"waan\s+ka\s+helay|waxaan\s+ka\s+helay|bixiyay|bixiyey|bixisay|bixiyeen|"
-        r"qaadatay|qaateen|qaadanayaa|qaadaney|qaatey|qaatay|qaato|"
+        r"qaadatay|qaateen|qaadanayaa|qaadaney|qaatey|qaaty|qaatay|qaato|"
         r"ka\s+qabatay|ka\s+qabtay|ka\s+qabteen|qabatay|qabtay|keenay|keentay|"
         r"ii\s+keenay|ii\s+keentay|soo\s+shubay|soo\s+shubtay|shubay|shubtay|"
-        r"celisay|celiyeen|soo|ii|lacag|xareeyay|xareysay|"
+        r"celisay|celiyeen|keeney|bixiye|soo|ii|lacag|xareeyay|xareysay|"
         r"ka\s+siiyay|ka\s+siiyey|u\s+siiyay|u\s+siiyey|"
         r"paid|payment|repaid|iga\s+soo|iga\s+qaatay|wuxuu\s+iga\s+qaatay|"
         r"amaah|deyn\s+ah|deyntii|deynta|oo\s+dhan|added|add)\b",
@@ -3061,15 +3158,23 @@ async def whatsapp_webhook(request: Request):
     sender_phone = str(sender_phone).replace("+", "").split("@")[0].strip()
     owner_phone = str(OWNER_PHONE).replace("+", "").split("@")[0].strip()
 
-    # Do not claim a deposit was recorded until persistent deposit storage and
-    # atomic deposit/use RPCs are available in the database.
-    if re.fullmatch(r"\\s*dhigaal\\s*[.!]?\\s*", str(message_text or ""), re.I):
+    # Resolve UNDO only after the approved business account is known.
+    undo_match = re.fullmatch(
+        r"\s*(?:undo(?:\s+last)?|ka\s+noqo|ka\s+noqo\s+kii\s+ugu\s+dambeeyay|ka\s+noqo\s+tii\s+ugu\s+dambeeysay)(?:\s+(.+?))?\s*[.!]?\s*",
+        str(message_text or ""), re.I
+    )
+
+    # DHIGAAL is handled after the approved business account is resolved,
+    # where the customer can be matched safely before any money is recorded.
+    if re.fullmatch(r"\s*dhigaal\s*[.!]?\s*", str(message_text or ""), re.I):
         send_whatsapp(
             sender_phone,
-            "ℹ️ Lacag-dhigashada DHIGAAL weli lama hawlgelin. "
-            "Waxba lama kaydin; la xiriir maamulka."
+            "💰 *DHIGAAL*\n\n"
+            "Lacag dhigasho: *DHIGAAL Magaca $100*\n"
+            "Hubi haraaga dhigaalka: *DHIGAAL Magaca*\n"
+            "Tusaale: *DHIGAAL Cali $100*"
         )
-        return {"status": "deposit_feature_not_configured"}
+        return {"status": "deposit_usage_help"}
 
     # Owner-only intervention works even if the owner is not a normal shop user.
     admin_command = re.fullmatch(r"\s*(APPROVE|REJECT)\s+PAYMENT\s+([0-9a-fA-F-]{36})\s*", str(message_text or ""), re.I)
@@ -3326,6 +3431,184 @@ async def whatsapp_webhook(request: Request):
             return {"status": "unapproved_user_silenced"}
 
         business_user_id = business_user["id"]
+
+        if undo_match:
+            undo_key = str(undo_match.group(1) or "").strip()
+            if not undo_key:
+                recent = get_recent_selected_customer(sender_phone, business_user_id)
+                undo_key = str((recent or {}).get("customer_name") or "").strip()
+            if not undo_key:
+                send_whatsapp(
+                    sender_phone,
+                    "↩️ Si aad macaamil uga noqoto, qor *UNDO Magaca Macmiilka*.\n"
+                    "Tusaale: *UNDO Cali*. Haddii magaca uu leeyahay diiwaanno badan, isticmaal ID-ga 5-ta xaraf ah."
+                )
+                return {"status": "undo_customer_required"}
+            try:
+                undo_customer = None
+                if re.fullmatch(r"[A-Za-z0-9]{5}", undo_key):
+                    undo_lookup = (
+                        supabase.table("customers")
+                        .select("id, name")
+                        .eq("id", undo_key.upper())
+                        .eq("business_user_id", str(business_user_id))
+                        .eq("is_archived", False)
+                        .limit(1).execute()
+                    )
+                    undo_customer = undo_lookup.data[0] if undo_lookup.data else None
+                if undo_customer is None:
+                    undo_matches = find_debtor_matches(business_user_id, undo_key)
+                    if not undo_matches:
+                        send_whatsapp(sender_phone, f"❌ Lama helin macmiilka *{undo_key}*. Waxba lama beddelin.")
+                        return {"status": "undo_customer_not_found"}
+                    if len(undo_matches) > 1:
+                        options = "\n".join(
+                            f"• {row.get('name')} — ID: `{row.get('id')}`"
+                            for row in undo_matches[:8]
+                        )
+                        send_whatsapp(
+                            sender_phone,
+                            "⚠️ Macmiilkan wuxuu leeyahay diiwaanno badan. Dooro ID-ga saxda ah:\n\n"
+                            f"{options}\n\nTusaale: *UNDO ABC12*"
+                        )
+                        return {"status": "undo_customer_ambiguous"}
+                    undo_customer = undo_matches[0]
+
+                undo_result = supabase.rpc("undo_last_customer_transaction", {
+                    "p_customer_id": str(undo_customer["id"]),
+                    "p_business_user_id": str(business_user_id),
+                }).execute()
+                undo_data = undo_result.data
+                if isinstance(undo_data, list):
+                    undo_data = undo_data[0] if undo_data else None
+                if not isinstance(undo_data, dict) or not undo_data.get("success"):
+                    raise RuntimeError("Database-ku ma xaqiijin ka-noqoshada.")
+                undone_amount = float(undo_data.get("amount") or 0)
+                undone_type = str(undo_data.get("transaction_type") or "").upper()
+                customer_after = undo_data.get("customer") or {}
+                type_so = {
+                    "ADD": "deyn lagu daray",
+                    "PAY": "lacag-bixin",
+                    "DEPOSIT": "dhigaal",
+                }.get(undone_type, "macaamil")
+                credit_restored = undo_data.get("restored_credit_balance")
+                credit_note = (
+                    f"\nHaraaga dhigaalka kadib ka-noqoshada: ${float(credit_restored):.2f}"
+                    if credit_restored is not None else ""
+                )
+                send_whatsapp(
+                    sender_phone,
+                    f"✅ Macaamilkii ugu dambeeyay waa laga noqday.\n\n"
+                    f"Macmiil: *{customer_after.get('name') or undo_customer.get('name')}*\n"
+                    f"Nooca: {type_so}\nLacagta: *${undone_amount:.2f}*\n"
+                    f"Haraaga deynta hadda: *${float(customer_after.get('amount') or 0):.2f}*"
+                    f"{credit_note}\n\nTaariikhda macaamilka waa la hayey si loo helo raad-raac."
+                )
+                return {"status": "undo_completed", "transaction_type": undone_type, "amount": undone_amount}
+            except Exception as undo_error:
+                print(f"❌ UNDO error: {type(undo_error).__name__}: {undo_error}")
+                send_whatsapp(
+                    sender_phone,
+                    "⚠️ Macaamilka lama celin. Waxaa laga yaabaa inuu yahay macaamil hore oo aan lahayn xiriir payment ID, ama haraagu wuu isbeddelay. Waxba lama beddelin."
+                )
+                return {"status": "undo_failed"}
+
+        # Customer deposits are stored separately from debt. Deposits can be
+        # attached by an exact 5-character customer ID or by a unique customer name.
+        dhigaal_text = str(message_text or "").strip()
+        dhigaal_match = re.fullmatch(
+            r"dhigaal\s+(.+?)(?:\s+\$?\s*(\d+(?:[.,]\d{1,2})?))?\s*[.!]?",
+            dhigaal_text,
+            re.I,
+        )
+        if dhigaal_match:
+            customer_key = str(dhigaal_match.group(1) or "").strip()
+            amount_text = dhigaal_match.group(2)
+            try:
+                customer_row = None
+                # A short customer ID is the safest selector when a person has
+                # multiple debt records with the same name.
+                if re.fullmatch(r"[A-Za-z0-9]{5}", customer_key):
+                    id_result = (
+                        supabase.table("customers")
+                        .select("id, name, amount, is_paid")
+                        .eq("id", customer_key.upper())
+                        .eq("business_user_id", str(business_user_id))
+                        .eq("is_archived", False)
+                        .limit(1)
+                        .execute()
+                    )
+                    customer_row = id_result.data[0] if id_result.data else None
+
+                if customer_row is None:
+                    customer_matches = find_debtor_matches(business_user_id, customer_key)
+                    if len(customer_matches) == 0:
+                        send_whatsapp(
+                            sender_phone,
+                            f"❌ Lama helin macmiilka *{customer_key}*. Hubi magaca ama ID-ga macmiilka."
+                        )
+                        return {"status": "dhigaal_customer_not_found"}
+                    if len(customer_matches) > 1:
+                        options = "\n".join(
+                            f"• *{row.get('name')}* — ID: `{row.get('id')}`"
+                            for row in customer_matches[:8]
+                        )
+                        send_whatsapp(
+                            sender_phone,
+                            "⚠️ Macmiilkan wuxuu leeyahay diiwaanno deyn oo badan. "
+                            "Si aan dhigaalka ugu xiro diiwaanka saxda ah, isticmaal ID-ga 5-ta xaraf ah:\n\n"
+                            f"{options}\n\n"
+                            "Tusaale: *DHIGAAL ABC12 $100*"
+                        )
+                        return {"status": "dhigaal_customer_ambiguous"}
+                    customer_row = customer_matches[0]
+
+                if not amount_text:
+                    balance_result = supabase.rpc("get_customer_credit_balance", {
+                        "p_customer_id": str(customer_row["id"]),
+                        "p_business_user_id": str(business_user_id),
+                    }).execute()
+                    balance_data = balance_result.data
+                    if isinstance(balance_data, list):
+                        balance_data = balance_data[0] if balance_data else None
+                    balance = float((balance_data or {}).get("credit_balance") or 0)
+                    send_whatsapp(
+                        sender_phone,
+                        f"💰 *Dhigaalka {customer_row.get('name')}*\n\n"
+                        f"Haraaga dhigaalka: *${balance:.2f}*"
+                    )
+                    return {"status": "dhigaal_balance_checked", "credit_balance": balance}
+
+                deposit_amount = float(amount_text.replace(",", "."))
+                if not math.isfinite(deposit_amount) or deposit_amount <= 0:
+                    raise ValueError("Lacagtu waa inay ka weyn tahay eber.")
+                deposit_result = supabase.rpc("record_customer_credit_deposit", {
+                    "p_customer_id": str(customer_row["id"]),
+                    "p_business_user_id": str(business_user_id),
+                    "p_amount": round(deposit_amount, 2),
+                    "p_description": "DHIGAAL",
+                }).execute()
+                deposit_data = deposit_result.data
+                if isinstance(deposit_data, list):
+                    deposit_data = deposit_data[0] if deposit_data else None
+                if not isinstance(deposit_data, dict) or not deposit_data.get("success"):
+                    raise RuntimeError("Database-ku ma xaqiijin dhigaalka.")
+                send_whatsapp(
+                    sender_phone,
+                    f"✅ *Dhigaal waa la diiwaangeliyey.*\n\n"
+                    f"Macmiil: *{customer_row.get('name')}*\n"
+                    f"Lacagta la dhigay: *${deposit_amount:.2f}*\n"
+                    f"Haraaga dhigaalka: *${float(deposit_data.get('credit_balance') or 0):.2f}*\n\n"
+                    "Marka deyn cusub lagu daro diiwaankan, nidaamku si toos ah ayuu uga isticmaali doonaa dhigaalka."
+                )
+                return {"status": "dhigaal_deposited", "credit_balance": deposit_data.get("credit_balance")}
+            except Exception as dhigaal_error:
+                print(f"❌ DHIGAAL error: {type(dhigaal_error).__name__}: {dhigaal_error}")
+                send_whatsapp(
+                    sender_phone,
+                    "❌ Dhigaalka lama diiwaangelin. Hubi magaca iyo lacagta, kadib mar kale isku day."
+                )
+                return {"status": "dhigaal_error"}
 
         # Resolve a staged balance edit before interpreting the reply as a new command.
         amount_edit_state = AMOUNT_EDIT_SESSIONS.get(sender_phone)
@@ -4617,6 +4900,7 @@ async def whatsapp_webhook(request: Request):
 
     # Explicit customer rename is parsed locally; it must not depend on Gemini.
     rename_request = parse_customer_rename_command(message_text)
+    phone_update_entries = parse_customer_phone_update(message_text)
 
     # Fast read-only command matching: avoid a Gemini request for debt lists.
     fuzzy_list_requested = is_fuzzy_debt_list_command(message_text)
@@ -4648,6 +4932,10 @@ async def whatsapp_webhook(request: Request):
         "when the message is clearly a direct follow-up about that customer. Otherwise ask a clarification. "
         "For read-only requests, recognize natural questions such as 'yaa lacagta igu leh', "
         "'imisa ayaa la iga rabaa', 'ii eeg deynta', and 'yaa ballan leh berri'. "
+        "Recognize Somali weekdays: isniin, talaado, arbaco, khamiis, jimce, sabti, axad; "
+        "also recognize 'toddobaadka dambe/usbuuca dambe' and resolve them relative to today's date. "
+        "If a weekday phrase could mean more than one date, ask one short clarification. "
+        "A phone number (normally 9-15 digits, or 7-15 digits when explicitly labelled as a phone) is never a transaction amount. "
     )
     recent_selected_customer = get_recent_selected_customer(sender_phone, business_user_id)
     contextual_payment_entry = parse_contextual_somali_payment(message_text, recent_selected_customer)
@@ -4692,6 +4980,9 @@ async def whatsapp_webhook(request: Request):
             "new_date": None,
         }]
         print(f"✏️ Explicit customer rename detected: {old_customer_name!r} -> {new_customer_name!r}")
+    elif phone_update_entries:
+        entries = phone_update_entries
+        print(f"📱 Customer phone-only update parsed locally: {entries[0]['customer_name']!r}; skipping Gemini")
     elif forced_transaction_action:
         print(f"🔁 Using saved entries with confirmed action {forced_transaction_action}")
     elif contextual_payment_entry:
@@ -5194,10 +5485,10 @@ async def whatsapp_webhook(request: Request):
                         updated = (supabase.table("customers").update({"phone_number": new_phone})
                                    .eq("business_user_id", business_user_id).eq("is_archived", False).eq("name", matched_name).execute())
                         if updated.data:
-                            send_whatsapp(sender_phone, f"✅ {matched_name} phone number saved: {new_phone}")
+                            send_whatsapp(sender_phone, f"✅ Lambarka *{matched_name}* waa la kaydiyey.\n📱 {new_phone}")
                             successful_inserts.append(entry)
                         else:
-                            send_whatsapp(sender_phone, f"❌ Lambarka {matched_name} lama cusboonaysiin.")
+                            send_whatsapp(sender_phone, f"❌ Lambarka *{matched_name}* lama kaydin. Fadlan mar kale isku day.")
                             failed_inserts.append({"name": name, "reason": "Phone update returned no rows"})
                         continue
                     else:
@@ -5307,11 +5598,19 @@ async def whatsapp_webhook(request: Request):
                             continue
 
                         updated = updated_data
+                        credit_used = float(updated.get("credit_used") or 0)
+                        credit_balance = float(updated.get("credit_balance") or 0)
+                        credit_note = (
+                            f"\n💰 Dhigaal laga isticmaalay: ${credit_used:.2f}"
+                            f"\nHaraaga dhigaalka: ${credit_balance:.2f}"
+                            if credit_used > 0 else ""
+                        )
                         send_whatsapp(
                             sender_phone,
                             f"✅ Deynta {updated['name']} waa la cusboonaysiiyey. "
                             f"Lacagta lagu daray: ${add_amount:.2f}. "
                             f"Haraaga cusub: ${float(updated.get('amount') or 0):.2f}."
+                            f"{credit_note}"
                         )
                         remember_selected_customer(sender_phone, business_user_id, updated.get("name") or name)
                         entry["action"] = "ADJUST"
@@ -5351,6 +5650,11 @@ async def whatsapp_webhook(request: Request):
                     continue
                 created_customer = result.data[0] if isinstance(result.data, list) else result.data
                 remember_selected_customer(sender_phone, business_user_id, (created_customer or {}).get("name") or name)
+                credit_used = float((created_customer or {}).get("credit_used") or 0)
+                if credit_used > 0:
+                    entry["credit_used"] = credit_used
+                    entry["credit_balance"] = float((created_customer or {}).get("credit_balance") or 0)
+                    entry["remaining_balance"] = float((created_customer or {}).get("amount") or 0)
                 successful_inserts.append(entry)
                 
             except Exception as e:
@@ -5938,18 +6242,29 @@ async def whatsapp_webhook(request: Request):
                     if not d.get("is_paid")
                 )
 
-                paid_count = sum(
-                    1 for d in search_matches
-                    if d.get("is_paid")
-                )
+                active_rows = [
+                    d for d in search_matches
+                    if d.get("is_paid") is not True and _safe_money(d.get("amount")) > 0
+                ]
+                paid_count = sum(1 for d in search_matches if d.get("is_paid") is True)
+                due_dates = []
+                for debt_row in active_rows:
+                    raw_due = debt_row.get("promised_date")
+                    if raw_due:
+                        try:
+                            due_dates.append(datetime.strptime(str(raw_due)[:10], "%Y-%m-%d").date())
+                        except (TypeError, ValueError):
+                            pass
+                nearest_due = min(due_dates).isoformat() if due_dates else None
 
                 message = (
-                    f"🔎 *Natiijada raadinta: {matched_name}*\n"
-                    
-                    f"💰 Wadarta deynta hadhsan: *${total_debt:.2f}*\n"
-                    
-                    f"Deyn bixin hore: {paid_count}"
+                    f"🔎 *Natiijada raadinta: {matched_name}*\n\n"
+                    f"💰 Deynta hadhsan: *${total_debt:.2f}*\n"
+                    f"📋 Deyn aan weli la bixin: *{len(active_rows)}*\n"
+                    f"✅ Diiwaanno hore loo bixiyey: *{paid_count}*"
                 )
+                if nearest_due:
+                    message += f"\n📅 Ballanta ugu dhow: *{nearest_due}*"
 
                 
                 send_whatsapp(sender_phone, message)
@@ -6357,10 +6672,21 @@ async def whatsapp_webhook(request: Request):
                 )
                 if entry.get("promised_date"):
                     success_message += f" Ballanta: {entry.get('promised_date')}."
+                if float(entry.get("credit_used") or 0) > 0:
+                    success_message += (
+                        f" Dhigaal laga isticmaalay: ${float(entry.get('credit_used')):.2f}. "
+                        f"Haraaga dhigaalka: ${float(entry.get('credit_balance') or 0):.2f}. "
+                        f"Haraaga deynta: ${float(entry.get('remaining_balance') or 0):.2f}."
+                    )
             else:
                 success_message = "✅ Deymaha waa la diiwaangeliyey: " + "; ".join(
                     f"{entry.get('customer_name') or 'Macmiil'} "
                     f"${float(entry.get('amount') or 0):.2f}"
+                    + (
+                        f" (dhigaal la isticmaalay ${float(entry.get('credit_used') or 0):.2f}; "
+                        f"haraaga dhigaalka ${float(entry.get('credit_balance') or 0):.2f})"
+                        if float(entry.get("credit_used") or 0) > 0 else ""
+                    )
                     for entry in add_entries
                 ) + "."
             send_whatsapp(sender_phone, success_message)
