@@ -3036,7 +3036,7 @@ def _stage_import(admin_phone, entries, import_mode="debt"):
         lines += ["", f"*Wadarta lacagta: ${total:.2f}*", "", "Hubi magacyada iyo lacagaha.",
                   "Haddii ay sax yihiin, soo qor *OK* si lacag-bixinnada loo diiwaangeliyo.",
                   "Haddii kale, soo qor *CANCEL* si loo joojiyo.",
-                  "", "Lacagaha waxaa laga jarayaa deymaha hadda jira."]
+                  "", "Lacagta waxaa laga jarayaa deymaha hadda jira."]
     else:
         lines = ["📋 *HORDHACA DEYNTA LA DIIWAANGELINAYO*", f"Tirada macaamiisha: {len(entries)}", ""]
         for i, item in enumerate(entries, 1):
