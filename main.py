@@ -85,17 +85,11 @@ def deynjir_main_menu():
     )
 
 def deynjir_unrecognized_message():
-    """One concise menu prompt for text the bot cannot understand."""
+    """One short fallback; the active guided menu accepts the numeric choices."""
     return (
-        "Qoraalkaaga ma fahmin.\n\n"
-        "Fadlan raac tilmaamahan?\n\n"
-        "1️⃣ Deyn cusub\n"
-        "2️⃣ Lacag bixin\n"
-        "3️⃣ Eeg liiska daynta\n"
-        "4️⃣ Raadi macmiil\n"
-        "5️⃣ Ballamaha maanta\n"
-        "6️⃣ Caawimaad\n\n"
-        "Soo qor lambar 1 ilaa 6."
+        "Qoraalkaaga ma fahmin. Fadlan dooro: "
+        "1️⃣ Deyn cusub, 2️⃣ Lacag-bixin, 3️⃣ Liiska daynta, "
+        "4️⃣ Raadi macmiil, 5️⃣ Ballamaha, 6️⃣ Caawimaad."
     )
 
 
@@ -869,6 +863,69 @@ def build_statement_pdf(customer_name, debts, payments_by_debt, total_paid, tota
     fitted = KeepInFrame(doc.width, doc.height, story, mode="shrink")
     doc.build([fitted])
     return buffer.getvalue()
+
+
+def send_customer_statement_pdf(sender_phone, business_user_id, customer_name, business_name=None):
+    """Generate and send the customer's detailed statement PDF; never changes data."""
+    history_matches = find_debtor_matches(
+        business_user_id, customer_name, include_archived=True
+    )
+    if not history_matches:
+        return False
+
+    distinct_names = {
+        normalize_customer_name(row.get("name"))
+        for row in history_matches
+    }
+    if len(distinct_names) != 1:
+        print(
+            "⚠️ Statement PDF not sent because customer name is ambiguous: "
+            f"{customer_name!r}"
+        )
+        return False
+
+    customer_ids = [
+        row.get("id") for row in history_matches if row.get("id") is not None
+    ]
+    payment_rows = []
+    if customer_ids:
+        result = (
+            supabase.table("payments")
+            .select("amount, paid_at, customer_id")
+            .eq("business_user_id", str(business_user_id))
+            .in_("customer_id", customer_ids)
+            .order("paid_at")
+            .execute()
+        )
+        payment_rows = result.data or []
+
+    payments_by_debt = {}
+    for payment in payment_rows:
+        payments_by_debt.setdefault(str(payment.get("customer_id")), []).append(payment)
+
+    total_paid = sum(float(row.get("amount") or 0) for row in payment_rows)
+    total_balance = sum(
+        max(float(row.get("amount") or 0), 0.0)
+        for row in history_matches
+    )
+    canonical_name = history_matches[0].get("name") or customer_name
+    pdf_bytes = build_statement_pdf(
+        canonical_name,
+        history_matches,
+        payments_by_debt,
+        total_paid,
+        total_balance,
+        business_name,
+    )
+    safe_filename = re.sub(r"[^A-Za-z0-9_-]+", "_", str(canonical_name))
+    return send_whatsapp_file(
+        sender_phone,
+        f"daynjir_statement_{safe_filename}.pdf",
+        pdf_bytes,
+        "application/pdf",
+        f"📄 PDF — Xisaabta {canonical_name}",
+    )
+
 
 OWNER_PHONE = os.getenv("OWNER_PHONE", "").lstrip("+").strip()
 # Required for /cron/* endpoints: set a long random CRON_SECRET and send it as
@@ -3003,6 +3060,16 @@ async def whatsapp_webhook(request: Request):
     # Normalize sender; GREEN-API chat IDs may include "@c.us".
     sender_phone = str(sender_phone).replace("+", "").split("@")[0].strip()
     owner_phone = str(OWNER_PHONE).replace("+", "").split("@")[0].strip()
+
+    # Do not claim a deposit was recorded until persistent deposit storage and
+    # atomic deposit/use RPCs are available in the database.
+    if re.fullmatch(r"\\s*dhigaal\\s*[.!]?\\s*", str(message_text or ""), re.I):
+        send_whatsapp(
+            sender_phone,
+            "ℹ️ Lacag-dhigashada DHIGAAL weli lama hawlgelin. "
+            "Waxba lama kaydin; la xiriir maamulka."
+        )
+        return {"status": "deposit_feature_not_configured"}
 
     # Owner-only intervention works even if the owner is not a normal shop user.
     admin_command = re.fullmatch(r"\s*(APPROVE|REJECT)\s+PAYMENT\s+([0-9a-fA-F-]{36})\s*", str(message_text or ""), re.I)
@@ -5242,11 +5309,9 @@ async def whatsapp_webhook(request: Request):
                         updated = updated_data
                         send_whatsapp(
                             sender_phone,
-                            f"✅ Lacag ayaa lagu daray deyntii hore!\n\n"
-                            f"👤 Macmiilka: {updated['name']}\n"
-                            f"➕ Lacag lagu daray: ${add_amount:.2f}\n"
-                            f"💵 Deynta cusub: ${float(updated.get('amount') or 0):.2f}\n"
-                            f"📅 Ballanta: {updated.get('promised_date') or 'lama gelin'}"
+                            f"✅ Deynta {updated['name']} waa la cusboonaysiiyey. "
+                            f"Lacagta lagu daray: ${add_amount:.2f}. "
+                            f"Haraaga cusub: ${float(updated.get('amount') or 0):.2f}."
                         )
                         remember_selected_customer(sender_phone, business_user_id, updated.get("name") or name)
                         entry["action"] = "ADJUST"
@@ -5289,8 +5354,13 @@ async def whatsapp_webhook(request: Request):
                 successful_inserts.append(entry)
                 
             except Exception as e:
+                print(f"❌ Debt registration error for {name!r}: {type(e).__name__}: {e}")
+                send_whatsapp(
+                    sender_phone,
+                    f"❌ Deynta {name} lama diiwaangelin. Fadlan hubi xogta oo mar kale isku day."
+                )
                 failed_inserts.append({"name": name, "reason": str(e)})
-        
+
         elif action == "PAY":
             try:
                 payment_amount = entry.get("amount")
@@ -5371,11 +5441,33 @@ async def whatsapp_webhook(request: Request):
                     continue
 
                 if payment_amount - current_balance > 0.009:
+                    # Send the detailed customer statement first. This is read-only:
+                    # an overpayment is never saved as a normal payment.
+                    try:
+                        pdf_sent = send_customer_statement_pdf(
+                            sender_phone,
+                            business_user_id,
+                            debtor.get("name") or name,
+                            business_user.get("name"),
+                        )
+                        if not pdf_sent:
+                            print(
+                                "⚠️ Overpayment statement PDF could not be sent for "
+                                f"customer={debtor.get('name') or name!r}"
+                            )
+                    except Exception as statement_error:
+                        print(
+                            "⚠️ Overpayment statement PDF generation failed: "
+                            f"{type(statement_error).__name__}: {statement_error}"
+                        )
+
                     send_whatsapp(
                         sender_phone,
-                        f"⚠️ {debtor['name']} haraaga deyntiisu waa ${current_balance:.2f}, "
-                        f"laakiin waxaad sheegtay ${payment_amount:.2f}. Lacag-bixinta lama diiwaangelin "
-                        "si aan haraaga uga dhigin tiro taban. Hubi lacagta oo mar kale dir."
+                        f"⚠️ Wadarta deynta macmiilkan ee nidaamka ku jirta waa "
+                        f"${current_balance:.2f}, adiguna waxaad soo qortay in laga jaro "
+                        f"${payment_amount:.2f}. Fadlan sax lacagta si aan haraaga looga "
+                        "dhigin tiro taban. Haddii aad ula jeeddo lacag uu sii dhiganayo, "
+                        "soo qor *DHIGAAL*."
                     )
                     continue
                 actual_payment = round(payment_amount, 2)
@@ -5924,53 +6016,27 @@ async def whatsapp_webhook(request: Request):
                     )
                     total_paid = sum(float(payment.get("amount") or 0) for payment in payment_rows)
 
-                    # Transaction-level detail is visible only through HISTORY /
-                    # FAAHFAAHIN. Ordinary lists and searches never include it.
-                    transaction_result = (
-                        supabase.table("customer_transactions")
-                        .select("transaction_type, amount, description, created_at")
-                        .eq("business_user_id", business_user_id)
-                        .in_("customer_id", customer_ids)
-                        .order("created_at")
-                        .execute()
-                    )
-                    transaction_rows = transaction_result.data or []
-
-                    lines = [
-                        f"📒 *FAAHFAAHINTA XISAABTA: {history_matches[0].get('name', name)}*",
-                        "",
-                    ]
-
-                    if transaction_rows:
-                        for transaction in transaction_rows:
-                            transaction_type = str(transaction.get("transaction_type") or "").upper()
-                            label = "Deyn cusub" if transaction_type == "ADD" else "Lacag-bixin"
-                            sign = "+" if transaction_type == "ADD" else "-"
-                            amount_value = float(transaction.get("amount") or 0)
-                            transaction_date_value = str(transaction.get("created_at") or "")[:10] or "Taariikh lama hayo"
-                            detail = str(transaction.get("description") or "-").strip() or "-"
-                            lines.append(
-                                f"• {transaction_date_value} — {label}: {sign}${amount_value:.2f}\n"
-                                f"  Faahfaahin: {detail}"
-                            )
-                    else:
-                        lines.append("Weli ma jiraan macaamillo faahfaahsan.")
-
-                    lines.extend([
-                        "",
-                        "━━━━━━━━━━━━━━",
-                        f"💵 *Wadarta lacagta la bixiyay:* ${total_paid:.2f}",
-                        f"📌 *Wadarta hadhaaga deynta:* ${total_balance:.2f}",
-                    ])
-
-                    message = "\n".join(lines)
-
-                    if len(message) > 6000:
-                        message = (
-                            message[:5850]
-                            + "\n\n… Liiska waa la soo gaabiyay; "
-                            "macmiilku wuxuu leeyahay diiwaanno badan."
+                    original_total = 0.0
+                    for debt in history_matches:
+                        debt_id = str(debt.get("id"))
+                        debt_payments = payments_by_debt.get(debt_id, [])
+                        paid_for_debt = sum(
+                            float(payment.get("amount") or 0)
+                            for payment in debt_payments
                         )
+                        current_amount = max(float(debt.get("amount") or 0), 0.0)
+                        stored_original = debt.get("original_amount")
+                        if stored_original is None:
+                            stored_original = current_amount + paid_for_debt
+                        original_total += max(float(stored_original or 0), current_amount)
+
+                    matched_display_name = history_matches[0].get("name", name)
+                    message = (
+                        f"📒 *Xisaabta {matched_display_name}:* "
+                        f"Wadarta deynta ${original_total:.2f}, "
+                        f"lacagta uu bixiyay ${total_paid:.2f}, "
+                        f"haraaga hadda ${total_balance:.2f}."
+                    )
 
                     matched_customer_name = history_matches[0].get(
                         "name",
@@ -6286,29 +6352,23 @@ async def whatsapp_webhook(request: Request):
             if len(add_entries) == 1:
                 entry = add_entries[0]
                 success_message = (
-                    "✅ *Deyn cusub waa la diiwaangeliyey!*\n\n"
-                    f"👤 Macmiilka: *{entry.get('customer_name') or '—'}*\n"
-                    f"💵 Lacagta: *${float(entry.get('amount') or 0):.2f}*\n"
-                    f"📱 Telefoon: *{entry.get('customer_phone') or entry.get('new_phone') or 'Lama sheegin'}*\n"
-                    f"📅 Ballanta: *{entry.get('promised_date') or 'Lama sheegin'}*\n"
-                    f"🗓️ Taariikhda: *{entry.get('transaction_date') or 'Maanta'}*"
+                    f"✅ Deynta {entry.get('customer_name') or 'macmiilka'} "
+                    f"waa la diiwaangeliyey: ${float(entry.get('amount') or 0):.2f}."
                 )
+                if entry.get("promised_date"):
+                    success_message += f" Ballanta: {entry.get('promised_date')}."
             else:
-                success_message = f"""✅ Deymahan waa la keydiyay!
-
-"""
-                for entry in add_entries:
-                    success_message += f"""👤 {entry['customer_name']}: ${entry['amount']} - {entry['promised_date']}
-"""
-            
+                success_message = "✅ Deymaha waa la diiwaangeliyey: " + "; ".join(
+                    f"{entry.get('customer_name') or 'Macmiil'} "
+                    f"${float(entry.get('amount') or 0):.2f}"
+                    for entry in add_entries
+                ) + "."
             send_whatsapp(sender_phone, success_message)
 
     if failed_inserts:
-        # Keep detailed failure reasons in server logs only. Never expose internal
-        # parser/database messages such as "Unknown: No name" to WhatsApp users.
+        # Specific handlers already explain the failure. Do not send a second,
+        # confusing generic menu after an actionable error.
         print(f"❌ Transaction failures ({len(failed_inserts)}): {failed_inserts}")
-        activate_guided_menu(sender_phone)
-        send_whatsapp(sender_phone, deynjir_unrecognized_message())
     
     return {"status": "success"}
 
