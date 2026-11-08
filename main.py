@@ -93,11 +93,14 @@ def deynjir_main_menu():
 def deynjir_unrecognized_message():
     """One short fallback; the active guided menu accepts the numeric choices."""
     return (
-        "Qoraalkaaga ma fahmin. Fadlan dooro: "
-        "1️⃣ Deyn cusub, 2️⃣ Lacag-bixin, 3️⃣ Liiska daynta, "
-        "4️⃣ Raadi macmiil, 5️⃣ Ballamaha, 6️⃣ Caawimaad."
+        "Ma Fahmin, Fadlan Raac tilmaamahan: "
+        "Deyn cusub – Taabo 1️⃣\n"
+        "Lacag bixin – Taabo 2️⃣\n"
+        "liiska daynta – Taabo 3️⃣\n"
+        "Raadi macmiil – Taabo 4️⃣\n"
+        "Ballamaha maanta – Taabo 5️⃣\n"
+        "Caawimaad – Taabo 6️⃣\n\n"
     )
-
 
 def activate_guided_menu(sender_phone):
     """Make the next numeric reply a valid choice after showing the action menu."""
@@ -6431,7 +6434,7 @@ async def whatsapp_webhook(request: Request):
                 if not history_matches:
                     send_whatsapp(
                         sender_phone,
-                        f"❌ Taariikh looma helin macmiilka {name}."
+                        f"❌ {name} Kuma jiro Liiska Deynta."
                     )
 
                 elif len({normalize_customer_name(d.get("name")) for d in history_matches}) > 1:
