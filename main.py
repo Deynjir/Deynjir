@@ -4566,6 +4566,45 @@ async def whatsapp_webhook(request: Request):
             # A different message starts a new request; it must not be swallowed.
             SEARCH_DETAIL_SESSIONS.pop(sender_phone, None)
 
+    # Convert a conversational "yes" into a real guided debt-entry session.
+    # An AI-generated offer cannot create workflow state by itself, so detect
+    # the preceding offer and explicitly start the deterministic guided flow.
+    conversation_state = CONVERSATION_SESSIONS.get(str(sender_phone), {})
+    conversation_history = list(conversation_state.get("history") or [])
+    last_model_message = next(
+        (
+            str(turn.get("text") or "").strip()
+            for turn in reversed(conversation_history)
+            if turn.get("role") == "model" and str(turn.get("text") or "").strip()
+        ),
+        "",
+    )
+    affirmative_reply = normalize_customer_name(guided_text).strip(" .!?؟") in {
+        "haa", "h", "1", "yes", "y", "ok", "haye", "waa hagaag", "sax"
+    }
+    last_model_normalized = normalize_customer_name(last_model_message)
+    previous_offer_is_new_debt = bool(
+        re.search(
+            r"(?:rabtaa.{0,90}diiwaangelin.{0,40}deyn cusub|"
+            r"diiwaangelin.{0,40}deyn cusub.{0,90}rabtaa|"
+            r"rabtaa.{0,90}deyn cusub)",
+            last_model_normalized,
+            re.I,
+        )
+    )
+    if not guided and affirmative_reply and previous_offer_is_new_debt:
+        CONVERSATION_SESSIONS.pop(str(sender_phone), None)
+        GUIDED_SESSIONS[sender_phone] = {
+            "stage": "debt_name",
+            "transaction_type": "debt",
+            "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+        }
+        send_whatsapp(
+            sender_phone,
+            "Hagaag. Fadlan ii qor magaca macmiilka deynta lagu leeyahay."
+        )
+        return {"status": "guided_debt_started_from_conversation"}
+
     # First-time users and confused shopkeepers receive one short explanation.
     if is_somali_confusion_request(guided_text):
         GUIDED_SESSIONS.pop(sender_phone, None)
@@ -4667,7 +4706,17 @@ async def whatsapp_webhook(request: Request):
         guided["customer_name"] = guided_text.strip()
         guided["stage"] = "debt_amount" if guided.get("stage") == "debt_name" else "payment_amount"
         guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-        send_whatsapp(sender_phone, f"Immisa dollar?\n\nQofka: *{guided['customer_name']}*\nTusaale: *50* ama *$50*.")
+        if guided.get("stage") == "debt_amount":
+            amount_prompt = (
+                f"Immisa lacag ah ayaa *{guided['customer_name']}* lagu leeyahay?\n\n"
+                "Qor lacagta keliya, tusaale: *$33*."
+            )
+        else:
+            amount_prompt = (
+                f"Immisa dollar ayuu *{guided['customer_name']}* bixiyey?\n\n"
+                "Qor lacagta keliya, tusaale: *$50*."
+            )
+        send_whatsapp(sender_phone, amount_prompt)
         return {"status": "guided_amount_requested"}
 
     if (
