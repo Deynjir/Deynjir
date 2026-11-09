@@ -118,8 +118,11 @@ def deynjir_recovery_menu_message(intro=None):
 
 
 def deynjir_unrecognized_message():
-    """Use the same concise recovery menu for unsupported messages."""
-    return deynjir_recovery_menu_message("❓ *Waan fahmi waayay fariintaada.*")
+    """Short natural fallback that guides the user without dumping a menu."""
+    return (
+        "Waan fahmi waayay fariintaada. Ma rabtaa inaad diiwaangeliso deyn cusub, "
+        "lacag-bixin, eegto liiska deymaha, mise raadiso macmiil? Waxba lama beddelin."
+    )
 
 
 def activate_guided_menu(sender_phone):
@@ -172,6 +175,7 @@ def is_somali_confusion_request(message_text):
         # Accept natural variants/typos such as isticmaalmo, isticmaalain, isticmalin.
         r"\b(?:anigu\s+)?(?:horay|hore)\s+uma\s+istic\w*\b",
         r"\b(?:anigu\s+)?(?:waligay|weligay)\s+ma\s+istic\w*\b",
+        r"\b(?:anigu\s+)?ma\s+istic\w*\b",
         r"\bmarkii\s+ugu\s+horraysay\s+ayaan\s+istic\w*\b",
         r"\b(?:waxba\s+kama\s+fahmin|ma\s+fahmin|ma\s+garanayo)\b",
         r"\bsidee\s+(?:loo\s+)?istic\w*\b",
@@ -634,6 +638,10 @@ HOW TO RESPOND:
 - Answer only what the user asked. Do not repeat the user's question, introduce yourself again, list features, or add examples unless needed.
 - If a user is new, give just one simple next step and at most one short example.
 - If confused or frustrated, acknowledge briefly and give one helpful next step. No menus.
+- If the user says "haye", "ok", "okay", "waa hagaag", "mahadsanid", or another acknowledgement, reply naturally and briefly. Do not start a new debt/payment workflow unless the user clearly asks.
+- After a debt or payment is successfully recorded, do not assume the user wants to record another one. A simple acknowledgement means acknowledge and wait.
+- When describing money owed to the shop, use natural wording such as "lacagta lagu leeyahay" or "deynta lagu leeyahay"; avoid reversing the shopkeeper/customer perspective.
+- If the user's intent is unclear, ask one short question. Do not invent a transaction or turn an acknowledgement into ADD/PAY.
 - If the user says no activity happened, acknowledge briefly; do not invent or claim database facts.
 - Do not claim that a debt/payment was saved. Python handles all financial writes and confirmations.
 - Do not invent balances, customer names, counts, payment records, due dates, or capabilities.
@@ -745,6 +753,36 @@ CONVERSATION CONTINUITY:
                 "expires_at": now + CONVERSATION_SESSION_TTL,
             }
         return fallback
+
+
+def remember_conversation_outcome(sender_phone, user_message, bot_message):
+    """Keep the latest committed result as context for short natural follow-ups."""
+    key = str(sender_phone)
+    now = datetime.now(timezone.utc)
+    previous = CONVERSATION_SESSIONS.get(key, {})
+    history = list(previous.get("history") or [])
+    user_text = str(user_message or "").strip()[:1500]
+    bot_text = str(bot_message or "").strip()[:220]
+    if user_text:
+        history.append({"role": "user", "text": user_text})
+    if bot_text:
+        history.append({"role": "model", "text": bot_text})
+    CONVERSATION_SESSIONS[key] = {
+        "history": history[-8:],
+        "expires_at": now + CONVERSATION_SESSION_TTL,
+    }
+
+
+def is_simple_acknowledgement(message_text):
+    """Recognize brief acknowledgements without treating them as new transactions."""
+    text = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
+    return text in {
+        "haye", "haaaye", "ok", "okay", "oke", "wa hagaag", "waa hagaag",
+        "hagaag", "sax", "fiican", "mahadsanid", "mahadsanidiin",
+        "haa", "yes", "yep", "maya", "no", "nah",
+        "thanks", "thank you", "thx", "noted", "understood", "alright",
+        "good", "waa sax", "waa hagaag mahadsanid",
+    }
 
 
 def is_contextual_followup(message_text, sender_phone):
@@ -1031,11 +1069,17 @@ def _process_pending_payment_confirmation(pending_id, actor_phone, admin=False):
             "status": "confirmed",
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", str(pending_id)).eq("status", "processing").execute()
-        return True, (
+        success_text = (
             f"✅ Lacag-bixinta waa la diiwaangeliyey.\n"
             f"{rpc_data.get('name') or pending.get('customer_name')}: ${amount:.2f}\n"
             f"Baaqiga: ${float(rpc_data.get('amount') or 0):.2f}"
         )
+        remember_conversation_outcome(
+            transaction_sender,
+            pending.get("original_message") or f"{pending.get('customer_name')} ${amount}",
+            success_text,
+        )
+        return True, success_text
     except Exception as exc:
         print(f"❌ Pending payment confirmation failed: {type(exc).__name__}: {exc}")
         if payment_rpc_succeeded:
@@ -4623,9 +4667,17 @@ async def whatsapp_webhook(request: Request):
         send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "system_question_answered"}
 
+    # Acknowledgements are not new financial instructions. Keep the reply short
+    # and do not restart ADD/PAY after a completed transaction.
+    if not guided and is_simple_acknowledgement(guided_text):
+        short_ack_reply = "Haye, waan ku fahmay. Haddii aad hawl kale hayso, ii sheeg."
+        remember_conversation_outcome(sender_phone, guided_text, short_ack_reply)
+        send_whatsapp(sender_phone, short_ack_reply)
+        return {"status": "acknowledgement_answered"}
+
     # Continue a recent natural conversation instead of sending the recovery menu.
     # Explicit financial commands and amounts are excluded by is_contextual_followup.
-    if is_contextual_followup(guided_text, sender_phone):
+    if not guided and is_contextual_followup(guided_text, sender_phone):
         fallback_reply = "Waan ku fahmay. Qaybtee ayaad rabtaa inaan kuu sii sharaxo?"
         reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
         send_whatsapp(sender_phone, reply or fallback_reply)
@@ -4649,7 +4701,7 @@ async def whatsapp_webhook(request: Request):
             "transaction_type": action,
             "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
         }
-        prompt = "Magaca qofka daynta qaatay?" if action == "debt" else "Magaca qofka lacagta bixiyey?"
+        prompt = "Magaca macmiilka deynta lagu leeyahay?" if action == "debt" else "Magaca macmiilka lacagta bixiyey?"
         send_whatsapp(sender_phone, prompt + "\n\nQor *JOOJI* haddii aad rabto inaad ka baxdo.")
         return {"status": f"guided_{action}_started"}
 
@@ -4667,7 +4719,7 @@ async def whatsapp_webhook(request: Request):
             guided["stage"] = "debt_name"
             guided["transaction_type"] = "debt"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-            send_whatsapp(sender_phone, "Magaca qofka daynta qaatay?\n\nQor *JOOJI* si aad uga baxdo.")
+            send_whatsapp(sender_phone, "Magaca macmiilka deynta lagu leeyahay?\n\nQor *JOOJI* si aad uga baxdo.")
             return {"status": "guided_debt_name_requested"}
         if choice == "2":
             guided["stage"] = "payment_name"
@@ -4805,7 +4857,7 @@ async def whatsapp_webhook(request: Request):
             guided.pop("customer_name", None)
             guided.pop("amount", None)
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-            prompt = "Magaca qofka daynta qaatay?" if transaction_type == "debt" else "Magaca qofka lacagta bixiyey?"
+            prompt = "Magaca macmiilka deynta lagu leeyahay?" if transaction_type == "debt" else "Magaca macmiilka lacagta bixiyey?"
             send_whatsapp(sender_phone, prompt)
             return {"status": "guided_customer_name_required"}
         if transaction_type not in {"debt", "payment"}:
@@ -6127,7 +6179,7 @@ async def whatsapp_webhook(request: Request):
                 }
                 send_whatsapp(
                     sender_phone,
-                    f"{name}, lacag intee le'eg ayuu qaatay ama bixiyay?\n\n"
+                    f"{name}, immisa lacag ah ayaa lagu leeyahay ama uu bixiyey?\n\n"
                     "Qor lacagta keliya, tusaale: *$4*. Waxba lama diiwaangelin weli. "
                     "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
                 )
@@ -6180,7 +6232,7 @@ async def whatsapp_webhook(request: Request):
                     }
                     send_whatsapp(
                         sender_phone,
-                        f"{name}, lacag intee le'eg ayuu qaatay?\n\n"
+                        f"{name}, immisa lacag ah ayaa lagu leeyahay?\n\n"
                         "Qor lacagta keliya, tusaale: *$4*. Waxba lama diiwaangelin weli. "
                         "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
                     )
@@ -7411,6 +7463,7 @@ async def whatsapp_webhook(request: Request):
                     for entry in add_entries
                 ) + "."
             send_whatsapp(sender_phone, success_message)
+            remember_conversation_outcome(sender_phone, message_text, success_message)
 
     if failed_inserts:
         # Keep the specific error already sent, then offer one consistent way
