@@ -91,8 +91,7 @@ def deynjir_main_menu():
         "Raadi macmiil – Taabo 4️⃣\n"
         "Balanta maanta – Taabo 5️⃣\n"
         "Caawimaad – Taabo 6️⃣\n\n"
-        "Amarro kale: *DHIGAAL Cali $100* ama *UNDO Cali*.\n"
-        "Soo qor lambar 1 ilaa 6."
+        "Ka Dooro 1 ilaa 6."
     )
 
 def deynjir_recovery_menu_message(intro=None):
