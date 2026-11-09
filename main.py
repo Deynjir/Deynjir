@@ -91,7 +91,8 @@ def deynjir_main_menu():
         "Raadi macmiil – Taabo 4️⃣\n"
         "Balanta maanta – Taabo 5️⃣\n"
         "Caawimaad – Taabo 6️⃣\n\n"
-        "Ka Dooro 1 ilaa 6."
+        "Amarro kale: *DHIGAAL Cali $100* ama *UNDO Cali*.\n"
+        "Soo qor lambar 1 ilaa 6."
     )
 
 def deynjir_recovery_menu_message(intro=None):
@@ -1095,6 +1096,9 @@ def _process_pending_payment_confirmation(pending_id, actor_phone, admin=False):
             f"{rpc_data.get('name') or pending.get('customer_name')}: ${amount:.2f}\n"
             f"Baaqiga: ${float(rpc_data.get('amount') or 0):.2f}"
         )
+        if ONBOARDING_SESSIONS.get(transaction_sender, {}).get("stage") == "first_successful_action":
+            success_text += "\n\n🎉 Bilow fiican! Deynjir wuxuu kaa caawin doonaa la socodka deymahaaga."
+            ONBOARDING_SESSIONS.pop(transaction_sender, None)
         remember_conversation_outcome(
             transaction_sender,
             pending.get("original_message") or f"{pending.get('customer_name')} ${amount}",
@@ -2481,9 +2485,29 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
         if normalized:
             stored_names.setdefault(normalized, display)
 
-    # First accept an exact full-name phrase. If the customer typed a small
-    # spelling variation (e.g. MAT AAN vs MATAN), compare same-length word
-    # windows from the original message against stored names.
+    # First resolve literal stored-name phrases. If both a short name and a
+    # longer name occur as substrings (e.g. LOW and IIDLE LOW), choose the
+    # longest exact phrase. If two different names of the same longest length
+    # are literally present, leave the choice ambiguous.
+    exact_candidates = [
+        (len(normalized.split()), len(normalized), display, normalized)
+        for normalized, display in stored_names.items()
+        if f" {normalized} " in normalized_message
+    ]
+    if exact_candidates:
+        longest_words = max(item[0] for item in exact_candidates)
+        longest = [item for item in exact_candidates if item[0] == longest_words]
+        longest_chars = max(item[1] for item in longest)
+        longest = [item for item in longest if item[1] == longest_chars]
+        unique_exact = {item[3]: item[2] for item in longest}
+        if len(unique_exact) == 1:
+            resolved = next(iter(unique_exact.values()))
+            print(f"🔎 Recovered longest exact debtor name from original message: {ai_name!r} -> {resolved!r}")
+            return resolved
+        return None
+
+    # If the customer typed a small spelling variation (e.g. MAT AAN vs MATAN),
+    # compare same-length word windows from the original message against names.
     message_parts = normalize_customer_name(message_text).split()
     requested_parts = normalize_customer_name(ai_name).split()
     candidates = []
@@ -2492,16 +2516,13 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
         stored_parts = normalized.split()
         if not stored_parts:
             continue
-        if f" {normalized} " in normalized_message:
-            score = 1.0
-        else:
-            # Compare contiguous phrase windows of the same word count. This
-            # avoids treating a shared token like CALI as a full-name match.
-            windows = [
-                " ".join(message_parts[i:i + len(stored_parts)])
-                for i in range(max(0, len(message_parts) - len(stored_parts) + 1))
-            ]
-            score = max((_name_similarity(window, normalized) for window in windows), default=0.0)
+        # Compare contiguous phrase windows of the same word count. This
+        # avoids treating a shared token like CALI as a full-name match.
+        windows = [
+            " ".join(message_parts[i:i + len(stored_parts)])
+            for i in range(max(0, len(message_parts) - len(stored_parts) + 1))
+        ]
+        score = max((_name_similarity(window, normalized) for window in windows), default=0.0)
 
         has_related_token = any(
             _token_match_score(req, stored) >= 0.78
@@ -3493,24 +3514,44 @@ async def whatsapp_webhook(request: Request):
     message_data = data.get("messageData", {})
     type_message = message_data.get("typeMessage")
 
+    # Gate every non-text media type before any reply, download, import-session
+    # lookup, or AI processing. Unknown/pending/rejected senders stay silent.
+    media_message_types = {
+        "audioMessage", "pttMessage", "voiceMessage", "voiceNoteMessage",
+        "documentMessage", "imageMessage",
+    }
+    if type_message in media_message_types:
+        try:
+            media_user_result = (
+                supabase.table("business_users")
+                .select("id, approval_status")
+                .eq("phone_number", sender_phone)
+                .limit(1)
+                .execute()
+            )
+            media_user = media_user_result.data[0] if media_user_result.data else None
+            media_status = str((media_user or {}).get("approval_status") or "").casefold()
+            if not media_user or media_status != "approved":
+                ONBOARDING_SESSIONS.pop(sender_phone, None)
+                print(
+                    f"🔕 UNAPPROVED MEDIA SILENCED: phone={sender_phone}, "
+                    f"type={type_message}, status={media_status or 'not_registered'}"
+                )
+                return {"status": "unapproved_user_silenced"}
+        except Exception as media_approval_error:
+            # Fail closed: do not process or respond to media if approval
+            # cannot be verified from the database.
+            print(
+                f"⚠️ Media approval lookup failed; media ignored: "
+                f"{type(media_approval_error).__name__}: {media_approval_error}"
+            )
+            return {"status": "media_approval_check_failed"}
+
     # Voice notes/audio are intentionally not transcribed or sent to Gemini.
     if type_message in {"audioMessage", "pttMessage", "voiceMessage", "voiceNoteMessage"}:
-        send_whatsapp(sender_phone, "Fadlan Qoraal soo qor.")
+        send_whatsapp(sender_phone, "Fadlan qoraal soo qor.")
         return {"status": "audio_not_supported"}
 
-    message_text = ""
-        
-    sender_data = data.get("senderData", {})
-    sender_chat_id = sender_data.get("chatId")
-    if not sender_chat_id:
-        return {"status": "no_chat_id"}
-        
-    sender_phone = sender_chat_id.split("@")[0]
-    print(f"🔍 SENDER PHONE: {sender_phone}")
-    
-    message_data = data.get("messageData", {})
-    type_message = message_data.get("typeMessage")
-    
     message_text = ""
     
     # Import files are accepted only during an authenticated approved-user
@@ -3912,9 +3953,20 @@ async def whatsapp_webhook(request: Request):
 
             decision_so = "waa la oggolaaday" if new_status == "approved" else "waa la diiday"
             send_whatsapp(sender_phone, f"✅ Codsiga lambarka {applicant_phone} {decision_so}.")
+            if new_status == "approved":
+                ONBOARDING_SESSIONS[applicant_phone] = {
+                    "stage": "first_successful_action",
+                    "created_at": datetime.now(timezone.utc),
+                }
             send_whatsapp(
                 applicant_phone,
-                "🎉 *Codsigaaga waa la oggolaaday!*\n\n" + deynjir_main_menu()
+                (
+                    "🎉 *Waa laguu oggolaaday Deynjir!*\n\n"
+                    "👋 Soo dhawoow! Waxaan kaa caawinayaa inaad si fudud ula socoto "
+                    "deymaha iyo lacag-bixinta macaamiishaada.\n\n"
+                    "Aan ku bilowno hal tallaabo: ma jiraa macmiil deyn kaa qaatay? "
+                    "Ii sheeg magaciisa iyo lacagta, tusaale: *Cali $20 ayuu deyn qaatay.*"
+                )
                 if new_status == "approved"
                 else "❌ Waan ka xunnahay, codsigaaga waa la diiday."
             )
@@ -6215,7 +6267,7 @@ async def whatsapp_webhook(request: Request):
                 continue
 
         # Recover the full stored name from the original WhatsApp message if AI shortened it.
-        if name and action in {"PAY", "EDIT", "DELETE", "HISTORY", "SEARCH"}:
+        if name and action in {"ADD", "PAY", "EDIT", "DELETE", "HISTORY", "SEARCH"}:
             try:
                 recovered_name = resolve_name_from_original_message(
                     business_user_id, message_text, name
@@ -7490,6 +7542,9 @@ async def whatsapp_webhook(request: Request):
                     )
                     for entry in add_entries
                 ) + "."
+            if ONBOARDING_SESSIONS.get(sender_phone, {}).get("stage") == "first_successful_action":
+                success_message += "\n\n🎉 Bilow fiican! Deynjir wuxuu kaa caawin doonaa la socodka deymahaaga."
+                ONBOARDING_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, success_message)
             remember_conversation_outcome(sender_phone, message_text, success_message)
 
