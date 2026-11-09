@@ -176,7 +176,7 @@ def is_somali_confusion_request(message_text):
         r"\b(?:anigu\s+)?(?:waligay|weligay)\s+ma\s+istic\w*\b",
         r"\b(?:anigu\s+)?ma\s+istic\w*\b",
         r"\bmarkii\s+ugu\s+horraysay\s+ayaan\s+istic\w*\b",
-        r"\b(?:waxba\s+kama\s+fahmin|ma\s+fahmin|ma\s+garanayo)\b",
+        r"\b(?:waxba\s+kama\s+fahmin|ma\s+fahmin|ma\s+garanayo|ma\s+aqaan)\b",
         r"\bsidee\s+(?:loo\s+)?istic\w*\b",
         r"\bmaxaan\s+sameeyaa\b",
         r"\bii\s+sharax\b",
@@ -785,20 +785,24 @@ def is_simple_acknowledgement(message_text):
 
 
 def is_user_declining_help(message_text):
-    """Recognize a clear refusal of optional help, not a transaction confirmation."""
+    """Recognize common Somali refusals without treating them as financial commands."""
     text = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
     exact = {
-        "midna ma rabo", "midna ma rabo", "waxba ma rabo", "ma rabo",
+        "midna ma rabo", "waxba ma rabo", "ma rabo",
         "midna ma doonayo", "waxba ma doonayo", "ma doonayo",
-        "midna uma baahni", "uma baahni", "maya mahadsanid",
-        "may mahadsanid", "maya mahadsanidiin", "may mahadsanidiin",
+        "midna uma baahni", "uma baahni",
+        "maya", "may", "mayaa", "maya mahadsanid", "may mahadsanid",
+        "maya mahadsanidiin", "may mahadsanidiin",
+        "may ma rabo", "maya ma rabo", "may ayaan ku idhi",
+        "maya ayaan ku idhi", "may ayaan ku iri", "maya ayaan ku iri",
     }
     if text in exact:
         return True
     return bool(re.fullmatch(
-        r"(?:midna\s+)?(?:ma\s+rabo|ma\s+doonayo|uma\s+baahni)",
-        text,
-        flags=re.I,
+        r"(?:(?:may|maya|mayaa)\s+)?(?:midna\s+)?"
+        r"(?:ma\s+rabo|ma\s+doonayo|uma\s+baahni|"
+        r"ayaan\s+ku\s+(?:idhi|iri)|baan\s+ku\s+(?:idhi|iri))",
+        text, flags=re.I,
     ))
 
 
@@ -880,6 +884,35 @@ def is_no_activity_reply(message_text):
     return any(re.search(pattern, text, re.I) for pattern in patterns)
 
 
+def is_deynjir_greeting(message_text):
+    text = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
+    exact = {"salaan", "waan ku salaamay", "waan ku salaamay walaal", "asalaamu calaykum", "assalamu alaikum", "asc", "subax wanaagsan", "galab wanaagsan", "habeen wanaagsan"}
+    return text in exact or bool(re.fullmatch(r"waan\s+ku\s+salaamay(?:\s+walaal)?", text, re.I))
+
+
+def is_privacy_question(message_text):
+    text = normalize_customer_name(str(message_text or ""))
+    patterns = (
+        r"\b(?:xogtayda|xogteyda|xogtayada|xogta\s+aan\s+leeyahay|macluumaadkayga)\b.*\b(?:yaa|cid|arki|arkaya|arag|heli|geli|wadaag)\b",
+        r"\b(?:yaa|cid)\b.*\b(?:xogta|macluumaadka)\b.*\b(?:arki|arkaya|arag|heli|geli|wadaag)\b",
+        r"\b(?:amniga|ammaanka|amnigiisa|amnigeeda|security|privacy)\b",
+        r"\b(?:xogtayda|xogta)\b.*\b(?:ammaan|amn|secure|safe)\w*\b",
+    )
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def is_bare_ambiguous_debt_request(message_text):
+    return normalize_customer_name(str(message_text or "")).strip(" .!?؟") in {"deyn", "dayn"}
+
+
+def is_postponing_guided_task(message_text):
+    text = normalize_customer_name(str(message_text or ""))
+    testing = bool(re.search(r"\b(?:waan\s+)?tijaabin(?:ayay|ayayey|ayayay|ayay)\b", text))
+    later = bool(re.search(r"\b(?:hadhow|mar\s+dambe)\b", text))
+    task = bool(re.search(r"\b(?:deyn|dayn|xareyn|diiwaangelin|gelin)\b", text))
+    return testing or (later and task)
+
+
 def is_deynjir_general_question(message_text):
     text = normalize_customer_name(str(message_text or ""))
     patterns = (
@@ -888,6 +921,10 @@ def is_deynjir_general_question(message_text):
         r"\bmaxaad\s+samaysaa\b",
         r"\bmaxaad\s+(?:ii\s+)?tartaa\b",
         r"\bmaxaad tahay\b",
+        r"\b(?:adigu\s+)?yaad\s+tahay\b",
+        r"\badeeg(?:ga)?(?:una)?\s*(?:waa\s+)?(?:maxay|noocma)?\b",
+        r"\bsystem(?:kan|kani|kaani)?\s+(?:waa\s+)?nooc(?:ma|kee)?\b",
+        r"\bnidaam(?:kan|kani)?\s+(?:waa\s+)?nooc(?:ma|kee)?\b",
         r"\bsidee(?:\s+bu[u]?|\s+baa)?\s+(?:(?:nidaam(?:kani|kan|ku|ka|kuba)?|deynjir)\s+)?(?:u\s+)?shaqeey\w*\b",
         r"\bsidee\s+(?:bu[u]?\s+)?u\s+shaqeey\w*\b",
         r"\bwaa maxay deynjir\b",
@@ -1657,7 +1694,7 @@ def is_explicit_list_request(message_text):
     """Recognize explicit debt-list and appointment-list commands."""
     raw = normalize_customer_name(message_text)
     return bool(re.fullmatch(
-        r"(?:deyn|dayn|liis|liiska|liiska deynta|liiska daynta|"
+        r"(?:liis|liiska|liiska deynta|liiska daynta|"
         r"liiska daynta iyo balamaha|liiska deynta iyo balamaha|"
         r"deynaha liiskooda|deymaha maqan|deynta maqan|deymo maqan|"
         r"yaan weli deyn ku leeyahay|yaan deyn ku leeyahay|"
@@ -4111,6 +4148,40 @@ async def whatsapp_webhook(request: Request):
             except Exception as preview_error:
                 print(f"⚠️ Could not preview latest transaction for disagreement: {type(preview_error).__name__}: {preview_error}")
 
+        # Privacy/security questions must never be misclassified as EXPORT or another financial action.
+        if is_privacy_question(message_text):
+            privacy_reply = (
+                "Su'aal muhiim ah. Deynjir wuxuu xogta u isticmaalaa maareynta deymaha "
+                "dukaankaaga, hawlaha dukaankana wuxuu ku kala saaraa aqoonsiga dukaanka. "
+                "Cidda geli karta xogta maamulka waxay ku xiran tahay rukhsadaha database-ka "
+                "iyo cidda haysata gelitaanka maamulka. Ma doonayo inaan kuu ballanqaado "
+                "in qof kale aanu arki karin anigoon hubin dejinta amniga."
+            )
+            remember_conversation_outcome(sender_phone, message_text, privacy_reply)
+            send_whatsapp(sender_phone, privacy_reply)
+            return {"status": "privacy_question_answered"}
+
+        active_guided = GUIDED_SESSIONS.get(sender_phone)
+        if is_deynjir_greeting(message_text) and (not active_guided or active_guided.get("stage") == "menu"):
+            greeting_reply = (
+                "Wacalaykum salaam! 😊 Ku soo dhawoow Deynjir. "
+                "Waxaan kaa caawinayaa la socodka deymaha iyo lacag-bixinta macaamiishaada. "
+                "Maxaad jeclaan lahayd inaan kuu qabto?"
+            )
+            remember_conversation_outcome(sender_phone, message_text, greeting_reply)
+            send_whatsapp(sender_phone, greeting_reply)
+            return {"status": "greeting_answered"}
+
+        if is_postponing_guided_task(message_text) and (not active_guided or active_guided.get("stage") in {"menu", "debt_name"}):
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            postpone_reply = (
+                "Dhib ma leh 😊 Tijaabi inta aad rabto. Marka macmiil deyn qaato "
+                "ama lacag bixiyo, ii sheeg magaciisa iyo lacagta. Waxba hadda lama diiwaangelin."
+            )
+            remember_conversation_outcome(sender_phone, message_text, postpone_reply)
+            send_whatsapp(sender_phone, postpone_reply)
+            return {"status": "guided_task_postponed"}
+
         # First-time questions should not clear or cancel unrelated financial workflows.
         # Only explicit frustration recovery may clear an unfinished workflow.
         if is_user_frustrated(message_text):
@@ -4120,6 +4191,17 @@ async def whatsapp_webhook(request: Request):
             reply = generate_deynjir_conversation_reply(message_text, fallback_reply, sender_phone)
             send_whatsapp(sender_phone, reply or fallback_reply)
             return {"status": "conversational_help_sent"}
+
+        if normalize_customer_name(message_text).strip(" .!?؟") in {"ma garanayo", "ma aqaan"}:
+            if active_guided and active_guided.get("stage") in {"debt_name", "payment_name"}:
+                GUIDED_SESSIONS.pop(sender_phone, None)
+            no_customer_reply = (
+                "Dhib ma leh. Hadda waxba ha gelin. Marka macmiil jiro, "
+                "ii sheeg magaciisa iyo lacagta. Waxba lama diiwaangelin."
+            )
+            remember_conversation_outcome(sender_phone, message_text, no_customer_reply)
+            send_whatsapp(sender_phone, no_customer_reply)
+            return {"status": "no_customer_yet_helped"}
 
         if is_somali_confusion_request(message_text):
             fallback_reply = "Ku soo dhawoow Deynjir! 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
@@ -4659,6 +4741,44 @@ async def whatsapp_webhook(request: Request):
         if not expires_at or datetime.now(timezone.utc) > expires_at:
             GUIDED_SESSIONS.pop(sender_phone, None)
             guided = None
+
+    guided_normalized = normalize_customer_name(guided_text).strip(" .!?؟")
+    if guided and guided.get("stage") in {"debt_name", "payment_name"} and guided_normalized in {
+        "ma garanayo", "ma aqaan", "qof ma jiro", "qofna ma jiro", "hadda qof ma jiro", "ma jiro qof", "qof ma hayo",
+    }:
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        no_customer_reply = (
+            "Dhib ma leh. Hadda waxba ha gelin. Marka macmiil jiro, "
+            "ii sheeg magaciisa iyo lacagta. Waxba lama diiwaangelin."
+        )
+        remember_conversation_outcome(sender_phone, guided_text, no_customer_reply)
+        send_whatsapp(sender_phone, no_customer_reply)
+        return {"status": "guided_no_customer_yet"}
+
+    if guided and guided.get("stage") in {"menu", "debt_name", "payment_name"} and (
+        is_user_declining_help(guided_text) or guided_normalized in {"jooji", "cancel", "baaji", "iska daa"}
+    ):
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        cancel_reply = "Waa hagaag, waan joojiyey. Waxba lama diiwaangelin. Markaad diyaar tahay, ii sheeg."
+        remember_conversation_outcome(sender_phone, guided_text, cancel_reply)
+        send_whatsapp(sender_phone, cancel_reply)
+        return {"status": "guided_action_declined"}
+
+    if is_bare_ambiguous_debt_request(guided_text):
+        if guided and guided.get("stage") == "menu":
+            GUIDED_SESSIONS.pop(sender_phone, None)
+        clarify_debt_reply = "Ma rabtaa inaad *deyn cusub ku darto*, mise inaad *aragto liiska deymaha jira*?"
+        remember_conversation_outcome(sender_phone, guided_text, clarify_debt_reply)
+        send_whatsapp(sender_phone, clarify_debt_reply)
+        return {"status": "ambiguous_debt_request_clarified"}
+
+    if guided_normalized in {"deyn cusub", "dayn cusub", "new debt"} and (not guided or guided.get("stage") == "menu"):
+        GUIDED_SESSIONS[sender_phone] = {
+            "stage": "debt_name", "transaction_type": "debt",
+            "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+        }
+        send_whatsapp(sender_phone, "Hagaag 😊 Magaca macmiilka deynta lagu leeyahay ii sheeg. Tusaale: *Cali Xasan*.")
+        return {"status": "guided_debt_name_requested"}
 
     # A short search result can be expanded into the full customer statement.
     pending_search_detail = SEARCH_DETAIL_SESSIONS.get(sender_phone)
@@ -5997,7 +6117,7 @@ async def whatsapp_webhook(request: Request):
             parsed_item["action"] = str(parsed_item.get("action") or "").upper()
 
         # Do not let Gemini turn unrelated text such as "none" into a debt list.
-        # Keep short, established list commands such as "deyn" working.
+        # Keep only explicit list commands; a bare "deyn" is clarified earlier.
         if any(item.get("action") == "LIST" for item in entries) and not is_explicit_list_request(message_text):
             print(f"⚠️ Rejected LIST intent without an explicit list command: {message_text!r}")
             activate_guided_menu(sender_phone)
@@ -6339,7 +6459,7 @@ async def whatsapp_webhook(request: Request):
                             failed_inserts.append({"name": name, "reason": "Phone update returned no rows"})
                         continue
                     else:
-                        send_whatsapp(sender_phone, f"❌ Kuma hayo Liiskaaga  {name} si lambarkiisa aan u kaydiyo.")
+                        send_whatsapp(sender_phone, f"❌ Kuma hayo liiska {name} si lambarkiisa aan u kaydiyo.")
                         failed_inserts.append({"name": name, "reason": "Debtor not found for phone update"})
                         continue
                 
@@ -7555,7 +7675,7 @@ async def whatsapp_webhook(request: Request):
         send_whatsapp(
             sender_phone,
             deynjir_recovery_menu_message(
-                "⚠️ Xogtii lama dhammaystirin. Aan kuu fududeeyo tallaabada xigta."
+                "⚠️ Hawshii si buuxda looma dhammaystirin. Aan kuu fududeeyo tallaabada xigta."
             )
         )
     
