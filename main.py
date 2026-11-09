@@ -118,10 +118,10 @@ def deynjir_recovery_menu_message(intro=None):
 
 
 def deynjir_unrecognized_message():
-    """Ask one brief clarification; do not imply a numbered menu is active."""
+    """Short natural fallback that guides the user without dumping a menu."""
     return (
-        "Waan ku caawin karaa. Ma rabtaa deyn cusub, lacag-bixin, "
-        "liiska deymaha, mise raadinta macmiil?"
+        "Waan fahmi waayay fariintaada. Ma rabtaa inaad diiwaangeliso deyn cusub, "
+        "lacag-bixin, eegto liiska deymaha, mise raadiso macmiil?"
     )
 
 
@@ -286,7 +286,6 @@ def normalize_easy_command(value):
 
         # Common Somali merchant spelling and phrasing variants.
         "lacgta": "LACAGTA", "lacg": "LACAG",
-        "laxag": "LACAG", "lacag": "LACAG", "lacagta": "LACAG",
         "dayn": "DEYN", "daynta": "DEYNTA", "dayntii": "DEYNTII",
         "wakhtiga balanta": "BALLANTA", "waqtiga balanta": "BALLANTA",
         "wakhtiga balanta waa": "BALLAN", "waqtiga balanta waa": "BALLAN",
@@ -775,15 +774,33 @@ def remember_conversation_outcome(sender_phone, user_message, bot_message):
 
 
 def is_simple_acknowledgement(message_text):
-    """Recognize brief acknowledgements without treating them as new transactions."""
+    """Recognize brief acknowledgements and common Somali refusal spellings."""
     text = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
     return text in {
         "haye", "haaaye", "ok", "okay", "oke", "wa hagaag", "waa hagaag",
         "hagaag", "sax", "fiican", "mahadsanid", "mahadsanidiin",
-        "haa", "yes", "yep", "maya", "no", "nah",
+        "haa", "yes", "yep", "maya", "may", "no", "nah",
         "thanks", "thank you", "thx", "noted", "understood", "alright",
         "good", "waa sax", "waa hagaag mahadsanid",
     }
+
+
+def is_user_declining_help(message_text):
+    """Recognize a clear refusal of optional help, not a transaction confirmation."""
+    text = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
+    exact = {
+        "midna ma rabo", "midna ma rabo", "waxba ma rabo", "ma rabo",
+        "midna ma doonayo", "waxba ma doonayo", "ma doonayo",
+        "midna uma baahni", "uma baahni", "maya mahadsanid",
+        "may mahadsanid", "maya mahadsanidiin", "may mahadsanidiin",
+    }
+    if text in exact:
+        return True
+    return bool(re.fullmatch(
+        r"(?:midna\s+)?(?:ma\s+rabo|ma\s+doonayo|uma\s+baahni)",
+        text,
+        flags=re.I,
+    ))
 
 
 def is_contextual_followup(message_text, sender_phone):
@@ -844,30 +861,24 @@ def is_natural_today_payment_question(message_text):
 
 
 def is_no_activity_reply(message_text):
+    """Recognize everyday Somali statements that report no business activity."""
     text = normalize_customer_name(str(message_text or ""))
     patterns = (
-        r"maanta waxba ma jiraan",
-        r"maanta waxba ma dhicin",
-        r"wax dhaqdhaqaaq ah ma jiro",
-        r"wax deyn cusub ah ma jirto",
-        r"deyn cusub ma jirto",
-        r"lacag bixin ma jirto",
-        r"lacagtii hore lama bixin",
-        r"lacagt? hore lama bixin",
-        r"cidina waxba ma bixin",
-        r"qofna waxba ma bixin",
+        r"maanta\s+waxba\s+ma\s+jiraan",
+        r"maanta\s+waxba\s+ma\s+dhicin",
+        r"wax\s+dhaqdhaqaaq\s+ah\s+ma\s+jiro",
+        # Accept both spaced and joined spellings: 'ma jirto' / 'majirto'.
+        r"(?:maanta\s+)?wax\s+(?:deyn|dayn)\s+ah\s+ma\s*jirto",
+        r"maanta\s+(?:wax\s+)?deyn\s+(?:cusub\s+)?ma\s*jirto",
+        r"wax\s+deyn\s+cusub\s+ah\s+ma\s*jirto",
+        r"deyn\s+cusub\s+ma\s*jirto",
+        r"lacag\s+bixin\s+ma\s*jirto",
+        r"lacagtii?\s+hore\s+lama\s+bixin",
+        r"lacagt?\s+hore\s+lama\s+bixin",
+        r"cidina\s+waxba\s+ma\s+bixin",
+        r"qofna\s+waxba\s+ma\s+bixin",
     )
     return any(re.search(pattern, text, re.I) for pattern in patterns)
-
-
-def is_how_to_write_question(message_text):
-    text = normalize_customer_name(str(message_text or ""))
-    return bool(re.search(
-        r"\b(?:hee\s+)?maxaan\s+(?:(?:ku|soo)\s+)?qoraa\b|"
-        r"\bmaxaan\s+kuu\s+qoraa\b",
-        text,
-        re.I,
-    ))
 
 
 def is_deynjir_general_question(message_text):
@@ -878,7 +889,6 @@ def is_deynjir_general_question(message_text):
         r"\bmaxaad\s+samaysaa\b",
         r"\bmaxaad\s+(?:ii\s+)?tartaa\b",
         r"\bmaxaad tahay\b",
-        r"\bmaxaad\s+(?:haysaa|haysaan|haysatid)\b",
         r"\bsidee(?:\s+bu[u]?|\s+baa)?\s+(?:(?:nidaam(?:kani|kan|ku|ka|kuba)?|deynjir)\s+)?(?:u\s+)?shaqeey\w*\b",
         r"\bsidee\s+(?:bu[u]?\s+)?u\s+shaqeey\w*\b",
         r"\bwaa maxay deynjir\b",
@@ -3657,8 +3667,9 @@ async def whatsapp_webhook(request: Request):
                 cancel_sender_pending_database_work(sender_phone, exit_business_id)
                 send_whatsapp(
                     sender_phone,
-                    "Waan fahmay. Hawshii waa la joojiyey; waxba cusub lama kaydin. "
-                    "Markaad u baahato, fariin cusub ii soo dir."
+                    deynjir_recovery_menu_message(
+                        "Waan fahmay. Hawshii socotay waa la joojiyey; waxba cusub lama kaydin."
+                    )
                 )
                 return {"status": "exit_request_handled"}
             return {"status": "unapproved_user_silenced"}
@@ -4066,22 +4077,13 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, reply or fallback_reply)
             return {"status": "conversational_help_sent"}
 
-        if is_how_to_write_question(message_text):
-            fallback_reply = (
-                "Qor *ADD Cali $20* marka uu deyn qaato, ama "
-                "*Lacag bixin Cali $10* marka uu lacag soo celiyo."
-            )
-            remember_conversation_outcome(sender_phone, message_text, fallback_reply)
-            send_whatsapp(sender_phone, fallback_reply)
-            return {"status": "how_to_write_help_sent"}
-
         if is_deynjir_general_question(message_text):
             fallback_reply = (
-                "Waxaan kaa caawin karaa deymaha, lacag-bixinta, raadinta macaamiisha, ballamaha, "
-                "xusuusinta iyo soo gelinta Excel/sawir. Tusaale: *ADD Cali $20*."
+                "Deynjir wuxuu kuu fududeeyaa diiwaangelinta deymaha, lacag-bixinta iyo ballamaha. "
+                "Tusaale ahaan, qor Cali $20 marka uu deyn qaato."
             )
-            remember_conversation_outcome(sender_phone, message_text, fallback_reply)
-            send_whatsapp(sender_phone, fallback_reply)
+            reply = generate_deynjir_conversation_reply(message_text, fallback_reply, sender_phone)
+            send_whatsapp(sender_phone, reply or fallback_reply)
             return {"status": "system_question_answered"}
 
         if undo_match:
@@ -4679,32 +4681,23 @@ async def whatsapp_webhook(request: Request):
         send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "somali_usage_help_sent"}
 
-    if is_how_to_write_question(guided_text):
-        fallback_reply = (
-            "Qor *ADD Cali $20* marka uu deyn qaato, ama "
-            "*Lacag bixin Cali $10* marka uu lacag soo celiyo."
-        )
-        remember_conversation_outcome(sender_phone, guided_text, fallback_reply)
-        send_whatsapp(sender_phone, fallback_reply)
-        return {"status": "how_to_write_help_sent"}
-
-    if normalize_customer_name(guided_text).strip(" .!?؟") in {"lacag", "lacagta", "laxag", "laxagta"}:
-        fallback_reply = (
-            "Lacagta maxaad ka rabtaa—inaad diiwaangeliso deyn, lacag-bixin, "
-            "mise inaad eegto lacagaha la bixiyey?"
-        )
-        remember_conversation_outcome(sender_phone, guided_text, fallback_reply)
-        send_whatsapp(sender_phone, fallback_reply)
-        return {"status": "money_topic_clarification_sent"}
-
     if is_deynjir_general_question(guided_text):
         fallback_reply = (
-            "Waxaan kaa caawin karaa deymaha, lacag-bixinta, raadinta macaamiisha, ballamaha, "
-            "xusuusinta iyo soo gelinta Excel/sawir."
+            "Deynjir wuxuu maamulaa deymaha, lacag-bixinta macaamiisha iyo ballamaha ganacsigaaga."
         )
-        remember_conversation_outcome(sender_phone, guided_text, fallback_reply)
-        send_whatsapp(sender_phone, fallback_reply)
+        reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
+        send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "system_question_answered"}
+
+    # A clear refusal should end optional guidance instead of restarting the
+    # same service-selection question. Do not intercept active financial stages.
+    if (not guided or guided.get("stage") == "menu") and is_user_declining_help(guided_text):
+        if guided and guided.get("stage") == "menu":
+            GUIDED_SESSIONS.pop(sender_phone, None)
+        refusal_reply = "Waa hagaag. Waxba ma samaynayo. Haddii aad wax u baahato, ii sheeg."
+        remember_conversation_outcome(sender_phone, guided_text, refusal_reply)
+        send_whatsapp(sender_phone, refusal_reply)
+        return {"status": "help_declined"}
 
     # Acknowledgements are not new financial instructions. Keep the reply short
     # and do not restart ADD/PAY after a completed transaction.
@@ -4748,7 +4741,7 @@ async def whatsapp_webhook(request: Request):
         GUIDED_SESSIONS.pop(sender_phone, None)
         send_whatsapp(
             sender_phone,
-            "Waa la joojiyey. Waxba lama beddelin. Haddii aad hawl kale rabto, ii sheeg."
+            deynjir_recovery_menu_message("Waa la joojiyey. Waxba lama beddelin.")
         )
         return {"status": "guided_action_cancelled"}
 
@@ -4901,6 +4894,7 @@ async def whatsapp_webhook(request: Request):
             return {"status": "guided_customer_name_required"}
         if transaction_type not in {"debt", "payment"}:
             GUIDED_SESSIONS.pop(sender_phone, None)
+            activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "guided_session_invalid"}
         GUIDED_SESSIONS.pop(sender_phone, None)
@@ -5681,10 +5675,7 @@ async def whatsapp_webhook(request: Request):
                 "Deyntii macaamiisha ee hore sidii hore ayay u taagan tahay. 🤝"
             )
         else:
-            reply = (
-                "✅ Waan fahmay. Maanta wax cusub ma jiraan sida aad sheegtay. "
-                "Deymihii hore weli way jiraan. Mahadsanid isticmaalka Deynjir. 🤝"
-            )
+            reply = "Waan fahmay. Maanta deyn cusub ma jirto sida aad sheegtay. Mahadsanid. 🤝"
         send_whatsapp(sender_phone, reply)
         return {"status": "no_activity_reply_acknowledged"}
 
@@ -5927,6 +5918,7 @@ async def whatsapp_webhook(request: Request):
                         "Waxaad dooran kartaa mid ka mid ah hawlahan: \n" + deynjir_main_menu()
                     )
                     return {"status": "gemini_rate_limited_guidance_sent"}
+                activate_guided_menu(sender_phone)
                 send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "friendly_fallback_sent"}
 
@@ -5947,6 +5939,7 @@ async def whatsapp_webhook(request: Request):
         ]
         if not usable_entries:
             print(f"⚠️ No usable intent extracted; message={message_text!r}; entries={entries!r}")
+            activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "unrecognized_message"}
         entries = usable_entries
@@ -5957,6 +5950,7 @@ async def whatsapp_webhook(request: Request):
         # Keep short, established list commands such as "deyn" working.
         if any(item.get("action") == "LIST" for item in entries) and not is_explicit_list_request(message_text):
             print(f"⚠️ Rejected LIST intent without an explicit list command: {message_text!r}")
+            activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "unrecognized_message"}
 
@@ -5982,6 +5976,7 @@ async def whatsapp_webhook(request: Request):
                     f"⚠️ Rejected empty SEARCH intent for unrecognized text: "
                     f"{message_text!r}"
                 )
+                activate_guided_menu(sender_phone)
                 send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "unrecognized_message"}
 
@@ -6241,6 +6236,7 @@ async def whatsapp_webhook(request: Request):
                     str(message_text or ""), flags=re.I
                 ))
                 if clear_direction is None and not explicit_transaction_command:
+                    activate_guided_menu(sender_phone)
                     send_whatsapp(sender_phone, deynjir_unrecognized_message())
                     return {"status": "unrecognized_message"}
             send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca macmiilka ii sheeg.")
@@ -7024,6 +7020,7 @@ async def whatsapp_webhook(request: Request):
                             f"⚠️ Bare-word SEARCH did not match a customer; treating as unrecognized text: "
                             f"{message_text!r}"
                         )
+                        activate_guided_menu(sender_phone)
                         send_whatsapp(sender_phone, deynjir_unrecognized_message())
                     continue
 
