@@ -91,8 +91,7 @@ def deynjir_main_menu():
         "Raadi macmiil – Taabo 4️⃣\n"
         "Balanta maanta – Taabo 5️⃣\n"
         "Caawimaad – Taabo 6️⃣\n\n"
-        "Amarro kale: *DHIGAAL Cali $100* ama *UNDO Cali*.\n"
-        "Soo qor lambar 1 ilaa 6."
+        "Dooro 1 ilaa 6."
     )
 
 def deynjir_recovery_menu_message(intro=None):
@@ -102,7 +101,7 @@ def deynjir_recovery_menu_message(intro=None):
         lines.append(str(intro).strip())
         lines.append("")
     lines.extend([
-        "🤝 *Si aad u fahanto habka uu nidaamkani u shaqeeyo.*",
+        "🤝 *Si aad u fahanto habka uu nidaamkani u shaqeeyo.*\n\n",
         "Raac tallaabooyinkan:",
         "",
         "1️⃣  Deyn cusub",
@@ -6340,7 +6339,7 @@ async def whatsapp_webhook(request: Request):
                             failed_inserts.append({"name": name, "reason": "Phone update returned no rows"})
                         continue
                     else:
-                        send_whatsapp(sender_phone, f"❌ Ma helin {name} si lambarkiisa aan u kaydiyo.")
+                        send_whatsapp(sender_phone, f"❌ Kuma hayo Liiskaaga  {name} si lambarkiisa aan u kaydiyo.")
                         failed_inserts.append({"name": name, "reason": "Debtor not found for phone update"})
                         continue
                 
@@ -7556,7 +7555,7 @@ async def whatsapp_webhook(request: Request):
         send_whatsapp(
             sender_phone,
             deynjir_recovery_menu_message(
-                "⚠️ Hawshii si buuxda looma dhammaystirin. Aan kuu fududeeyo tallaabada xigta."
+                "⚠️ Xogtii lama dhammaystirin. Aan kuu fududeeyo tallaabada xigta."
             )
         )
     
