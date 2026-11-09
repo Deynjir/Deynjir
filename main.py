@@ -117,10 +117,11 @@ def deynjir_recovery_menu_message(intro=None):
 
 
 def deynjir_unrecognized_message():
-    """Short natural fallback that guides the user without dumping a menu."""
+    """Fallback that gives one reliable next step and activates menu option 3."""
     return (
-        "Waan fahmi waayay fariintaada. Ma rabtaa inaad diiwaangeliso deyn cusub, "
-        "lacag-bixin, eegto liiska deymaha, mise raadiso macmiil?"
+        "Waan fahmi waayay fariintaada. 😊\n"
+        "Haddii aad rabto liiska daymaha oo dhan, taabo *3*.\n"
+        "Ama dooro hawl kale: 1️⃣ Deyn cusub, 2️⃣ Lacag-bixin, 4️⃣ Raadi macmiil."
     )
 
 
@@ -1691,21 +1692,74 @@ def is_missing_value(value):
 
 
 def is_explicit_list_request(message_text):
-    """Recognize explicit debt-list and appointment-list commands."""
-    raw = normalize_customer_name(message_text)
+    """Recognize clear debt-list and appointment-list requests without Gemini."""
+    raw = normalize_customer_name(message_text).strip(" .!?؟")
+    debt_list_phrases = {
+        "liis", "liiska", "liiska deynta", "liiska daynta",
+        "liiska daymaha", "liiska deymaha",
+        "liiska daymaha oo dhan", "liiska deymaha oo dhan",
+        "daymaha", "deymaha", "daymaha oo dhan", "deymaha oo dhan",
+        "dhamaan daymaha", "dhammaan daymaha",
+        "dhamaan deymaha", "dhammaan deymaha",
+        "ii muuji daymaha", "ii muuji deymaha",
+        "i tus daymaha", "i tus deymaha",
+        "ii tus daymaha", "ii tus deymaha",
+        "deynaha liiskooda", "deymaha maqan", "deynta maqan", "deymo maqan",
+        "yaan weli deyn ku leeyahay", "yaan deyn ku leeyahay",
+        "yaa weli deyn igu leh", "liiska deymaha maqan",
+        "list", "list debts", "debt list", "show debts", "show all debts",
+        "all debts", "view debts",
+    }
+    if raw in debt_list_phrases:
+        return True
     return bool(re.fullmatch(
+        r"(?:liiska\s+)?(?:daymaha|deymaha|deynta|daynta)"
+        r"(?:\s+(?:oo\s+dhan|oo\s+idil))|"
         r"(?:liis|liiska|liiska deynta|liiska daynta|"
         r"liiska daynta iyo balamaha|liiska deynta iyo balamaha|"
-        r"deynaha liiskooda|deymaha maqan|deynta maqan|deymo maqan|"
-        r"yaan weli deyn ku leeyahay|yaan deyn ku leeyahay|"
-        r"yaa weli deyn igu leh|liiska deymaha maqan|"
-        r"list|list debts?|debt list|show debts?|"
         r"balamaha(?: maanta| beri)?|ballamaha(?: maanta| beri)?|"
         r"balanta(?: maanta| beri)?|ballanta(?: maanta| beri)?|"
         r"balan(?:ta)?(?: maanta| beri)?)",
         raw,
         flags=re.I,
     )) or is_fuzzy_debt_list_command(message_text)
+
+
+def is_contextual_debt_list_followup(message_text, sender_phone):
+    """Resolve short 'where/all' follow-ups as a debt-list request only in list context."""
+    session = CONVERSATION_SESSIONS.get(str(sender_phone)) or {}
+    expires_at = session.get("expires_at")
+    if expires_at and datetime.now(timezone.utc) > expires_at:
+        CONVERSATION_SESSIONS.pop(str(sender_phone), None)
+        return False
+
+    history = list(session.get("history") or [])
+    last_model = next(
+        (str(turn.get("text") or "").strip()
+         for turn in reversed(history)
+         if turn.get("role") == "model" and str(turn.get("text") or "").strip()),
+        "",
+    )
+    if not last_model:
+        return False
+
+    previous = normalize_customer_name(last_model)
+    list_context = bool(
+        re.search(r"\b(?:liiska|daymaha|deymaha)\b", previous, re.I)
+        or re.search(r"\bdeynta\b.*\bmacaamiisha", previous, re.I)
+        or re.search(r"\bdaynta\b.*\bmacaamiisha", previous, re.I)
+    )
+    if not list_context:
+        return False
+
+    followup = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
+    return followup in {
+        "dhamaan", "dhammaan", "dhamaan daymaha", "dhammaan daymaha",
+        "dhamaan deymaha", "dhammaan deymaha",
+        "may dhamaan", "maya dhamaan", "maya dhammaan", "may dhammaan",
+        "halkee", "meeye", "meeyaan", "xagee", "xaggee",
+        "liiska xagee", "daymaha xagee",
+    }
 
 
 def parse_customer_rename_command(message_text):
@@ -4879,7 +4933,12 @@ async def whatsapp_webhook(request: Request):
 
     # Continue a recent natural conversation instead of sending the recovery menu.
     # Explicit financial commands and amounts are excluded by is_contextual_followup.
-    if not guided and is_contextual_followup(guided_text, sender_phone):
+    if (
+        not guided
+        and not is_explicit_list_request(guided_text)
+        and not is_contextual_debt_list_followup(guided_text, sender_phone)
+        and is_contextual_followup(guided_text, sender_phone)
+    ):
         fallback_reply = "Waan ku fahmay. Qaybtee ayaad rabtaa inaan kuu sii sharaxo?"
         reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
         send_whatsapp(sender_phone, reply or fallback_reply)
@@ -5869,6 +5928,7 @@ async def whatsapp_webhook(request: Request):
     fuzzy_list_requested = (
         is_fuzzy_debt_list_command(message_text)
         or is_explicit_list_request(message_text)
+        or is_contextual_debt_list_followup(message_text, sender_phone)
     )
     multiline_transaction = parse_multiline_menu_transaction(message_text)
 
@@ -6863,15 +6923,19 @@ async def whatsapp_webhook(request: Request):
 
                 if not debts_query.data:
                     if filter_date:
-                        send_whatsapp(
-                            sender_phone,
-                            f"✅ Ma jiraan deymo balantoodu tahay {filter_date}."
+                        empty_due_reply = f"✅ Ma jiraan deymo balantoodu tahay {filter_date}."
+                        send_whatsapp(sender_phone, empty_due_reply)
+                        remember_conversation_outcome(
+                            sender_phone, message_text,
+                            f"Liiska ballamaha ee {filter_date} waa madhan."
                         )
                         send_due_list_followup(sender_phone)
                     else:
-                        send_whatsapp(
-                            sender_phone,
-                            "✅ Ma jirto deyn aan la bixin."
+                        empty_list_reply = "✅ Ma jirto deyn aan la bixin."
+                        send_whatsapp(sender_phone, empty_list_reply)
+                        remember_conversation_outcome(
+                            sender_phone, message_text,
+                            "Liiska deymaha waa madhan; ma jiraan deymo aan la bixin."
                         )
                     continue
 
@@ -6943,6 +7007,10 @@ async def whatsapp_webhook(request: Request):
                 )
 
                 send_whatsapp(sender_phone, message)
+                remember_conversation_outcome(
+                    sender_phone, message_text,
+                    f"Liiska deymaha waa la soo bandhigay ({len(debts_query.data)} macmiil)."
+                )
 
                 if filter_date:
                     send_due_list_followup(sender_phone)
