@@ -162,25 +162,32 @@ def deynjir_confusion_help_message():
 
 
 def is_somali_confusion_request(message_text):
-    """Recognize common Somali requests for help understanding how to use Deynjir."""
-    text = normalize_customer_name(str(message_text or ""))
+    """Recognize first-time/help requests despite common Somali spelling variations."""
+    text = normalize_customer_name(str(message_text or "")).strip()
+    if not text:
+        return False
     patterns = (
         r"\bbarnaamijka\s+(?:waxba\s+)?ma\s+fahmin\b",
         r"\bbarnaamijka\s+waxba\s+kama\s+fahmin\b",
-        r"\banigu\s+horay\s+uma\s+isticmaalin\b",
-        r"\bhoray\s+uma\s+isticmaalin\s+nidaam(?:kan)?\b",
-        r"\bmarkii\s+ugu\s+horraysay\s+ayaan\s+isticmaalayaa\b",
-        r"\b(?:waxba\s+kama\s+fahmin|ma\s+fahmin)\b",
-        r"\bsidee\s+(?:loo\s+)?isticmaalaa\b",
-        r"\bsidee\s+loo\s+isticmaali\s+karaa\b",
+        # Accept natural variants/typos such as isticmaalmo, isticmaalain, isticmalin.
+        r"\b(?:anigu\s+)?(?:horay|hore)\s+uma\s+istic\w*\b",
+        r"\b(?:anigu\s+)?(?:waligay|weligay)\s+ma\s+istic\w*\b",
+        r"\bmarkii\s+ugu\s+horraysay\s+ayaan\s+istic\w*\b",
+        r"\b(?:waxba\s+kama\s+fahmin|ma\s+fahmin|ma\s+garanayo)\b",
+        r"\bsidee\s+(?:loo\s+)?istic\w*\b",
         r"\bmaxaan\s+sameeyaa\b",
         r"\bii\s+sharax\b",
-        r"\bma\s+garanayo\s+sida\s+loo\s+isticmaalo\b",
-        r"\bsidee\s+dayn\s+loo\s+geliyaa\b",
-        r"\bsidee\s+nidaamkan\s+u\s+shaqeeyaa\b",
-        r"\bsidee\s+(?:buu\s+)?nidaam(?:kan|kani)\s+u\s+shaqeeyaa\b",
     )
-    return any(re.search(pattern, text, flags=re.I) for pattern in patterns)
+    if any(re.search(pattern, text, flags=re.I) for pattern in patterns):
+        return True
+    # Catch short misspellings of the common first-time phrase without matching
+    # unrelated transaction messages.
+    compact = re.sub(r"[^a-z]", "", text.casefold())
+    return (
+        "horay" in text
+        and "uma" in text
+        and difflib.SequenceMatcher(None, compact, "aniguhorayum isticmaalin".replace(" ", "")).ratio() >= 0.78
+    )
 
 
 
@@ -822,7 +829,8 @@ def is_deynjir_general_question(message_text):
         r"\bmaxaad\s+samaysaa\b",
         r"\bmaxaad\s+(?:ii\s+)?tartaa\b",
         r"\bmaxaad tahay\b",
-        r"\bsidee(?:\s+bu[u]?|\s+baa)?\s+(?:nidaam(?:kani|kan|ku|ka|kuba)?|deynjir)\s+(?:u\s+)?shaqeeyaa\b",
+        r"\bsidee(?:\s+bu[u]?|\s+baa)?\s+(?:(?:nidaam(?:kani|kan|ku|ka|kuba)?|deynjir)\s+)?(?:u\s+)?shaqeey\w*\b",
+        r"\bsidee\s+(?:bu[u]?\s+)?u\s+shaqeey\w*\b",
         r"\bwaa maxay deynjir\b",
         r"\bmaxaan kaa heli karaa\b",
         r"\bmaxaa la sameeyaa\b",
@@ -3987,22 +3995,30 @@ async def whatsapp_webhook(request: Request):
             except Exception as preview_error:
                 print(f"⚠️ Could not preview latest transaction for disagreement: {type(preview_error).__name__}: {preview_error}")
 
-        # Frustration and first-time questions receive a short conversational guide,
-        # not the old numbered recovery menu. Existing safe UNDO handling remains above.
-        if is_user_frustrated(message_text) or is_somali_confusion_request(message_text):
+        # First-time questions should not clear or cancel unrelated financial workflows.
+        # Only explicit frustration recovery may clear an unfinished workflow.
+        if is_user_frustrated(message_text):
             clear_sender_workflow_sessions(sender_phone)
             cancel_sender_pending_database_work(sender_phone, business_user_id)
-            if is_user_frustrated(message_text):
-                fallback_reply = (
-                    "Waan ku fahmay, iga raalli noqo. Ii sheeg waxa aad rabto, waan ku hagi doonaa."
-                )
-            else:
-                fallback_reply = (
-                    "Ku soo dhawoow Deynjir! 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
-                )
+            fallback_reply = "Waan ku fahmay, iga raalli noqo. Ii sheeg waxa aad rabto, waan ku hagi doonaa."
             reply = generate_deynjir_conversation_reply(message_text, fallback_reply, sender_phone)
             send_whatsapp(sender_phone, reply or fallback_reply)
             return {"status": "conversational_help_sent"}
+
+        if is_somali_confusion_request(message_text):
+            fallback_reply = "Ku soo dhawoow Deynjir! 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
+            reply = generate_deynjir_conversation_reply(message_text, fallback_reply, sender_phone)
+            send_whatsapp(sender_phone, reply or fallback_reply)
+            return {"status": "conversational_help_sent"}
+
+        if is_deynjir_general_question(message_text):
+            fallback_reply = (
+                "Deynjir wuxuu kuu fududeeyaa diiwaangelinta deymaha, lacag-bixinta iyo ballamaha. "
+                "Tusaale ahaan, qor Cali $20 marka uu deyn qaato."
+            )
+            reply = generate_deynjir_conversation_reply(message_text, fallback_reply, sender_phone)
+            send_whatsapp(sender_phone, reply or fallback_reply)
+            return {"status": "system_question_answered"}
 
         if undo_match:
             undo_key = str(undo_match.group(1) or "").strip()
