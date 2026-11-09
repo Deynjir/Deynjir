@@ -46,6 +46,9 @@ LAST_HISTORY_REQUESTS = {}
 LAST_SELECTED_CUSTOMERS = {}
 # First-contact onboarding choices are temporary per-sender conversations.
 ONBOARDING_SESSIONS = {}
+# Short-lived conversational context for natural follow-ups (not financial state).
+CONVERSATION_SESSIONS = {}
+CONVERSATION_SESSION_TTL = timedelta(minutes=30)
 
 # Temporary manual reminder workflow. Sessions expire after 15 minutes and are
 # cleared before sending so a repeated "HAA DIR" cannot resend the same batch.
@@ -632,11 +635,49 @@ HOW TO RESPOND:
 """
 
 
-def generate_deynjir_conversation_reply(message_text, fallback=None):
-    """Generate a short, system-aware chat reply; this helper cannot write financial data."""
+def generate_deynjir_conversation_reply(message_text, fallback=None, sender_phone=None):
+    """Generate a short, context-aware reply; this helper cannot write financial data."""
     if not GEMINI_API_KEY:
+        if sender_phone and fallback:
+            now = datetime.now(timezone.utc)
+            previous = CONVERSATION_SESSIONS.get(str(sender_phone), {})
+            history = list(previous.get("history") or [])
+            history.extend([
+                {"role": "user", "text": str(message_text or "")[:1500]},
+                {"role": "model", "text": str(fallback)[:220]},
+            ])
+            CONVERSATION_SESSIONS[str(sender_phone)] = {
+                "history": history[-8:],
+                "expires_at": now + CONVERSATION_SESSION_TTL,
+            }
         return fallback
     try:
+        now = datetime.now(timezone.utc)
+        session = CONVERSATION_SESSIONS.get(str(sender_phone)) if sender_phone else None
+        if session and (not session.get("expires_at") or now > session["expires_at"]):
+            CONVERSATION_SESSIONS.pop(str(sender_phone), None)
+            session = None
+
+        history = list((session or {}).get("history") or [])[-8:]
+        contents = []
+        for turn in history:
+            role = turn.get("role")
+            text_value = str(turn.get("text") or "").strip()
+            if role in {"user", "model"} and text_value:
+                contents.append({"role": role, "parts": [{"text": text_value[:700]}]})
+        current_text = str(message_text or "").strip()[:1500]
+        contents.append({"role": "user", "parts": [{"text": current_text}]})
+
+        contextual_prompt = DEYNJIR_ASSISTANT_PROMPT + """
+
+CONVERSATION CONTINUITY:
+- You receive recent messages in chronological order. The last user message is the one to answer.
+- Resolve short or indirect follow-ups from the preceding conversation, including references such as 'that', 'it', 'how?', 'tell me', 'what else?', 'no', and 'yes'.
+- Keep the same topic when the user is following up; change topic when the user clearly introduces a new one.
+- Do not ask the user to repeat context that is already in the conversation.
+- If the meaning is genuinely unclear, ask one brief clarifying question instead of showing a menu.
+- Never treat conversational context as authorization to create, edit, delete, or pay a financial record.
+"""
         url = (
             "https://generativelanguage.googleapis.com/v1beta/"
             f"models/{GEMINI_MODEL}:generateContent"
@@ -648,8 +689,8 @@ def generate_deynjir_conversation_reply(message_text, fallback=None):
                 "Content-Type": "application/json",
             },
             json={
-                "systemInstruction": {"parts": [{"text": DEYNJIR_ASSISTANT_PROMPT}]},
-                "contents": [{"role": "user", "parts": [{"text": str(message_text or "")[:1500]}]}],
+                "systemInstruction": {"parts": [{"text": contextual_prompt}]},
+                "contents": contents,
                 "generationConfig": {"temperature": 0.2, "maxOutputTokens": 80},
             },
             timeout=20,
@@ -663,21 +704,69 @@ def generate_deynjir_conversation_reply(message_text, fallback=None):
         ).strip()
         if not answer:
             return fallback
-        # Enforce a short WhatsApp reply even if Gemini ignores the length instruction.
         answer = answer.strip().strip('"')
         if answer.startswith("[") or answer.startswith("{"):
             return fallback
-        # Keep at most two sentences.
         sentence_parts = re.split(r"(?<=[.!?؟])\s+", answer)
         answer = " ".join(part.strip() for part in sentence_parts[:2] if part.strip())
-        # Hard character limit; avoid cutting in the middle of a word.
         if len(answer) > 220:
             shortened = answer[:217].rsplit(" ", 1)[0].rstrip(" ,;:-")
             answer = (shortened or answer[:217].rstrip()) + "…"
+
+        if sender_phone:
+            updated_history = history + [
+                {"role": "user", "text": current_text},
+                {"role": "model", "text": answer},
+            ]
+            CONVERSATION_SESSIONS[str(sender_phone)] = {
+                "history": updated_history[-8:],
+                "expires_at": now + CONVERSATION_SESSION_TTL,
+            }
         return answer
     except Exception as exc:
         print(f"⚠️ Deynjir conversational assistant unavailable: {type(exc).__name__}: {exc}")
+        if sender_phone and fallback:
+            now = datetime.now(timezone.utc)
+            previous = CONVERSATION_SESSIONS.get(str(sender_phone), {})
+            history = list(previous.get("history") or [])
+            history.extend([
+                {"role": "user", "text": str(message_text or "")[:1500]},
+                {"role": "model", "text": str(fallback)[:220]},
+            ])
+            CONVERSATION_SESSIONS[str(sender_phone)] = {
+                "history": history[-8:],
+                "expires_at": now + CONVERSATION_SESSION_TTL,
+            }
         return fallback
+
+
+def is_contextual_followup(message_text, sender_phone):
+    """Identify a short natural follow-up only when a recent chat context exists."""
+    session = CONVERSATION_SESSIONS.get(str(sender_phone))
+    if not session or not session.get("history"):
+        return False
+    expires_at = session.get("expires_at")
+    if expires_at and datetime.now(timezone.utc) > expires_at:
+        CONVERSATION_SESSIONS.pop(str(sender_phone), None)
+        return False
+    text = str(message_text or "").strip()
+    if not text or len(text) > 140:
+        return False
+    normalized = normalize_customer_name(text).strip(" .!?؟")
+    # Never intercept numeric menu choices, financial entries, or explicit commands.
+    if re.fullmatch(r"\d+", normalized):
+        return False
+    if re.search(r"\$\s*\d|\b\d+(?:[.,]\d{1,2})?\s*(?:dollar|doolar|shilin)?\b", normalized, re.I):
+        return False
+    if re.match(r"^(?:add|pay|deyn|lacag bixin|liiska|raadi|search|faahfaahin|history|report|export|import|undo|delete|edit|dhigaal|menu|start|help)\b", normalized, re.I):
+        return False
+    # Very short turns are often contextual; longer turns need a clear conversational cue.
+    short_turn = len(normalized.split()) <= 6
+    followup_cue = bool(re.search(
+        r"\b(sidee|haddaba|markaas|marka|haddii|sidaas|taas|taasi|isaga|iyada|kuwaas|maxaa kale|ka waran|ii sheeg|ii sharax|ii faahfaahi|tusaale|faahfaahi|ma fahmin|maxaad ula jeeddaa|maxay ka dhigan tahay|ma ii sharxi kartaa|sax miyaa|run miyaa|haye|maya|haa|how|why|what about|what if|tell me more|explain|what do you mean|and then)\b",
+        normalized, re.I
+    ))
+    return short_turn or followup_cue
 
 
 def is_natural_top_debt_question(message_text):
@@ -729,7 +818,11 @@ def is_deynjir_general_question(message_text):
     text = normalize_customer_name(str(message_text or ""))
     patterns = (
         r"\bmaxaad\s+(?:ii\s+)?qaban kartaa\b",
+        r"\bmaxaad\s+qabataa\b",
+        r"\bmaxaad\s+samaysaa\b",
+        r"\bmaxaad\s+(?:ii\s+)?tartaa\b",
         r"\bmaxaad tahay\b",
+        r"\bsidee(?:\s+bu[u]?|\s+baa)?\s+(?:nidaam(?:kani|kan|ku|ka|kuba)?|deynjir)\s+(?:u\s+)?shaqeeyaa\b",
         r"\bwaa maxay deynjir\b",
         r"\bmaxaan kaa heli karaa\b",
         r"\bmaxaa la sameeyaa\b",
@@ -3907,7 +4000,7 @@ async def whatsapp_webhook(request: Request):
                 fallback_reply = (
                     "Ku soo dhawoow Deynjir! 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
                 )
-            reply = generate_deynjir_conversation_reply(message_text, fallback_reply)
+            reply = generate_deynjir_conversation_reply(message_text, fallback_reply, sender_phone)
             send_whatsapp(sender_phone, reply or fallback_reply)
             return {"status": "conversational_help_sent"}
 
@@ -4463,20 +4556,29 @@ async def whatsapp_webhook(request: Request):
         fallback_reply = (
             "Dhib ma leh, waan ku hagi doonaa. 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
         )
-        reply = generate_deynjir_conversation_reply(guided_text, fallback_reply)
+        reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
         send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "somali_usage_help_sent"}
 
     if is_deynjir_general_question(guided_text):
         fallback_reply = (
-            "Deynjir wuxuu maamulaa deymaha, lacag-bixinta, macaamiisha iyo ballamaha. Si caadi ah iigu sheeg waxaad rabto."
+            "Deynjir wuxuu maamulaa deymaha, lacag-bixinta macaamiisha iyo ballamaha ganacsigaaga."
         )
-        reply = generate_deynjir_conversation_reply(guided_text, fallback_reply)
+        reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
         send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "system_question_answered"}
 
+    # Continue a recent natural conversation instead of sending the recovery menu.
+    # Explicit financial commands and amounts are excluded by is_contextual_followup.
+    if is_contextual_followup(guided_text, sender_phone):
+        fallback_reply = "Waan ku fahmay. Qaybtee ayaad rabtaa inaan kuu sii sharaxo?"
+        reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
+        send_whatsapp(sender_phone, reply or fallback_reply)
+        return {"status": "contextual_followup_answered"}
+
     menu_words = {"menu", "start", "hello", "hi", "hey", "help", "caawi", "caawimaad", "bilow"}
     if guided_text.casefold() in menu_words:
+        CONVERSATION_SESSIONS.pop(sender_phone, None)
         CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
         GUIDED_SESSIONS[sender_phone] = {
             "stage": "menu",
