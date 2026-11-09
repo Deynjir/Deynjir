@@ -119,9 +119,8 @@ def deynjir_recovery_menu_message(intro=None):
 def deynjir_unrecognized_message():
     """Fallback that gives one reliable next step and activates menu option 3."""
     return (
-        "Waan fahmi waayay fariintaada. 😊\n"
-        "Haddii aad rabto liiska daymaha oo dhan, taabo *3*.\n"
-        "Ama dooro hawl kale: 1️⃣ Deyn cusub, 2️⃣ Lacag-bixin, 4️⃣ Raadi macmiil."
+        "Waan fahmi waayay fariintaada.\n\n"
+        "Soo Qor *MENU* si aad u hesho hagid."
     )
 
 
