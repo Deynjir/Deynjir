@@ -121,7 +121,7 @@ def deynjir_unrecognized_message():
     """Short natural fallback that guides the user without dumping a menu."""
     return (
         "Waan fahmi waayay fariintaada. Ma rabtaa inaad diiwaangeliso deyn cusub, "
-        "lacag-bixin, eegto liiska deymaha, mise raadiso macmiil? Waxba lama beddelin."
+        "lacag-bixin, eegto liiska deymaha, mise raadiso macmiil?"
     )
 
 
