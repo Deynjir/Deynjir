@@ -620,13 +620,15 @@ BUSINESS PERSPECTIVE:
 HOW TO RESPOND:
 - Reply in natural, correct, simple Somali unless the user writes in another language.
 - Be warm, respectful, short, and practical. Do not give a numbered command menu unless the user explicitly asks for the menu.
-- If a user is new, reassure them and teach one simple next step with a concrete example.
-- If confused or frustrated, acknowledge it and guide them calmly. Do not blame the user.
-- If the user says no activity happened, acknowledge their statement; do not invent or claim database facts.
+- Keep EVERY reply extremely short: one or two sentences, ideally 10-20 words total, and never more than 220 characters.
+- Answer only what the user asked. Do not repeat the user's question, introduce yourself again, list features, or add examples unless needed.
+- If a user is new, give just one simple next step and at most one short example.
+- If confused or frustrated, acknowledge briefly and give one helpful next step. No menus.
+- If the user says no activity happened, acknowledge briefly; do not invent or claim database facts.
 - Do not claim that a debt/payment was saved. Python handles all financial writes and confirmations.
 - Do not invent balances, customer names, counts, payment records, due dates, or capabilities.
-- For a question requiring live business data, say you will check it only if the application has routed that request to its database handler. Otherwise ask a short clarification.
-- Never output JSON, action labels, or internal implementation details. Keep the reply to 1-4 short sentences.
+- For live business data, answer only after the application has routed the request to its database handler. Otherwise ask one short clarification.
+- Never output JSON, action labels, headings, feature lists, or internal implementation details.
 """
 
 
@@ -648,7 +650,7 @@ def generate_deynjir_conversation_reply(message_text, fallback=None):
             json={
                 "systemInstruction": {"parts": [{"text": DEYNJIR_ASSISTANT_PROMPT}]},
                 "contents": [{"role": "user", "parts": [{"text": str(message_text or "")[:1500]}]}],
-                "generationConfig": {"temperature": 0.35, "maxOutputTokens": 180},
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 80},
             },
             timeout=20,
         )
@@ -661,11 +663,18 @@ def generate_deynjir_conversation_reply(message_text, fallback=None):
         ).strip()
         if not answer:
             return fallback
-        # Keep WhatsApp responses concise and prevent accidental JSON-style output.
+        # Enforce a short WhatsApp reply even if Gemini ignores the length instruction.
         answer = answer.strip().strip('"')
         if answer.startswith("[") or answer.startswith("{"):
             return fallback
-        return answer[:1100]
+        # Keep at most two sentences.
+        sentence_parts = re.split(r"(?<=[.!?؟])\s+", answer)
+        answer = " ".join(part.strip() for part in sentence_parts[:2] if part.strip())
+        # Hard character limit; avoid cutting in the middle of a word.
+        if len(answer) > 220:
+            shortened = answer[:217].rsplit(" ", 1)[0].rstrip(" ,;:-")
+            answer = (shortened or answer[:217].rstrip()) + "…"
+        return answer
     except Exception as exc:
         print(f"⚠️ Deynjir conversational assistant unavailable: {type(exc).__name__}: {exc}")
         return fallback
@@ -3892,15 +3901,11 @@ async def whatsapp_webhook(request: Request):
             cancel_sender_pending_database_work(sender_phone, business_user_id)
             if is_user_frustrated(message_text):
                 fallback_reply = (
-                    "Waan ku fahmay. Waan ka xumahay haddii isticmaalka Deynjir kugu adkaaday. "
-                    "Aan hal tallaabo mar wada qaadno: ii sheeg waxa aad rabto inaad samayso, "
-                    "tusaale ahaan deyn gelin ama lacag-bixin."
+                    "Waan ku fahmay, iga raalli noqo. Ii sheeg waxa aad rabto, waan ku hagi doonaa."
                 )
             else:
                 fallback_reply = (
-                    "Ku soo dhawoow Deynjir. 😊 Waxaan kaa caawinayaa diiwaangelinta deymaha, "
-                    "lacag-bixinta, raadinta macaamiisha iyo ballamaha. Si fudud iigu sheeg "
-                    "waxa dhacay, tusaale: Cali $20 ayuu deyn qaatay."
+                    "Ku soo dhawoow Deynjir! 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
                 )
             reply = generate_deynjir_conversation_reply(message_text, fallback_reply)
             send_whatsapp(sender_phone, reply or fallback_reply)
@@ -4456,9 +4461,7 @@ async def whatsapp_webhook(request: Request):
     if is_somali_confusion_request(guided_text):
         GUIDED_SESSIONS.pop(sender_phone, None)
         fallback_reply = (
-            "Dhib ma leh, waan ku hagi doonaa. 😊 Waxaad ii sheegi kartaa magaca macmiilka "
-            "iyo lacagta uu deyn qaatay ama bixiyey. Tusaale: Cali $20 ayuu qaatay. "
-            "Haddii aad rabto, tallaabo tallaabo ayaan kula soconayaa."
+            "Dhib ma leh, waan ku hagi doonaa. 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
         )
         reply = generate_deynjir_conversation_reply(guided_text, fallback_reply)
         send_whatsapp(sender_phone, reply or fallback_reply)
@@ -4466,9 +4469,7 @@ async def whatsapp_webhook(request: Request):
 
     if is_deynjir_general_question(guided_text):
         fallback_reply = (
-            "Deynjir wuxuu kaa caawiyaa diiwaangelinta deymaha iyo lacag-bixinta, "
-            "raadinta haraaga macaamiisha, ballamaha iyo xusuusinta. Waxaad si caadi ah "
-            "iigu sheegi kartaa waxa ka dhacay dukaankaaga; haddii aanan hubin, waan ku weydiinayaa."
+            "Deynjir wuxuu maamulaa deymaha, lacag-bixinta, macaamiisha iyo ballamaha. Si caadi ah iigu sheeg waxaad rabto."
         )
         reply = generate_deynjir_conversation_reply(guided_text, fallback_reply)
         send_whatsapp(sender_phone, reply or fallback_reply)
