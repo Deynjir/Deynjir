@@ -54,6 +54,10 @@ CONVERSATION_SESSION_TTL = timedelta(minutes=30)
 PENDING_REPLY_REMINDER_TASKS = {}
 PENDING_REPLY_INBOUND_SNAPSHOTS = {}
 PENDING_REPLY_REMINDER_DELAY_SECONDS = 180
+# Follow-up nudges are opt-in; default off avoids unsolicited repeated messages.
+PENDING_REPLY_REMINDER_ENABLED = os.getenv("PENDING_REPLY_REMINDER_ENABLED", "false").strip().casefold() in {
+    "1", "true", "yes", "on",
+}
 
 # Temporary manual reminder workflow. Sessions expire after 15 minutes and are
 # cleared before sending so a repeated "HAA DIR" cannot resend the same batch.
@@ -91,6 +95,16 @@ UNDO_CONFIRMATION_TTL = timedelta(minutes=5)
 LAST_TRANSACTION_CONTEXT = {}
 # After a short search result, remembers whether the shopkeeper wants the full customer statement.
 SEARCH_DETAIL_SESSIONS = {}
+
+# Central registry for sender-scoped workflows. Lifecycle checks and cleanup
+# use the same registry so new workflows cannot be omitted from interruption logic.
+WORKFLOW_SESSION_MAPS = (
+    IMPORT_SESSIONS, PAYMENT_EXPORT_SESSIONS, REMINDER_SESSIONS,
+    RENAME_SESSIONS, AMOUNT_EDIT_SESSIONS, GUIDED_SESSIONS,
+    PAUSED_GUIDED_SESSIONS, CUSTOMER_MATCH_SESSIONS, DELETE_SESSIONS,
+    UNDO_CONFIRMATION_SESSIONS, SEARCH_DETAIL_SESSIONS,
+    DEPOSIT_OFFER_SESSIONS, CORRECTION_SESSIONS,
+)
 
 
 def deynjir_main_menu():
@@ -256,13 +270,7 @@ def is_user_frustrated(message_text):
 
 def clear_sender_workflow_sessions(sender_phone):
     """Clear only unfinished conversations; never touch committed financial records."""
-    for session_map in (
-        IMPORT_SESSIONS, PAYMENT_EXPORT_SESSIONS, REMINDER_SESSIONS,
-        RENAME_SESSIONS, AMOUNT_EDIT_SESSIONS, GUIDED_SESSIONS, PAUSED_GUIDED_SESSIONS,
-        CUSTOMER_MATCH_SESSIONS, DELETE_SESSIONS,
-        UNDO_CONFIRMATION_SESSIONS, SEARCH_DETAIL_SESSIONS,
-        DEPOSIT_OFFER_SESSIONS, CORRECTION_SESSIONS,
-    ):
+    for session_map in WORKFLOW_SESSION_MAPS:
         session_map.pop(sender_phone, None)
     LAST_TRANSACTION_CONTEXT.pop(sender_phone, None)
     LAST_SELECTED_CUSTOMERS.pop(sender_phone, None)
@@ -489,6 +497,7 @@ SOMALI UNDERSTANDING (IMPORTANT): Understand the whole sentence, not only exact 
 - Understand forms such as qaatay, qaadatay, qaateen, qaadanayo; bixiyay, bixisay, bixiyeen; keenay, keentay; qabtay, qabatay; celiyay, celisay; shubay, shubtay.
 - "ka siiyay" can mean the shop gave the customer credit; classify as ADD only when the sentence clearly describes money given to that customer as a debt. Do not confuse it with money the customer paid back.
 - Remove grammatical filler (wuu, wuxuu, ayay, waxay, ayaan, baan, buu, bay) from the customer name, but preserve every actual name part.
+- Negative/no-activity statements are status information, not transactions. Understand natural variations of negated activity wording (for example, no money was received, no customer repaid, no new debt, or nothing happened today), including informal word order and spelling. Do not create ADD or PAY from them. If a guided workflow is waiting, interpret the reply against that stage; if it clearly reports no activity, end the unfinished flow without saving. If the user says the previous reply was not a name, never use that sentence as a customer name.
 - If a sentence says only that a customer has not paid, do not create a transaction. If the direction or amount is unclear, ask a short clarification. Never invent an amount or mark a partial payment as full.
 - Also understand common informal variants and typos: "wuu qaatay", "wuu qaaty", "qaatey", "qaadatay", "qaateen", "wuu soo celiyey", "soo celisay", "lacagtii wuu keenay", "lacag buu soo shubay", "lacagta waan ka qabtay", "wuu iga soo celiyey", and missing/extra spaces. Normalize spelling for intent, but preserve the customer's actual name as written.
 - Debt examples: "Cali maanta 50 buu qaatay", "Cali 50 ayuu iga qaaty", "Cali raashin ayuu ku qaatay 50", "Cali 50 ku dar xisaabtii hore". The last example is an addition to the existing customer's account, not a replacement of the balance.
@@ -669,7 +678,8 @@ HOW TO RESPOND:
 - After a debt or payment is successfully recorded, do not assume the user wants to record another one. A simple acknowledgement means acknowledge and wait.
 - When describing money owed to the shop, use natural wording such as "lacagta lagu leeyahay" or "deynta lagu leeyahay"; avoid reversing the shopkeeper/customer perspective.
 - If the user's intent is unclear, ask one short question. Do not invent a transaction or turn an acknowledgement into ADD/PAY.
-- If the user says no activity happened, acknowledge briefly; do not invent or claim database facts.
+- If the user reports no activity in natural or misspelled wording, acknowledge briefly; do not ask for an amount, treat the statement as a customer name, open another workflow, or claim database facts.
+- If the user corrects that a reply was not a name, ask for the actual customer name only when a name is currently required.
 - Do not claim that a debt/payment was saved. Python handles all financial writes and confirmations.
 - Do not invent balances, customer names, counts, payment records, due dates, or capabilities.
 - For live business data, answer only after the application has routed the request to its database handler. Otherwise ask one short clarification.
@@ -891,25 +901,60 @@ def is_natural_today_payment_question(message_text):
     ))
 
 
-def is_no_activity_reply(message_text):
-    """Recognize everyday Somali statements that report no business activity."""
-    text = normalize_customer_name(str(message_text or ""))
-    patterns = (
-        r"maanta\s+waxba\s+ma\s+jiraan",
-        r"maanta\s+waxba\s+ma\s+dhicin",
-        r"wax\s+dhaqdhaqaaq\s+ah\s+ma\s+jiro",
-        # Accept both spaced and joined spellings: 'ma jirto' / 'majirto'.
-        r"(?:maanta\s+)?wax\s+(?:deyn|dayn)\s+ah\s+ma\s*jirto",
-        r"maanta\s+(?:wax\s+)?deyn\s+(?:cusub\s+)?ma\s*jirto",
-        r"wax\s+deyn\s+cusub\s+ah\s+ma\s*jirto",
-        r"deyn\s+cusub\s+ma\s*jirto",
-        r"lacag\s+bixin\s+ma\s*jirto",
-        r"lacagtii?\s+hore\s+lama\s+bixin",
-        r"lacagt?\s+hore\s+lama\s+bixin",
-        r"cidina\s+waxba\s+ma\s+bixin",
-        r"qofna\s+waxba\s+ma\s+bixin",
+def classify_no_activity_statement(message_text):
+    """Classify a non-transaction statement; never infer or create a transaction.
+
+    Uses broad negation/activity grammar rather than a closed list of exact
+    example sentences. The result is acknowledgement-only, never a DB action.
+    """
+    text = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
+    if not text:
+        return None
+
+    payment_patterns = (
+        r"\b(?:maanta\s+)?waxba\s+ma\s+(?:bixin|bixinin|keenin|helin)\b",
+        r"\b(?:deyn|dayn|lacag)\b.{0,35}\b(?:igama|iigama|iima|ima)\b.{0,25}\b(?:bixin|bixinin|keenin|soo\s+celin|helin)\b",
+        r"\b(?:igama|iima|ima)\s+(?:bixin|bixinin|keenin|soo\s+celin|helin)\b",
+        r"\b(?:ma|lama)\s+(?:bixin|bixinin|keenin|soo\s+celin|helin|soo\s+gelin|soo\s+xaroon)\b",
+        r"\b(?:wali\s+)?(?:[a-z]+\s+){0,4}(?:ma\s+bixin|ma\s+keenin|ma\s+soo\s+celin)\b",
+        r"\b(?:lacag|lacagta|lacagtii)\b.{0,45}\b(?:ma\s+(?:bixin|soo\s+gelin|soo\s+xaroon|helin|jirto|jiraan)|lama\s+(?:bixin|helin)|baxday\s+ma\s+jirto)\b",
+        r"\b(?:cidna|cidina|qofna|macmiilna)\b.{0,35}\b(?:waxba\s+)?(?:ma\s+bixin|ima\s+soo\s+celin|ma\s+keenin)\b",
+        r"\b(?:waxba|wax\s+lacag\s+ah)\s+(?:lama\s+helin|ma\s+(?:soo\s+gelin|soo\s+xaroon|iman))\b",
+        r"\b(?:lacag\s+bixin|lacagtii?\s+hore)\s+ma\s*(?:jirto|jiraan|dhicin)\b",
     )
-    return any(re.search(pattern, text, re.I) for pattern in patterns)
+    debt_patterns = (
+        r"\b(?:deyn|dayn)\s+(?:cusub\s+)?ma\s*(?:jirto|jiraan|dhicin)\b",
+        r"\bwax\s+(?:deyn|dayn)\s+(?:cusub\s+)?ah\s+ma\s*(?:jirto|jiraan)\b",
+    )
+    general_patterns = (
+        r"\bmaanta\s+waxba\s+ma\s+(?:jiraan|dhicin)\b",
+        r"\bwaxba\s+ma\s+(?:jiraan|dhicin)\b",
+        r"\bwax\s+dhaqdhaqaaq\s+ah\s+ma\s+jiro\b",
+        r"\bmaanta\s+(?:wax\s+)?dhaqdhaqaaq\s+ma\s+jiro\b",
+    )
+    if any(re.search(pattern, text, re.I) for pattern in payment_patterns):
+        return "payment"
+    if any(re.search(pattern, text, re.I) for pattern in debt_patterns):
+        return "debt"
+    if any(re.search(pattern, text, re.I) for pattern in general_patterns):
+        return "general"
+    return None
+
+
+def is_no_activity_reply(message_text):
+    """True when the user reports no activity, not a financial transaction."""
+    return classify_no_activity_statement(message_text) is not None
+
+
+def is_guided_name_correction(message_text):
+    """Recognize that the previous reply was not a customer name."""
+    text = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
+    return bool(re.search(
+        r"^(?:(?:taasi|taas|kan|ta)\s+)?(?:magac(?:a)?\s+)?"
+        r"(?:maaha|ma\s+aha|ma\s+ahan)(?:\s+magac)?$|"
+        r"^ma\s+aha\s+magac$",
+        text, re.I,
+    ))
 
 
 def is_deynjir_greeting(message_text):
@@ -1059,6 +1104,8 @@ def is_clear_new_supported_request(message_text, include_transactions=True):
     if not raw:
         return False
     folded = normalize_customer_name(raw).strip(" .!?؟")
+    if is_no_activity_reply(raw) or is_guided_name_correction(raw):
+        return False
     if parse_transaction_clarification(raw) in {"ADD", "PAY", "CANCEL"}:
         return False
     if folded in {
@@ -1171,12 +1218,7 @@ def is_explicit_operation_request(message_text):
 
 def _has_active_in_memory_workflow(sender_phone):
     """Whether this sender has a resumable multi-step workflow awaiting an answer."""
-    return any(sender_phone in session_map for session_map in (
-        GUIDED_SESSIONS, CUSTOMER_MATCH_SESSIONS, DELETE_SESSIONS,
-        UNDO_CONFIRMATION_SESSIONS, AMOUNT_EDIT_SESSIONS, RENAME_SESSIONS,
-        IMPORT_SESSIONS, PAYMENT_EXPORT_SESSIONS, REMINDER_SESSIONS,
-        SEARCH_DETAIL_SESSIONS, DEPOSIT_OFFER_SESSIONS, CORRECTION_SESSIONS,
-    ))
+    return any(sender_phone in session_map for session_map in WORKFLOW_SESSION_MAPS)
 
 
 def _pending_workflow_snapshot(sender_phone):
@@ -1345,7 +1387,10 @@ async def _send_one_pending_reply_reminder(sender_phone, reminder_text, token):
 
 
 def schedule_pending_reply_reminder(sender_phone, original_prompt):
-    """Schedule exactly one reminder 3 minutes after a workflow question."""
+    """Optionally schedule one reminder; disabled by default to prevent message noise."""
+    if not PENDING_REPLY_REMINDER_ENABLED:
+        PENDING_REPLY_INBOUND_SNAPSHOTS.pop(str(sender_phone), None)
+        return
     sender_phone = str(sender_phone)
     reminder_text = _pending_reply_reminder_text(sender_phone, original_prompt)
     baseline = PENDING_REPLY_INBOUND_SNAPSHOTS.pop(sender_phone, None)
@@ -2320,7 +2365,7 @@ def classify_transaction_direction(message_text):
     # Check these before broad verb stems such as "bixin" or "keenay".
     negative_transaction_patterns = (
         r"\b(?:wali\s+)?ma\s+(?:bixin|bixinin|bixinayo|bixinay|bixin|keenin|keenay|soo\s+celin|soo\s+celinayo|soo\s+celinay)\b",
-        r"\b(?:ima|uma)\s+(?:bixin|keenin|soo\s+celin)\b",
+        r"\b(?:ima|uma|igama|iigama|iima)\s+(?:bixin|bixinin|keenin|soo\s+celin|helin)\b",
         r"\b(?:bixin\s+maayo|bixin\s+mayso|keenin\s+maayo|soo\s+celin\s+maayo)\b",
         r"\b(?:ma\s+uusan|ma\s+aysan|ma\s+uu|ma\s+ay)\s+(?:bixin|keenin|soo\s+celin)\b",
         r"\b(?:not\s+paid|hasn.t\s+paid|didn.t\s+pay|unpaid|payment\s+not\s+received)\b",
@@ -3377,6 +3422,13 @@ def handle_delete_session(sender_phone, business_user_id, message_text):
 
     answer = " ".join(str(message_text or "").strip().split())
     folded = normalize_customer_name(answer)
+    if state.get("stage") in {"name", "choose"} and is_no_activity_reply(answer):
+        DELETE_SESSIONS.pop(sender_phone, None)
+        send_whatsapp(sender_phone, "Waan fahmay. Hawshii tirtiridda waa la joojiyey; waxba lama tirtirin.")
+        return {"status": "delete_no_activity_cancelled"}
+    if state.get("stage") == "name" and is_guided_name_correction(answer):
+        send_whatsapp(sender_phone, "Waan fahmay—taasi magac ma ahayn. Fadlan qor magaca macmiilka aad rabto inaad tirtirto, ama *JOOJI*.")
+        return {"status": "delete_name_correction_requested"}
     if re.fullmatch(r"(?:jooji|cancel|baaji|stop|maya)", folded, re.I):
         DELETE_SESSIONS.pop(sender_phone, None)
         send_whatsapp(sender_phone, "✅ Tirtiridda waa la joojiyey. Waxba lama tirtirin.")
@@ -5096,6 +5148,18 @@ async def whatsapp_webhook(request: Request):
         )
         if (pending_payment_result.data and not is_clear_new_supported_request(message_text, include_transactions=True) and parse_transaction_clarification(message_text) not in {"ADD", "PAY"}):
             pending_payment = pending_payment_result.data[0]
+            if classify_no_activity_statement(message_text) and pending_payment.get("status") == "pending":
+                rejected_ok, rejected_value = _reject_pending_payment_confirmation(
+                    pending_payment["id"], sender_phone
+                )
+                if not rejected_ok:
+                    send_whatsapp(sender_phone, rejected_value)
+                    return {"status": "payment_no_activity_rejection_failed"}
+                send_whatsapp(
+                    sender_phone,
+                    "Waan fahmay. Lacag-bixintii sugaysay waa la joojiyey. Waxba lama kaydin."
+                )
+                return {"status": "payment_no_activity_rejected"}
             if pending_payment.get("status") == "processing":
                 send_whatsapp(sender_phone, "Lacag-bixintan hadda waa la farsamaynayaa. Fadlan sug; ha ku celin xaqiijinta.")
                 return {"status": "payment_confirmation_processing"}
@@ -5528,6 +5592,51 @@ async def whatsapp_webhook(request: Request):
 
     guided_normalized = normalize_customer_name(guided_text).strip(" .!?؟")
 
+    # Stage-aware semantic triage: status statements and name corrections are
+    # not customer names or amounts. Resolve them before the guided parser.
+    guided_stage = str((guided or {}).get("stage") or "")
+    no_activity_kind = classify_no_activity_statement(guided_text)
+    if no_activity_kind and guided_stage in {
+        "debt_name", "payment_name", "debt_amount", "payment_amount",
+    }:
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        if no_activity_kind == "payment":
+            no_activity_reply = (
+                "Waan fahmay. Lacag-bixin lama diiwaangelin, hawshiina waa la joojiyey. "
+                "Waxba lama kaydin."
+            )
+        elif no_activity_kind == "debt":
+            no_activity_reply = (
+                "Waan fahmay. Deyn cusub lama diiwaangelin, hawshiina waa la joojiyey. "
+                "Waxba lama kaydin."
+            )
+        else:
+            no_activity_reply = (
+                "Waan fahmay. Hawshii hadda lama sii wadin; waxba lama diiwaangelin."
+            )
+        remember_conversation_outcome(sender_phone, guided_text, no_activity_reply)
+        send_whatsapp(sender_phone, no_activity_reply)
+        return {"status": "guided_no_activity_cancelled", "kind": no_activity_kind}
+
+    if guided_stage in {"debt_name", "payment_name", "debt_amount", "payment_amount"} and is_guided_name_correction(guided_text):
+        expected_name = (
+            "macmiilka deynta lagu leeyahay"
+            if guided_stage in {"debt_name", "debt_amount"}
+            else "macmiilka lacagta bixiyey"
+        )
+        if guided_stage in {"debt_amount", "payment_amount"} and guided:
+            guided["stage"] = "debt_name" if guided_stage == "debt_amount" else "payment_name"
+            guided.pop("customer_name", None)
+            guided.pop("amount", None)
+            guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+        name_correction_reply = (
+            f"Waan fahmay—fariintaasi magac ma ahayn. Fadlan qor magaca {expected_name}, "
+            "ama *JOOJI* si aad uga baxdo."
+        )
+        remember_conversation_outcome(sender_phone, guided_text, name_correction_reply)
+        send_whatsapp(sender_phone, name_correction_reply)
+        return {"status": "guided_name_correction_requested"}
+
     # Customer-account requests must enter the real HISTORY/statement workflow,
     # not the conversational fallback. Ask for the customer name when omitted.
     account_request, account_customer_name = parse_customer_account_request(guided_text)
@@ -5693,6 +5802,8 @@ async def whatsapp_webhook(request: Request):
         and not is_explicit_operation_request(guided_text)
         and not is_explicit_list_request(guided_text)
         and not is_contextual_debt_list_followup(guided_text, sender_phone)
+        and not is_no_activity_reply(guided_text)
+        and not is_guided_name_correction(guided_text)
         and is_contextual_followup(guided_text, sender_phone)
     ):
         fallback_reply = "Waan ku fahmay. Qaybtee ayaad rabtaa inaan kuu sii sharaxo?"
@@ -5881,14 +5992,7 @@ async def whatsapp_webhook(request: Request):
                 folded_reply,
                 flags=re.I,
             ))
-            no_payment_reply = bool(re.search(
-                r"\b(?:waxba|waxba\s+kama\s+helin|wax\s+lacag\s+ah\s+"
-                r"kama\s+helin|lacag\s+ma\s+helin|wax\s+lacag\s+ah\s+"
-                r"ma\s+helin|lacag\s+ma\s+bixin|ma\s+bixin|ma\s+helin|"
-                r"lacag\s+ma\s+jirto|ma\s+jirto\s+lacag)\b",
-                folded_reply,
-                flags=re.I,
-            ))
+            no_payment_reply = classify_no_activity_statement(guided_text) == "payment"
             if debt_taken_correction:
                 # The user clarified that no payment was received and the
                 # customer took debt instead. Switch the pending guided action
@@ -5907,16 +6011,12 @@ async def whatsapp_webhook(request: Request):
                 )
                 return {"status": "guided_payment_corrected_to_debt"}
             if no_payment_reply:
-                # Keep the short session alive because the user may be about to
-                # explain that this was a new debt rather than a payment.
-                guided["payment_declined"] = True
-                guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-                send_whatsapp(
-                    sender_phone,
-                    "Hagaag, wax lacag ah lama helin. Lacag-bixin lama diiwaangelin.\n\n"
-                    "Haddii macmiilku deyn cusub qaatay, ii sheeg taas iyo lacagta ay qaadatay. "
-                    "Haddii kale qor *JOOJI*."
-                )
+                # A negative statement completes this interaction; do not keep
+                # asking for an amount or silently convert it into a new debt.
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                reply = "Waan fahmay. Lacag-bixin lama diiwaangelin, hawshiina waa la joojiyey. Waxba lama kaydin."
+                remember_conversation_outcome(sender_phone, guided_text, reply)
+                send_whatsapp(sender_phone, reply)
                 return {"status": "guided_payment_denied"}
         amount = _guided_amount(guided_text)
         if amount is None:
@@ -6246,6 +6346,13 @@ async def whatsapp_webhook(request: Request):
     if customer_match_state and not pending_new_request:
         answer = str(message_text or "").strip()
         answer_folded = normalize_customer_name(answer)
+        if classify_no_activity_statement(answer):
+            CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, "Waan fahmay. Xulashadii macmiilka waa la joojiyey; waxba lama diiwaangelin.")
+            return {"status": "customer_match_no_activity_cancelled"}
+        if is_guided_name_correction(answer) and customer_match_state.get("stage") in {"enter_full_name", "choose"}:
+            send_whatsapp(sender_phone, "Waan fahmay—fariintaasi magac ma ahayn. Fadlan qor magaca buuxa ee macmiilka, ama *JOOJI*.")
+            return {"status": "customer_match_name_correction_requested"}
         if re.fullmatch(r"(?:jooji|cancel|baaji|stop)", answer, re.I):
             CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, "Waa la joojiyey. Waxba lama diiwaangelin.")
@@ -6796,17 +6903,16 @@ async def whatsapp_webhook(request: Request):
 
     # Natural-language business questions are routed to the existing database
     # read paths before Gemini's transaction JSON parser can misclassify them.
-    if is_no_activity_reply(message_text):
-        text_norm = normalize_customer_name(message_text)
-        if re.search(r"(lacagtii? hore lama bixin|lacagt? hore lama bixin|cidina waxba ma bixin|qofna waxba ma bixin)", text_norm):
-            reply = (
-                "Waan fahmay. Lacag-bixin cusub lama diiwaangelin, sida aad sheegtay. "
-                "Deyntii macaamiisha ee hore sidii hore ayay u taagan tahay. 🤝"
-            )
+    no_activity_kind = classify_no_activity_statement(message_text)
+    if no_activity_kind:
+        if no_activity_kind == "payment":
+            reply = "Waan fahmay. Lacag-bixin lama diiwaangelin. Waxba lama kaydin. 🤝"
+        elif no_activity_kind == "debt":
+            reply = "Waan fahmay. Deyn cusub lama diiwaangelin. Waxba lama kaydin. 🤝"
         else:
-            reply = "Waan fahmay. Maanta deyn cusub ma jirto sida aad sheegtay. Mahadsanid. 🤝"
+            reply = "Waan fahmay. Wax dhaqdhaqaaq cusub lama diiwaangelin. 🤝"
         send_whatsapp(sender_phone, reply)
-        return {"status": "no_activity_reply_acknowledged"}
+        return {"status": "no_activity_reply_acknowledged", "kind": no_activity_kind}
 
     if is_natural_top_debt_question(message_text):
         try:
@@ -7050,18 +7156,15 @@ async def whatsapp_webhook(request: Request):
                         entries = [{"action": "SEARCH", "customer_name": raw_query}]
                         print(f"🛟 Local fallback routing known customer name to SEARCH: {raw_query!r}")
             if not entries:
-                pause_guided_session_for_replacement(sender_phone)
-                GUIDED_SESSIONS[sender_phone] = {
-                    "stage": "menu",
-                    "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
-                }
+                # An unknown message is not a request to open the menu. Avoid
+                # hidden menu state that could capture a later number.
                 if is_rate_limited:
                     send_whatsapp(
                         sender_phone,
-                        "⏳ Adeegga fahamka fariinta hadda waa mashquul. Waxba lama beddelin.\n\n"
-                        "Waxaad dooran kartaa mid ka mid ah hawlahan: \n" + deynjir_main_menu()
+                        "⏳ Adeegga fahamka fariinta hadda waa mashquul. Waxba lama beddelin. "
+                        "Fadlan fariinta mar kale isku day."
                     )
-                    return {"status": "gemini_rate_limited_guidance_sent"}
+                    return {"status": "gemini_rate_limited_clarification"}
                 send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "friendly_fallback_sent"}
 
