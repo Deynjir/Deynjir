@@ -332,6 +332,8 @@ def normalize_easy_command(value):
         "ku dar deyn": "GUIDED_DEBT", "ku dar dayn": "GUIDED_DEBT",
         "balanta beri": "BALAMAHA BERRI", "ballanta beri": "BALAMAHA BERRI",
         "balamaha beri": "BALAMAHA BERRI", "ballamaha beri": "BALAMAHA BERRI",
+        "balanta berri": "BALAMAHA BERRI", "ballanta berri": "BALAMAHA BERRI",
+        "balamaha berri": "BALAMAHA BERRI", "ballamaha berri": "BALAMAHA BERRI",
 
         # Common Somali merchant spelling and phrasing variants.
         "lacgta": "LACAGTA", "lacg": "LACAG",
@@ -2126,8 +2128,8 @@ def is_explicit_list_request(message_text):
         r"(?:\s+(?:oo\s+dhan|oo\s+idil))|"
         r"(?:liis|liiska|liiska deynta|liiska daynta|"
         r"liiska daynta iyo balamaha|liiska deynta iyo balamaha|"
-        r"balamaha(?: maanta| beri)?|ballamaha(?: maanta| beri)?|"
-        r"balanta(?: maanta| beri)?|ballanta(?: maanta| beri)?|"
+        r"balamaha(?: maanta| beri| berri)?|ballamaha(?: maanta| beri| berri)?|"
+        r"balanta(?: maanta| beri| berri)?|ballanta(?: maanta| beri| berri)?|"
         r"balan(?:ta)?(?: maanta| beri)?)",
         raw,
         flags=re.I,
