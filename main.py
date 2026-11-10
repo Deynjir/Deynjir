@@ -2102,8 +2102,41 @@ def is_missing_value(value):
     }
 
 
+def parse_local_appointment_list_request(message_text):
+    """Return a date-filtered LIST entry for clear today/tomorrow appointment commands."""
+    raw = normalize_customer_name(message_text).strip(" .!?؟")
+    appointment_prefix = r"(?:balamaha|ballamaha|balanta|ballanta|balan(?:ta)?)"
+    if re.fullmatch(appointment_prefix + r"\s+(?:maanta|today)", raw, re.I):
+        target_date = today_eat()
+        return {
+            "action": "LIST", "customer_name": None, "amount": None,
+            "filter_date": target_date.isoformat(), "filter_type": "today",
+        }
+    if re.fullmatch(appointment_prefix + r"\s+(?:beri|berri|tomorrow)", raw, re.I):
+        target_date = today_eat() + timedelta(days=1)
+        return {
+            "action": "LIST", "customer_name": None, "amount": None,
+            "filter_date": target_date.isoformat(), "filter_type": "tomorrow",
+        }
+    return None
+
+
+def is_explicit_appointment_list_request(message_text):
+    """Allow appointment-list phrasing with relative or explicit calendar dates."""
+    raw = normalize_customer_name(message_text).strip(" .!?؟")
+    if not re.match(r"^(?:balamaha|ballamaha|balanta|ballanta|balan(?:ta)?)\b", raw, re.I):
+        return False
+    return bool(re.search(
+        r"\b(?:maanta|beri|berri|today|tomorrow|\d{1,2}(?:st|nd|rd|th)?|"
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+        r"dec(?:ember)?)\b",
+        raw, re.I
+    ))
+
+
 def is_explicit_list_request(message_text):
-    """Recognize clear debt-list and appointment-list requests without Gemini."""
+    """Recognize clear debt-list requests without conflating appointment filters."""
     raw = normalize_customer_name(message_text).strip(" .!?؟")
     debt_list_phrases = {
         "liis", "liiska", "liiska deynta", "liiska daynta",
@@ -2127,10 +2160,7 @@ def is_explicit_list_request(message_text):
         r"(?:liiska\s+)?(?:daymaha|deymaha|deynta|daynta)"
         r"(?:\s+(?:oo\s+dhan|oo\s+idil))|"
         r"(?:liis|liiska|liiska deynta|liiska daynta|"
-        r"liiska daynta iyo balamaha|liiska deynta iyo balamaha|"
-        r"balamaha(?: maanta| beri| berri)?|ballamaha(?: maanta| beri| berri)?|"
-        r"balanta(?: maanta| beri| berri)?|ballanta(?: maanta| beri| berri)?|"
-        r"balan(?:ta)?(?: maanta| beri)?)",
+        r"liiska daynta iyo balamaha|liiska deynta iyo balamaha)",
         raw,
         flags=re.I,
     )) or is_fuzzy_debt_list_command(message_text)
@@ -6488,6 +6518,9 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, "Waan fahmay inaad rabto lacagihii maanta la qabtay, balse xogta hadda lama soo saari karin. Fadlan mar kale isku day.")
             return {"status": "today_payment_summary_error"}
 
+    # Route clear appointment requests before the generic debt-list matcher.
+    local_appointment_entry = parse_local_appointment_list_request(message_text)
+
     # Fast read-only command matching: avoid a Gemini request for debt lists.
     fuzzy_list_requested = (
         is_fuzzy_debt_list_command(message_text)
@@ -6581,6 +6614,12 @@ async def whatsapp_webhook(request: Request):
         print(
             "🧠 Contextual Somali payment follow-up resolved to recently selected customer: "
             f"{contextual_payment_entry['customer_name']!r}"
+        )
+    elif local_appointment_entry:
+        entries = [local_appointment_entry]
+        print(
+            "📅 Local appointment-list command recognized: "
+            f"{message_text!r} -> {local_appointment_entry['filter_date']}"
         )
     elif (direct_somali_entries := local_fallback_parse(message_text)) and any(
         isinstance(item, dict)
@@ -6743,7 +6782,11 @@ async def whatsapp_webhook(request: Request):
 
         # Do not let Gemini turn unrelated text such as "none" into a debt list.
         # Keep only explicit list commands; a bare "deyn" is clarified earlier.
-        if any(item.get("action") == "LIST" for item in entries) and not is_explicit_list_request(message_text):
+        if (
+            any(item.get("action") == "LIST" for item in entries)
+            and not is_explicit_list_request(message_text)
+            and not is_explicit_appointment_list_request(message_text)
+        ):
             print(f"⚠️ Rejected LIST intent without an explicit list command: {message_text!r}")
             activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
