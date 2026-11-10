@@ -4021,12 +4021,11 @@ async def whatsapp_webhook(request: Request):
 
     type_webhook = data.get("typeWebhook")
 
-    # Accept messages received from WhatsApp contacts AND messages manually
-    # sent from the linked WhatsApp phone. Green-API uses
-    # outgoingMessageReceived for phone-originated messages, while messages
-    # sent by this bot through Green-API use outgoingAPIMessageReceived.
-    # Ignore outgoingAPIMessageReceived to prevent the bot processing its
-    # own replies as fresh commands.
+    # Accept contact messages and commands manually sent from the linked
+    # WhatsApp handset. Green-API labels handset-originated messages
+    # outgoingMessageReceived; keep this enabled because the shopkeeper may
+    # operate Deynjir from that same linked phone. Bot/API-sent messages use
+    # outgoingAPIMessageReceived and remain ignored to prevent reply loops.
     allowed_types = {
         "incomingMessageReceived",
         "outgoingMessageReceived",
@@ -4034,6 +4033,8 @@ async def whatsapp_webhook(request: Request):
 
     if type_webhook not in allowed_types:
         return {"status": "ignored"}
+    if type_webhook == "outgoingMessageReceived":
+        print("📱 Processing a message manually sent from the linked WhatsApp handset")
 
     sender_data = data.get("senderData", {})
     sender_chat_id = sender_data.get("chatId")
@@ -6439,6 +6440,61 @@ async def whatsapp_webhook(request: Request):
                 send_whatsapp(sender_phone, "Deyn cusub baa mise lacag-bixin?\n\nSoo qor *DEYN CUSUB* ama *LACAG BIXIN*. Qor *JOOJI* haddii aad rabto inaad ka baxdo.")
                 return {"status": "awaiting_transaction_clarification"}
 
+    # A standalone 1-6 outside any active workflow is treated as a menu choice.
+    # This protects users whose menu state was lost (for example after a Render
+    # restart) and prevents Gemini/customer-search fallback from treating "5"
+    # as a customer name. Existing active workflows retain ownership of numeric
+    # replies (amounts, confirmations, reminder/import selections, etc.).
+    standalone_menu_choice = str(message_text or "").strip()
+    if (
+        re.fullmatch(r"[1-6]", standalone_menu_choice)
+        and not _has_active_in_memory_workflow(sender_phone)
+        and pending_clarification is None
+    ):
+        if standalone_menu_choice == "1":
+            pause_guided_session_for_replacement(sender_phone)
+            GUIDED_SESSIONS[sender_phone] = {
+                "stage": "debt_name",
+                "transaction_type": "debt",
+                "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+            }
+            send_whatsapp(
+                sender_phone,
+                "Magaca macmiilka deynta lagu leeyahay?\n\nQor *JOOJI* si aad uga baxdo."
+            )
+            return {"status": "menu_choice_debt_started"}
+        if standalone_menu_choice == "2":
+            pause_guided_session_for_replacement(sender_phone)
+            GUIDED_SESSIONS[sender_phone] = {
+                "stage": "payment_name",
+                "transaction_type": "payment",
+                "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+            }
+            send_whatsapp(
+                sender_phone,
+                "Magaca qofka lacagta bixiyey?\n\nQor *JOOJI* si aad uga baxdo."
+            )
+            return {"status": "menu_choice_payment_started"}
+        if standalone_menu_choice == "3":
+            message_text = "LIISKA DAYNTA"
+            guided_text = message_text
+            print("🧭 Standalone menu choice 3 routed locally to debt list")
+        elif standalone_menu_choice == "4":
+            pause_guided_session_for_replacement(sender_phone)
+            GUIDED_SESSIONS[sender_phone] = {
+                "stage": "search_name",
+                "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+            }
+            send_whatsapp(sender_phone, "Qor magaca macmiilka aad raadinayso.\n\nQor *JOOJI* si aad uga baxdo.")
+            return {"status": "menu_choice_search_started"}
+        elif standalone_menu_choice == "5":
+            message_text = "Balamaha Maanta"
+            guided_text = message_text
+            print("🧭 Standalone menu choice 5 routed locally to today's appointments")
+        elif standalone_menu_choice == "6":
+            send_whatsapp(sender_phone, deynjir_help_message())
+            return {"status": "menu_choice_help_sent"}
+
     # Manual debt-reminder workflow: fully rule-based, no Gemini request.
     # Start: XUSUUSIN -> numbered unpaid-customer list -> "1,3" -> confirmation.
     reminder_text = str(message_text or "").strip()
@@ -6983,7 +7039,8 @@ async def whatsapp_webhook(request: Request):
                     r"\b(?:today|tomorrow|maanta|berri|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b",
                     raw_query, flags=re.I
                 ))
-                if raw_query and not has_date_words and not re.search(r"[,$]\s*\d|\d\s*\$", raw_query):
+                if (raw_query and not re.fullmatch(r"\s*\d+\s*", raw_query) and not has_date_words
+                        and not re.search(r"[,$]\s*\d|\d\s*\$", raw_query)):
                     try:
                         fallback_matches = find_debtor_matches(business_user_id, raw_query)
                     except Exception as fallback_err:
@@ -7334,12 +7391,12 @@ async def whatsapp_webhook(request: Request):
                 amount_question = (
                     f"{name}, immisa lacag ah ayaa lagu leeyahay?"
                     if action == "ADD"
-                    else f"Waa immisa Lacag bixinta {name}"
+                    else f"{name}, immisa dollar ayuu bixiyey?"
                 )
                 send_whatsapp(
                     sender_phone,
-                    f"{amount_question}\n\nQor lacagta oo keliya. "
-                    "ama Qor *JOOJI* si aad uga baxdo."
+                    f"{amount_question}\n\nQor lacagta oo keliya. Hada Waxba lama diiwaangelin. "
+                    "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
                 )
                 print(f"⚠️ Amount missing; saved pending transaction context: action={action}, customer={name!r}; message={message_text!r}")
                 continue
