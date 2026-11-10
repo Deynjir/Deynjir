@@ -2654,6 +2654,121 @@ def parse_transaction_clarification(message_text):
     return None
 
 
+def parse_transaction_batch_text(message_text):
+    """Parse an explicitly directed multi-row ADD/PAY text list conservatively.
+
+    Supported examples:
+      DEYN CUSUB\nCali 20\nAamina 35
+      LACAG BIXIN\nCali $10\nAamina $15
+      Cali $20 ayuu deyn qaatay\nAamina $30 ayay deyn qaadatay
+
+    Returns (mode, rows), or None. Every non-header row must parse; no row is
+    silently dropped. The caller stages a preview and requires the existing OK.
+    """
+    raw = str(message_text or "").replace("\r", "\n").strip()
+    if not raw:
+        return None
+
+    source_lines = []
+    for source_line in raw.split("\n"):
+        line = " ".join(source_line.split()).strip()
+        if not line:
+            continue
+        money_tokens = re.findall(r"\$\s*\d+(?:[.,]\d{1,2})?|(?<![\w/.-])\d+(?:[.,]\d{1,2})?\s*\$", line)
+        if len(money_tokens) > 1 and ("," in line or ";" in line):
+            source_lines.extend(part.strip() for part in re.split(r"[,;]", line) if part.strip())
+        elif ";" in line:
+            source_lines.extend(part.strip() for part in line.split(";") if part.strip())
+        else:
+            source_lines.append(line)
+    if not source_lines:
+        return None
+
+    add_header = re.compile(r"^(?:deyn|dayn)(?:\s+(?:cusub|cusubta))?$|^(?:add|new\s+debt)$", re.I)
+    pay_header = re.compile(r"^(?:lacag\s*bixin(?:ta)?|bixin|payment(?:s)?)$", re.I)
+    mode = None
+    rows = []
+    for line in source_lines:
+        clean = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        if add_header.fullmatch(clean):
+            if mode == "payment":
+                return None
+            mode = "debt"
+            continue
+        if pay_header.fullmatch(clean):
+            if mode == "debt":
+                return None
+            mode = "payment"
+            continue
+        rows.append(clean)
+
+    if len(rows) < 2:
+        return None
+
+    parsed_rows = []
+    row_actions = set()
+    for row in rows:
+        folded = normalize_customer_name(row)
+        add_mark = bool(re.search(
+            r"\b(?:deyn|dayn)\s+(?:cusub|qaato|qaatay|qaadatay|qaatey)\b|"
+            r"\b(?:iga\s+qaatay|ayuu\s+qaatay|wuxuu\s+iga\s+qaatay|amaah)\b",
+            folded, re.I))
+        pay_mark = bool(re.search(
+            r"\b(?:lacag\s*bixin|bixiyay|bixiyey|bixisay|bixiyeen|soo\s+celiyay|"
+            r"soo\s+celiyey|celiyay|celiyey|lacagtii\s+waa\s+la\s+helay)\b",
+            folded, re.I))
+        row_action = "debt" if add_mark and not pay_mark else ("payment" if pay_mark and not add_mark else None)
+        if row_action:
+            row_actions.add(row_action)
+        effective_mode = row_action or mode
+        if effective_mode not in {"debt", "payment"}:
+            return None
+        if mode and row_action and row_action != mode:
+            return None
+
+        # Exactly one amount per row; a currency marker is preferred, while a
+        # plain trailing amount is accepted only under an explicit global header.
+        amount_matches = list(re.finditer(
+            r"\$\s*(\d+(?:[.,]\d{1,2})?)|(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)\s*\$",
+            row))
+        if not amount_matches and (mode or row_action):
+            # Unmarked amounts are accepted only when the transaction direction
+            # is explicit and the number is short enough not to be a phone number.
+            amount_matches = list(re.finditer(r"(?<![\w/.-])(\d{1,7}(?:[.,]\d{1,2})?)(?![\w/.-])", row))
+        if len(amount_matches) != 1:
+            return None
+        m = amount_matches[0]
+        amount_text = next((g for g in m.groups() if g is not None), None)
+        try:
+            amount = float(amount_text.replace(",", "."))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(amount) or amount <= 0:
+            return None
+
+        name = (row[:m.start()] + " " + row[m.end():]).strip()
+        name = re.sub(r"(?i)\b(?:deyn|dayn|cusub|lacag|bixin|bixiyay|bixiyey|bixisay|"
+                      r"bixiyeen|ayuu|wuxuu|wuu|ayaa|ayay|waxay|way|iga|qaatay|"
+                      r"qaadatay|qaatey|qaato|soo|celiyay|celiyey|amaah|usd|dollars?|dollar)\b", " ", name)
+        name = re.sub(r"[$]", " ", name)
+        name = " ".join(name.split()).strip(" .,:;-")
+        if not name or len(name) > 120 or not re.search(r"[A-Za-z\u0080-\uffff]", name):
+            return None
+        parsed_rows.append({"name": name, "amount": round(amount, 2), "promised_date": None, "phone_number": None})
+
+    if len(row_actions) > 1:
+        return None
+    if mode is None:
+        if len(row_actions) != 1:
+            return None
+        mode = next(iter(row_actions))
+    if row_actions and next(iter(row_actions)) != mode:
+        return None
+    if len(parsed_rows) < 2 or len(parsed_rows) > 50:
+        return None
+    return mode, parsed_rows
+
+
 def parse_multiline_menu_transaction(message_text):
     """Understand a menu choice, customer, amount, and optional due date
     sent together, for example:
@@ -3649,10 +3764,9 @@ def _extract_import_text(raw_text, import_mode="debt"):
         )
     prompt = task + "\n\nTEXT:\n" + raw_text
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    response = requests.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-        json={"contents":[{"role":"user","parts":[{"text":prompt}]}],
-              "generationConfig":{"temperature":0,"responseMimeType":"application/json"}}, timeout=45)
-    response.raise_for_status()
+    payload = {"contents":[{"role":"user","parts":[{"text":prompt}]}],
+               "generationConfig":{"temperature":0,"responseMimeType":"application/json"}}
+    response = _gemini_generate_content(url, payload, timeout=60)
     data = response.json()
     text = "".join(x.get("text", "") for x in data.get("candidates", [{}])[0].get("content", {}).get("parts", []))
     parsed = json.loads(text)
@@ -3833,39 +3947,51 @@ def _commit_import(admin_phone, session):
                 )
             prepared.append((item, debtor))
 
-        saved = 0
-        try:
-            for item, debtor in prepared:
-                rpc_result = supabase.rpc("record_debt_payment_with_history", {
-                    "p_customer_id": str(debtor["id"]),
-                    "p_business_user_id": str(business_user_id),
-                    "p_amount": round(float(item["amount"]), 2),
-                    "p_description": str(item.get("description") or "-").strip() or "-",
-                }).execute()
-                rpc_data = rpc_result.data
-                if isinstance(rpc_data, list):
-                    rpc_data = rpc_data[0] if rpc_data else None
-                if not isinstance(rpc_data, dict) or not rpc_data.get("id"):
-                    raise RuntimeError(
-                        "record_debt_payment ma xaqiijin lacag-bixinta. Hubi Supabase."
-                    )
-                saved += 1
-        except Exception as exc:
-            if saved:
-                send_whatsapp(
-                    admin_phone,
-                    f"⚠️ Import-ku qayb ayuu u dhacay: {saved} lacag-bixin waa la kaydiyey, "
-                    "inta kale way fashilantay. Ha ku celin isla liiska; marka hore hubi xisaabta."
-                )
-                exc.partial_import = True
-            raise
+        # One database function call commits the entire reviewed batch atomically.
+        # Apply deynjir_payment_batch_migration.sql before deploying this code.
+        payment_payload = [
+            {
+                "customer_id": str(debtor["id"]),
+                "amount": round(float(item["amount"]), 2),
+                "description": str(item.get("description") or "-").strip() or "-",
+            }
+            for item, debtor in prepared
+        ]
+        if len(payment_payload) == 1:
+            # Preserve compatibility for one-row imports; the batch RPC requires 2+.
+            item, debtor = prepared[0]
+            rpc_result = supabase.rpc("record_debt_payment_with_history", {
+                "p_customer_id": str(debtor["id"]),
+                "p_business_user_id": str(business_user_id),
+                "p_amount": round(float(item["amount"]), 2),
+                "p_description": str(item.get("description") or "-").strip() or "-",
+            }).execute()
+            rpc_data = rpc_result.data
+            if isinstance(rpc_data, list):
+                rpc_data = rpc_data[0] if rpc_data else None
+            if not isinstance(rpc_data, dict) or not rpc_data.get("id"):
+                raise RuntimeError("record_debt_payment ma xaqiijin lacag-bixinta. Hubi Supabase.")
+            saved = 1
+        else:
+            batch_result = supabase.rpc("record_debt_payment_batch_with_history", {
+                "p_business_user_id": str(business_user_id),
+                "p_payments": payment_payload,
+            }).execute()
+            batch_data = batch_result.data
+            if isinstance(batch_data, list):
+                batch_data = batch_data[0] if batch_data else None
+            if not isinstance(batch_data, dict) or batch_data.get("success") is not True:
+                raise RuntimeError("Supabase ma xaqiijin kaydinta dhammaan lacag-bixinnada.")
+            saved = int(batch_data.get("count") or 0)
+            if saved != len(payment_payload):
+                raise RuntimeError("Tirada lacag-bixinnada la xaqiijiyey ma waafaqsana liiska.")
 
         total_paid = sum(float(item["amount"]) for item in entries)
         send_whatsapp(
             admin_phone,
-            "✅ Import-ka lacag-bixinta waa dhammaaday.\\n"
-            f"Lacag-bixin la diiwaangeliyay: {saved}\\n"
-            f"Wadarta lacagta: ${total_paid:.2f}\\n"
+            "✅ Import-ka lacag-bixinta waa dhammaaday.\n"
+            f"Lacag-bixin la diiwaangeliyay: {saved}\n"
+            f"Wadarta lacagta: ${total_paid:.2f}\n"
             "Lacagaha waxaa laga jaray deymaha dukaanka la doortay."
         )
 
@@ -3895,11 +4021,11 @@ def _commit_import(admin_phone, session):
 
         if shop_phone and shop_phone != admin_clean:
             business_message = (
-                "✅ *Lacag-bixinnada waa la diiwaangeliyey.*\\n\\n"
-                f"Dukaan: *{shop_name}*\\n"
-                f"Tirada lacag-bixinnada: *{saved}*\\n"
-                f"Wadarta lacagta: *${total_paid:.2f}*\\n\\n"
-                "Lacagahan waxaa laga jaray deymaha macaamiisha ee dukaankaaga.\\n"
+                "✅ *Lacag-bixinnada waa la diiwaangeliyey.*\n\n"
+                f"Dukaan: *{shop_name}*\n"
+                f"Tirada lacag-bixinnada: *{saved}*\n"
+                f"Wadarta lacagta: *${total_paid:.2f}*\n\n"
+                "Lacagahan waxaa laga jaray deymaha macaamiisha ee dukaankaaga.\n"
                 "Qor *LIISKA DAYNTA* si aad u aragto haraaga cusub."
             )
             notification_sent = send_whatsapp(shop_phone, business_message)
@@ -3915,64 +4041,81 @@ def _commit_import(admin_phone, session):
     added = 0
     skipped = int(session.get("pre_skipped", 0) or 0)
     allow_duplicates = session.get("duplicate_choice") == "2"
+    prepared_debts = []
 
-    try:
-        for item in entries:
-            amount = float(item["amount"])
-            if not math.isfinite(amount) or amount <= 0:
-                raise ValueError(f"{item.get('name')}: lacagtu ma saxna.")
-
-            # Choice 2 explicitly allows same-name/same-amount rows as separate
-            # debts. Otherwise, recheck before insert to avoid a duplicate race.
-            if not allow_duplicates:
-                existing = (
-                    supabase.table("customers")
-                    .select("id")
-                    .eq("business_user_id", business_user_id)
-                    .eq("is_archived", False)
-                    .eq("name", item["name"])
-                    .eq("amount", amount)
-                    .eq("is_paid", False)
-                    .limit(1)
-                    .execute()
-                )
-                if existing.data:
-                    skipped += 1
-                    continue
-
-            result = supabase.rpc("record_debt_addition", {
-                "p_customer_id": None,
-                "p_business_user_id": str(business_user_id),
-                "p_name": str(item["name"]),
-                "p_amount": round(amount, 2),
-                "p_description": str(item.get("description") or "-").strip() or "-",
-                "p_promised_date": item.get("promised_date"),
-                "p_phone_number": item.get("phone_number"),
-                "p_created_at": None,
-            }).execute()
-            if not result.data:
-                raise RuntimeError(f"Deynta {item['name']} lama xaqiijin in la kaydiyey.")
-            added += 1
-    except Exception as exc:
-        if added:
-            send_whatsapp(
-                admin_phone,
-                f"⚠️ Import-ku qayb ayuu u dhacay: {added} deyn waa la kaydiyey. "
-                "Ha ku celin isla liiska; marka hore hubi LIISKA DAYNTA."
+    # Validate and recheck every row before the database write begins.
+    for item in entries:
+        amount = float(item["amount"])
+        if not math.isfinite(amount) or amount <= 0:
+            raise ValueError(f"{item.get('name')}: lacagtu ma saxna.")
+        if not allow_duplicates:
+            existing = (
+                supabase.table("customers")
+                .select("id")
+                .eq("business_user_id", business_user_id)
+                .eq("is_archived", False)
+                .eq("name", item["name"])
+                .eq("amount", amount)
+                .eq("is_paid", False)
+                .limit(1)
+                .execute()
             )
-            exc.partial_import = True
-        raise
+            if existing.data:
+                skipped += 1
+                continue
+        prepared_debts.append(item)
+
+    # For 2+ rows, one PostgreSQL function call commits the whole debt batch
+    # atomically. One-row imports keep using the established single-row RPC.
+    if len(prepared_debts) == 1:
+        item = prepared_debts[0]
+        result = supabase.rpc("record_debt_addition", {
+            "p_customer_id": None,
+            "p_business_user_id": str(business_user_id),
+            "p_name": str(item["name"]),
+            "p_amount": round(float(item["amount"]), 2),
+            "p_description": str(item.get("description") or "-").strip() or "-",
+            "p_promised_date": item.get("promised_date"),
+            "p_phone_number": item.get("phone_number"),
+            "p_created_at": None,
+        }).execute()
+        if not result.data:
+            raise RuntimeError(f"Deynta {item['name']} lama xaqiijin in la kaydiyey.")
+        added = 1
+    elif len(prepared_debts) >= 2:
+        debt_payload = [
+            {
+                "name": str(item["name"]),
+                "amount": round(float(item["amount"]), 2),
+                "description": str(item.get("description") or "-").strip() or "-",
+                "promised_date": item.get("promised_date"),
+                "phone_number": item.get("phone_number"),
+            }
+            for item in prepared_debts
+        ]
+        batch_result = supabase.rpc("record_debt_addition_batch", {
+            "p_business_user_id": str(business_user_id),
+            "p_debts": debt_payload,
+        }).execute()
+        batch_data = batch_result.data
+        if isinstance(batch_data, list):
+            batch_data = batch_data[0] if batch_data else None
+        if not isinstance(batch_data, dict) or batch_data.get("success") is not True:
+            raise RuntimeError("Supabase ma xaqiijin kaydinta dhammaan deymaha.")
+        added = int(batch_data.get("count") or 0)
+        if added != len(prepared_debts):
+            raise RuntimeError("Tirada deymaha la xaqiijiyey ma waafaqsana liiska.")
 
     if skipped:
         admin_confirmation = (
-            "⚠️ Liiska deynta qayb ahaan ayaa loo diiwaangeliyey.\\n\\n"
+            "⚠️ Liiska deynta qayb ahaan ayaa loo diiwaangeliyey.\n\n"
             f"✅ Deymo cusub oo lagu daray: {added}\\n"
-            f"⏭️ Deymo hore oo laga booday: {skipped}\\n\\n"
+            f"⏭️ Deymo hore oo laga booday: {skipped}\n\n"
             "Deymaha hore laguma darin mar labaad."
         )
     else:
         admin_confirmation = (
-            "✅ Liiska deynta waa la diiwaangeliyey.\\n\\n"
+            "✅ Liiska deynta waa la diiwaangeliyey.\n\n"
             f"👥 Deymo cusub oo lagu daray: {added}"
         )
     send_whatsapp(admin_phone, admin_confirmation)
@@ -4515,6 +4658,9 @@ async def whatsapp_webhook(request: Request):
                     return {"status": "import_text_preview_ready", "count": len(entries), "mode": active_import.get("mode", "debt")}
                 except Exception as exc:
                     print(f"❌ Import text parse error: {type(exc).__name__}: {exc}")
+                    if "GEMINI_TEMPORARILY_UNAVAILABLE" in str(exc):
+                        send_whatsapp(sender_phone, "⏳ Adeegga akhrinta qoraalka hadda waa mashquul. Waxba lama kaydin. Fadlan dhowr daqiiqo kadib isla liiska mar kale soo dir.")
+                        return {"status": "import_text_ai_temporarily_unavailable"}
                     send_whatsapp(sender_phone, "❌ Liiska si sax ah looma akhrin karo. Fadlan caddee magacyada iyo lacagaha, dabadeed mar kale soo dir.")
                     return {"status": "import_text_parse_error"}
 
@@ -4560,10 +4706,10 @@ async def whatsapp_webhook(request: Request):
                 applicant_phone,
                 (
                     "🎉 *Waa laguu oggolaaday Deynjir!*\n\n"
-                    "👋 Soo dhawoow! Waxaan kaa caawinayaa inaad si fudud ula socoto "
-                    "deymaha iyo lacag-bixinta macaamiishaada.\n\n"
-                    "Aan ku bilowno hal tallaabo: ma jiraa macmiil deyn kaa qaatay? "
-                    "Ii sheeg magaciisa iyo lacagta, tusaale: *Cali $20 ayuu deyn qaatay.*"
+                    "👋 Soo dhawoow! Waxaan kaa caawinayaa la socodka deymaha iyo lacag-bixinta.\n\n"
+                    "Si fudud ku bilow: qor *MENU*, kadib dooro *1* deyn cusub ama *2* lacag-bixin.\n"
+                    "Waxaan ku weydiin doonaa magaca macmiilka iyo lacagta.\n\n"
+                    "Tusaale: *Cali* kadib *20*. Lacag-bixinta, waxaan ku weydiin doonaa *HAA/MAYA* ka hor kaydinta."
                 )
                 if new_status == "approved"
                 else "❌ Waan ka xunnahay, codsigaaga waa la diiday."
@@ -6940,6 +7086,29 @@ async def whatsapp_webhook(request: Request):
         or is_contextual_debt_list_followup(message_text, sender_phone)
     )
     multiline_transaction = parse_multiline_menu_transaction(message_text)
+
+    # Direct multi-row text lists use the same preview/OK workflow as Excel and
+    # image imports. This avoids the single-customer natural-language parser.
+    direct_batch = parse_transaction_batch_text(message_text)
+    if direct_batch:
+        batch_mode, batch_rows = direct_batch
+        try:
+            validated_batch = _validate_import_entries(batch_rows)
+            IMPORT_SESSIONS[sender_phone] = {
+                "business_user_id": str(business_user_id),
+                "shop_phone": sender_phone,
+                "shop_name": str((business_user or {}).get("name") or sender_phone),
+                "entries": validated_batch,
+                "mode": batch_mode,
+                "stage": "ready",
+                "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
+            }
+            _stage_import(sender_phone, validated_batch, batch_mode)
+            return {"status": "direct_batch_preview_ready", "mode": batch_mode, "count": len(validated_batch)}
+        except Exception as batch_error:
+            print(f"❌ Direct batch parse/stage error: {type(batch_error).__name__}: {batch_error}")
+            send_whatsapp(sender_phone, f"Liiska si sax ah looma diyaarin karin: {str(batch_error)[:180]}\nWaxba lama kaydin. Fadlan sax safafka oo mar kale dir.")
+            return {"status": "direct_batch_preview_error"}
 
     today_str = today_eat().isoformat()
     dynamic_system_prompt = (
