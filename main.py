@@ -2181,8 +2181,8 @@ def parse_customer_rename_command(message_text):
     """
     raw = " ".join(str(message_text or "").strip().split())
     patterns = [
-        r"^(?:sax|rename|rename\s+customer|edit\s+name|edit|change\s+name)\s+(.+?)\s*(?:->|=>|\bto\b)\s*(.+?)\s*[.!]?$",
-        r"^(?:sax|edit)\s+(.+?)\s+\b(?:ku\s+bedel|u\s+bedel|magaca\s+cusub)\b\s+(.+?)\s*[.!]?$",
+        r"^(?:sax|rename|rename\s+customer|edit\s+name|edit|change\s+name)\s+(?:magaca\s+)?(.+?)\s*(?:->|=>|\bto\b)\s*(.+?)\s*[.!]?$",
+        r"^(?:sax|edit)\s+(?:magaca\s+)?(.+?)\s+\b(?:ku\s+bed{1,2}el|u\s+bed{1,2}el|ka\s+dhig|magaca\s+cusub)\b\s+(.+?)\s*[.!]?$",
     ]
     for pattern in patterns:
         match = re.match(pattern, raw, flags=re.IGNORECASE)
@@ -2234,7 +2234,10 @@ def parse_somali_amount_edit(message_text):
 def parse_sax_name_only(message_text):
     """Return the old customer name for a two-step SAX command, if supplied."""
     raw = " ".join(str(message_text or "").strip().split())
-    match = re.match(r"^(?:sax|edit\s+name)\s+(.+?)\s*[.!]?$", raw, re.IGNORECASE)
+    match = re.match(
+        r"^(?:sax|edit\s+name)\s+(?:magaca\s+)?(.+?)\s*[.!]?$",
+        raw, re.IGNORECASE,
+    )
     if not match or re.search(r"(?:->|=>|\bto\b|\bku\s+bedel\b|\bu\s+bedel\b)", raw, re.I):
         return None
     old_name = match.group(1).strip(" \t,;:-")
@@ -4532,10 +4535,30 @@ async def whatsapp_webhook(request: Request):
             return {"status": "unapproved_user_silenced"}
 
         business_user_id = business_user["id"]
+        # Active undo/rename sessions own their replies. In particular, "1" and
+        # "2" are confirmation answers here, not ADD/PAY direction choices.
+        pending_undo = UNDO_CONFIRMATION_SESSIONS.get(sender_phone)
+        undo_waiting_for_this_shop = bool(
+            pending_undo and pending_undo.get("business_user_id") == str(business_user_id)
+        )
+        pending_rename = RENAME_SESSIONS.get(sender_phone)
+        rename_waiting_for_this_shop = bool(
+            pending_rename and pending_rename.get("business_user_id") == str(business_user_id)
+        )
+        normalized_inbound = normalize_customer_name(message_text).strip(" .!?؟")
+        rename_interrupt = bool(re.match(
+            r"^(?:menu|start|help|add|pay|deyn|dayn|lacag\s*bixin|import|delete|remove|"
+            r"tirtir|undo|dhigaal|liiska|raadi|search|history|taariikh|faahfaahin|sax)\b",
+            normalized_inbound, re.I,
+        ))
         pending_new_request = (
             _has_active_in_memory_workflow(sender_phone)
+            and not undo_waiting_for_this_shop
+            and not (rename_waiting_for_this_shop and not rename_interrupt)
             and is_clear_new_supported_request(message_text, include_transactions=True)
         )
+        if rename_waiting_for_this_shop and rename_interrupt:
+            RENAME_SESSIONS.pop(sender_phone, None)
         guided_waiting = GUIDED_SESSIONS.get(sender_phone) or {}
         direction_reply = parse_transaction_clarification(message_text)
         delete_waiting = DELETE_SESSIONS.get(sender_phone) or {}
@@ -4543,6 +4566,8 @@ async def whatsapp_webhook(request: Request):
             pending_new_request = False
         if (
             _has_active_in_memory_workflow(sender_phone)
+            and not undo_waiting_for_this_shop
+            and not (rename_waiting_for_this_shop and not rename_interrupt)
             and direction_reply in {"ADD", "PAY"}
             and not (
                 guided_waiting.get("stage") == "payment_amount"
@@ -4558,8 +4583,7 @@ async def whatsapp_webhook(request: Request):
 
         # Resolve an already-open UNDO confirmation before interpreting this reply
         # as a new command. Only explicit 1/HAA or 2/MAYA responses are accepted.
-        pending_undo = UNDO_CONFIRMATION_SESSIONS.get(sender_phone)
-        if pending_undo and pending_undo.get("business_user_id") == str(business_user_id) and not pending_new_request:
+        if undo_waiting_for_this_shop and pending_undo and not pending_new_request:
             if datetime.now(timezone.utc) > pending_undo.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
                 UNDO_CONFIRMATION_SESSIONS.pop(sender_phone, None)
                 send_whatsapp(sender_phone, "Waqtigii xaqiijinta ka-noqoshadu wuu dhammaaday. Waxba lama beddelin. Haddii loo baahdo, codsiga mar kale dir.")
@@ -5839,29 +5863,33 @@ async def whatsapp_webhook(request: Request):
         RENAME_SESSIONS.pop(sender_phone, None)
         print(f"✏️ Local Somali balance edit parsed: {local_amount_edit_entry['customer_name']!r} -> {local_amount_edit_entry['new_amount']}")
 
-    # Two-step SAX flow. Explicit "SAX old -> new" continues through the
-    # existing immediate-rename path; "SAX old" asks for the corrected name.
+    # Two-step SAX flow. Explicit "SAX old -> new" uses the immediate rename
+    # path; "SAX magaca old" and "SAX old" ask for the corrected name.
     rename_state = None if (local_amount_edit_entry or pending_new_request) else RENAME_SESSIONS.get(sender_phone)
     if rename_state and rename_state.get("business_user_id") == business_user_id:
         if datetime.now(timezone.utc) > rename_state.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
             RENAME_SESSIONS.pop(sender_phone, None)
             rename_state = None
-        elif re.fullmatch(r"\s*(?:cancel|jooji)\s*", str(message_text or ""), re.I):
+        elif re.fullmatch(r"\s*(?:cancel|jooji|maya|no|2|menu|help)\s*", str(message_text or ""), re.I):
             RENAME_SESSIONS.pop(sender_phone, None)
-            send_whatsapp(sender_phone, "✅ Saxidda magaca waa la joojiyey.")
+            send_whatsapp(sender_phone, "✅ Saxidda magaca waa la joojiyey. Waxba lama beddelin.")
             return {"status": "rename_cancelled"}
         elif rename_state.get("stage") == "new_name":
             proposed = str(message_text or "").strip()
-            if len(proposed) < 2 or len(proposed) > 120:
-                send_whatsapp(sender_phone, "Magaca cusub si sax ah u qor, ama CANCEL.")
+            if (
+                len(proposed) < 2 or len(proposed) > 120
+                or re.fullmatch(r"[$]?\s*\d+(?:[.,]\d{1,2})?\s*(?:usd|dollar|dollars)?", proposed, re.I)
+            ):
+                send_whatsapp(sender_phone, "Fadlan qor magac cusub oo qoraal ah, ee ha qorin lacag. Ama JOOJI.")
                 return {"status": "rename_new_name_invalid"}
             rename_state["new_name"] = proposed
             rename_state["stage"] = "confirm"
             rename_state["expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=10)
-            send_whatsapp(sender_phone, f"Hubi magaca cusub:\n\nMagac Hore: *{rename_state['old_name']}*\nMagaca Cusub: *{proposed}*\n\nQor *OK* si loo beddelo ama *CANCEL* si loo joojiyo.")
+            send_whatsapp(sender_phone, f"Hubi magaca cusub:\n\nMagac Hore: *{rename_state['old_name']}*\nMagaca Cusub: *{proposed}*\n\nQor *1* ama *HAA* si loo beddelo; *2* ama *MAYA* si loo joojiyo.")
             return {"status": "rename_confirmation_required"}
         elif rename_state.get("stage") == "confirm":
-            if re.fullmatch(r"\s*OK\s*", str(message_text or ""), re.I):
+            rename_answer = normalize_customer_name(message_text).strip(" .!?؟")
+            if rename_answer in {"ok", "haa", "1", "yes", "y", "confirm"}:
                 old_name = rename_state["old_name"]
                 new_name = rename_state["new_name"]
                 try:
@@ -5883,7 +5911,11 @@ async def whatsapp_webhook(request: Request):
                     print(f"❌ Two-step rename failed: {exc}")
                     send_whatsapp(sender_phone, "❌ Magaca lama beddelin. Mar kale isku day.")
                     return {"status": "rename_error"}
-            send_whatsapp(sender_phone, "Qor *OK* si loo beddelo ama *CANCEL* si loo joojiyo.")
+            if rename_answer in {"cancel", "jooji", "maya", "2", "no", "n"}:
+                RENAME_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "✅ Saxidda magaca waa la joojiyey. Waxba lama beddelin.")
+                return {"status": "rename_cancelled"}
+            send_whatsapp(sender_phone, "Fadlan ku jawaab *1/HAA* si loo beddelo ama *2/MAYA* si loo joojiyo.")
             return {"status": "rename_waiting_confirmation"}
 
     sax_old_name = parse_sax_name_only(message_text)
