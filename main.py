@@ -7334,12 +7334,12 @@ async def whatsapp_webhook(request: Request):
                 amount_question = (
                     f"{name}, immisa lacag ah ayaa lagu leeyahay?"
                     if action == "ADD"
-                    else f"{name}, immisa dollar ayuu bixiyey?"
+                    else f"Waa immisa Lacag bixinta {name}"
                 )
                 send_whatsapp(
                     sender_phone,
-                    f"{amount_question}\n\nQor lacagta oo keliya. Hada Waxba lama diiwaangelin. "
-                    "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+                    f"{amount_question}\n\nQor lacagta oo keliya. "
+                    "ama Qor *JOOJI* si aad uga baxdo."
                 )
                 print(f"⚠️ Amount missing; saved pending transaction context: action={action}, customer={name!r}; message={message_text!r}")
                 continue
