@@ -226,6 +226,10 @@ def is_somali_confusion_request(message_text):
         r"\bsidee\s+(?:loo\s+)?istic\w*\b",
         r"\bmaxaan\s+sameeyaa\b",
         r"\bii\s+sharax\b",
+        r"\bi\s+fahan(?:\s+dee)?\b",
+        r"\bi\s+fahamsii(?:\s+dee)?\b",
+        r"\bii\s+fahan(?:\s+dee)?\b",
+        r"\bma\s+i\s+fahmin\b",
     )
     if any(re.search(pattern, text, flags=re.I) for pattern in patterns):
         return True
@@ -837,7 +841,7 @@ def is_user_declining_help(message_text):
         "midna ma rabo", "waxba ma rabo", "ma rabo",
         "midna ma doonayo", "waxba ma doonayo", "ma doonayo",
         "midna uma baahni", "uma baahni",
-        "maya", "may", "mayaa", "maya mahadsanid", "may mahadsanid",
+        "maya", "may", "mayaa", "no", "nah", "maya mahadsanid", "may mahadsanid",
         "maya mahadsanidiin", "may mahadsanidiin",
         "may ma rabo", "maya ma rabo", "may ayaan ku idhi",
         "maya ayaan ku idhi", "may ayaan ku iri", "maya ayaan ku iri",
@@ -932,8 +936,47 @@ def is_no_activity_reply(message_text):
 
 def is_deynjir_greeting(message_text):
     text = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
-    exact = {"salaan", "waan ku salaamay", "waan ku salaamay walaal", "asalaamu calaykum", "assalamu alaikum", "asc", "subax wanaagsan", "galab wanaagsan", "habeen wanaagsan"}
+    exact = {"salaan", "waan ku salaamay", "waan ku salaamay walaal", "asalaamu calaykum", "assalamu alaikum", "asc", "subax wanaagsan", "galab wanaagsan", "habeen wanaagsan", "hello", "hi", "hey", "good morning", "good afternoon", "good evening"}
     return text in exact or bool(re.fullmatch(r"waan\s+ku\s+salaamay(?:\s+walaal)?", text, re.I))
+
+
+def parse_customer_account_request(message_text):
+    """Recognize a request for a customer's full account/statement and extract its name if supplied.
+
+    Returns (is_account_request, customer_name). A missing name is never guessed.
+    """
+    raw = " ".join(str(message_text or "").strip().split())
+    text = normalize_customer_name(raw).strip(" .!?؟")
+    if not text:
+        return False, None
+
+    has_account_word = bool(re.search(
+        r"\b(?:xisaab(?:ta|tiisa|teeda)?|faahfaahin(?:ta)?|statement|account)\b",
+        text, re.I,
+    ))
+    has_customer_word = bool(re.search(r"\b(?:macmiil(?:ka|kaas|kiisa|keeda)?|customer|client)\b", text, re.I))
+    has_account_intent = has_account_word and (
+        has_customer_word
+        or bool(re.search(r"\b(?:rabaa|rabo|doonayaa|doonayso|ii\s+sheeg|ii\s+muuji|i\s+tus|sidee|sideen|hel[a]?a?|heli)\b", text, re.I))
+        or text.startswith(("xisaabta ", "xisaab ", "faahfaahinta ", "statement ", "account "))
+    )
+    if not has_account_intent:
+        return False, None
+
+    # Remove request wording and generic nouns; whatever remains is the name.
+    name = text
+    name = re.sub(
+        r"\b(?:waxaan|waxan|waan|aniga|fadlan|hadda|rabaa|rabo|doonayaa|doonayso|"
+        r"sidee|sideen|ku|u|helaa|hela|heli|helayaa|helikaraa|ka|ii|i|sheeg|muuji|tus|"
+        r"xisaabta|xisaab|xisaabtiisa|xisaabteeda|faahfaahinta|faahfaahin|statement|account|"
+        r"macmiilka|macmiil|customer|client)\b",
+        " ", name, flags=re.I,
+    )
+    name = re.sub(r"[^\w\s'-]", " ", name, flags=re.UNICODE)
+    name = " ".join(name.split()).strip(" -_'")
+    if name.casefold() in {"", "ka", "macmiil", "macmiilka", "customer", "client"}:
+        name = ""
+    return True, (name or None)
 
 
 def is_privacy_question(message_text):
@@ -5222,6 +5265,25 @@ async def whatsapp_webhook(request: Request):
             guided = None
 
     guided_normalized = normalize_customer_name(guided_text).strip(" .!?؟")
+
+    # Customer-account requests must enter the real HISTORY/statement workflow,
+    # not the conversational fallback. Ask for the customer name when omitted.
+    account_request, account_customer_name = parse_customer_account_request(guided_text)
+    if account_request:
+        if account_customer_name:
+            message_text = f"FAAHFAAHIN {account_customer_name}"
+            guided_text = message_text
+            guided = None
+        else:
+            pause_guided_session_for_replacement(sender_phone)
+            GUIDED_SESSIONS[sender_phone] = {
+                "stage": "history_name",
+                "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+            }
+            account_prompt = "Hagaag 😊 Magaca macmiilka aad xisaabtiisa rabto ii sheeg. Tusaale: *Cali Xasan*."
+            remember_conversation_outcome(sender_phone, guided_text, account_prompt)
+            send_whatsapp(sender_phone, account_prompt)
+            return {"status": "customer_account_name_requested"}
     if guided and guided.get("stage") in {"debt_name", "payment_name"} and guided_normalized in {
         "ma garanayo", "ma aqaan", "qof ma jiro", "qofna ma jiro", "hadda qof ma jiro", "ma jiro qof", "qof ma hayo",
     }:
@@ -5324,10 +5386,16 @@ async def whatsapp_webhook(request: Request):
 
     # First-time users and confused shopkeepers receive one short explanation.
     if is_somali_confusion_request(guided_text):
-        GUIDED_SESSIONS.pop(sender_phone, None)
-        fallback_reply = (
-            "Dhib ma leh, waan ku hagi doonaa. 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
-        )
+        if guided and guided.get("stage") == "history_name":
+            fallback_reply = (
+                "Xisaabta macmiilku waxay muujinaysaa dayntiisa iyo lacag-bixintiisa. "
+                "Ii qor magaca macmiilka si aan kuu tuso. Tusaale: *Cali Xasan*."
+            )
+        else:
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            fallback_reply = (
+                "Dhib ma leh, waan ku hagi doonaa. 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
+            )
         reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
         send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "somali_usage_help_sent"}
