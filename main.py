@@ -67,10 +67,12 @@ REMINDER_SESSION_TTL = timedelta(minutes=15)
 IMPORT_SESSIONS = {}
 PAYMENT_EXPORT_SESSIONS = {}
 IMPORT_SESSION_TTL = timedelta(minutes=30)
-# Short, guided WhatsApp conversations for users who do not remember commands.
+# Guided transaction/search workflows expire quickly; an explicitly displayed
+# menu remains selectable for 24 hours so delayed numeric replies route correctly.
 GUIDED_SESSIONS = {}
 PAUSED_GUIDED_SESSIONS = {}
 GUIDED_SESSION_TTL = timedelta(minutes=15)
+GUIDED_MENU_SESSION_TTL = timedelta(hours=24)
 # Pending ADD/PAY customer identity confirmations. No transaction is saved until resolved.
 CUSTOMER_MATCH_SESSIONS = {}
 # A PAY request for a customer with no outstanding debt may become a confirmed deposit.
@@ -129,11 +131,8 @@ def deynjir_recovery_menu_message(intro=None):
 
 
 def deynjir_unrecognized_message():
-    """Fallback that gives one reliable next step and activates menu option 3."""
-    return (
-        "Ma Fahmin Qoraalkan.\n\n"
-        "Soo Qor *MENU* si aad u hesho hagid."
-    )
+    """One concise clarification; never display a menu or create hidden menu state."""
+    return "Ma fahmin fariintaas. Ma ii caddayn kartaa waxa aad rabto?"
 
 
 def pause_guided_session_for_replacement(sender_phone):
@@ -152,7 +151,7 @@ def activate_guided_menu(sender_phone):
     pause_guided_session_for_replacement(sender_phone)
     GUIDED_SESSIONS[sender_phone] = {
         "stage": "menu",
-        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+        "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
     }
 
 
@@ -303,8 +302,7 @@ def normalize_easy_command(value):
         "inbort": "IMPORT", "inport": "IMPORT", "importi": "IMPORT",
         "menu": "MENU", "manu": "MENU", "menyu": "MENU", "menue": "MENU",
         "caawi": "HELP", "caawimaad": "HELP",
-        "help me": "HELP", "salaan": "MENU", "asc": "MENU",
-        "assalamu alaikum": "MENU", "asalaamu calaykum": "MENU",
+        "help me": "HELP",
         "lacag bixn": "GUIDED_PAYMENT",
         "lacag bixinta": "LIISKA LACAG BIXINTA",
         "ku dar deyn": "GUIDED_DEBT", "ku dar dayn": "GUIDED_DEBT",
@@ -2076,8 +2074,11 @@ def is_missing_value(value):
         return True
     if not isinstance(value, str):
         return False
-    return normalize_customer_name(value) in {
-        "", "none", "null", "undefined", "unknown", "n a", "na"
+    return normalize_customer_name(value).strip(" .!?؟") in {
+        "", "none", "null", "undefined", "unknown", "n a", "na",
+        "ma jiro", "ma jirto", "ma jiraan", "ma jirto qof", "qof ma jiro",
+        "qofna ma jiro", "waxba", "waxba ma jiraan", "lacag ma jirto",
+        "lacag ma hayo", "ma hayo", "ma aqaan", "ma garanayo",
     }
 
 
@@ -4561,9 +4562,14 @@ async def whatsapp_webhook(request: Request):
         )
         normalized_inbound = normalize_customer_name(message_text).strip(" .!?؟")
         guided_waiting = GUIDED_SESSIONS.get(sender_phone) or {}
+        expired_menu_choice = False
         if guided_waiting:
             guided_expiry = guided_waiting.get("expires_at")
             if not guided_expiry or datetime.now(timezone.utc) > guided_expiry:
+                expired_menu_choice = (
+                    guided_waiting.get("stage") == "menu"
+                    and str(message_text or "").strip() in {"1", "2", "3", "4", "5", "6"}
+                )
                 GUIDED_SESSIONS.pop(sender_phone, None)
                 guided_waiting = {}
         rename_interrupt = bool(re.match(
@@ -4659,6 +4665,47 @@ async def whatsapp_webhook(request: Request):
             send_whatsapp(sender_phone, "Fadlan ku jawaab *1* = HAA, ka noqo; ama *2* = MAYA, xaree oo sii hay.\nWaqtigu waa 5 daqiiqo.")
             return {"status": "undo_confirmation_waiting"}
 
+        # An explicitly displayed menu owns its numeric replies. Route these
+        # before import/search/AI/session handlers so option 4 or 5 cannot be
+        # mistaken for a debt name, amount, or another workflow's answer.
+        if expired_menu_choice:
+            send_whatsapp(sender_phone, "Waqtigii menu-ga wuu dhammaaday. Soo qor *MENU* si aad u doorato adeegga aad rabto.")
+            return {"status": "menu_choice_expired"}
+
+        if guided_menu_choice:
+            choice = numeric_reply
+            if choice == "1":
+                GUIDED_SESSIONS[sender_phone] = {
+                    "stage": "debt_name", "transaction_type": "debt",
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                }
+                send_whatsapp(sender_phone, "Magaca macmiilka deynta lagu leeyahay?\n\nQor *JOOJI* si aad uga baxdo.")
+                return {"status": "guided_debt_name_requested"}
+            if choice == "2":
+                GUIDED_SESSIONS[sender_phone] = {
+                    "stage": "payment_name", "transaction_type": "payment",
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                }
+                send_whatsapp(sender_phone, "Magaca qofka lacagta bixiyey?\n\nQor *JOOJI* si aad uga baxdo.")
+                return {"status": "guided_payment_name_requested"}
+            if choice == "3":
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                message_text = "LIISKA DAYNTA"
+            elif choice == "4":
+                GUIDED_SESSIONS[sender_phone] = {
+                    "stage": "search_name",
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                }
+                send_whatsapp(sender_phone, "Qor magaca macmiilka aad raadinayso.\n\nQor *JOOJI* si aad uga baxdo.")
+                return {"status": "guided_search_name_requested"}
+            elif choice == "5":
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                message_text = "Balamaha Maanta"
+            elif choice == "6":
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, deynjir_help_message())
+                return {"status": "help_sent"}
+
         # A disagreement shortly after a committed transaction opens a confirmation;
         # the bot never reverses anything based on AI classification alone.
         recent_tx = LAST_TRANSACTION_CONTEXT.get(sender_phone) or {}
@@ -4734,12 +4781,14 @@ async def whatsapp_webhook(request: Request):
             return {"status": "privacy_question_answered"}
 
         active_guided = GUIDED_SESSIONS.get(sender_phone)
-        if is_deynjir_greeting(message_text) and (not active_guided or active_guided.get("stage") == "menu"):
-            greeting_reply = (
-                "Wacalaykum salaam! 😊 Ku soo dhawoow Deynjir. "
-                "Waxaan kaa caawinayaa la socodka deymaha iyo lacag-bixinta macaamiishaada. "
-                "Maxaad jeclaan lahayd inaan kuu qabto?"
-            )
+        if is_deynjir_greeting(message_text):
+            if active_guided and active_guided.get("stage") not in {"menu"}:
+                greeting_reply = (
+                    "Wacalaykum salaam! 😊 Wadahadalkii hore weli wuu socdaa. "
+                    "Fadlan ka jawaab su'aashii aan ku weydiiyey ama qor *JOOJI*."
+                )
+            else:
+                greeting_reply = "Wacalaykum salaam! 😊 Maxaad rabtaa inaan kaa caawiyo?"
             remember_conversation_outcome(sender_phone, message_text, greeting_reply)
             send_whatsapp(sender_phone, greeting_reply)
             return {"status": "greeting_answered"}
@@ -5625,18 +5674,16 @@ async def whatsapp_webhook(request: Request):
     if (not guided or guided.get("stage") == "menu") and is_user_declining_help(guided_text):
         if guided and guided.get("stage") == "menu":
             GUIDED_SESSIONS.pop(sender_phone, None)
-        refusal_reply = "Waa hagaag. Waxba ma samaynayo. Haddii aad wax u baahato, ii sheeg."
-        remember_conversation_outcome(sender_phone, guided_text, refusal_reply)
-        send_whatsapp(sender_phone, refusal_reply)
-        return {"status": "help_declined"}
+        print(f"🔕 Optional help declined silently: {guided_text!r}")
+        return {"status": "help_declined_silently"}
 
     # Acknowledgements are not new financial instructions. Keep the reply short
     # and do not restart ADD/PAY after a completed transaction.
     if not guided and is_simple_acknowledgement(guided_text):
-        short_ack_reply = "Haye, waan ku fahmay. Haddii aad hawl kale hayso, ii sheeg."
-        remember_conversation_outcome(sender_phone, guided_text, short_ack_reply)
-        send_whatsapp(sender_phone, short_ack_reply)
-        return {"status": "acknowledgement_answered"}
+        # Acknowledgements should not create another notification or restart a task.
+        # Workflow-specific confirmations have already been handled by their owners.
+        print(f"🔕 Silent acknowledgement: {guided_text!r}")
+        return {"status": "acknowledgement_silenced"}
 
     # Continue a recent natural conversation instead of sending the recovery menu.
     # Explicit financial commands and amounts are excluded by is_contextual_followup.
@@ -5652,7 +5699,7 @@ async def whatsapp_webhook(request: Request):
         send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "contextual_followup_answered"}
 
-    menu_words = {"menu", "start", "hello", "hi", "hey", "help", "caawi", "caawimaad", "bilow"}
+    menu_words = {"menu", "start", "help", "caawi", "caawimaad", "bilow"}
     if guided_text.casefold() in menu_words:
         CONVERSATION_SESSIONS.pop(sender_phone, None)
         # MENU always starts a fresh menu context, even when it interrupts an old workflow.
@@ -5661,7 +5708,7 @@ async def whatsapp_webhook(request: Request):
         CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
         GUIDED_SESSIONS[sender_phone] = {
             "stage": "menu",
-            "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+            "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
         }
         send_whatsapp(sender_phone, deynjir_main_menu())
         return {"status": "main_menu_sent"}
@@ -5726,8 +5773,20 @@ async def whatsapp_webhook(request: Request):
             message_text = guided_text
 
     if guided and guided.get("stage") in {"debt_name", "payment_name"}:
-        if is_missing_value(guided_text) or len(guided_text) < 2 or len(guided_text) > 100 or re.search(r"\d", guided_text):
-            send_whatsapp(sender_phone, "Fadlan qor magaca qofka oo keliya. Tusaale: *Cali Xasan*.")
+        if is_simple_acknowledgement(guided_text):
+            send_whatsapp(sender_phone, "Markaad diyaar tahay, qor magaca macmiilka ama *JOOJI* si aad uga baxdo.")
+            return {"status": "guided_name_acknowledgement_clarified"}
+        if is_missing_value(guided_text):
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            no_customer_reply = (
+                "Waa hagaag. Haddii uusan jirin macmiil ama aadan magac hayn, hawsha waan joojiyey. "
+                "Waxba lama diiwaangelin."
+            )
+            remember_conversation_outcome(sender_phone, guided_text, no_customer_reply)
+            send_whatsapp(sender_phone, no_customer_reply)
+            return {"status": "guided_missing_customer_cancelled"}
+        if len(guided_text) < 2 or len(guided_text) > 100 or re.search(r"\d", guided_text):
+            send_whatsapp(sender_phone, "Fadlan qor magaca macmiilka oo keliya, ama *JOOJI*.")
             return {"status": "guided_invalid_name"}
         guided["customer_name"] = guided_text.strip()
         if guided.get("amount") is not None:
@@ -5792,6 +5851,20 @@ async def whatsapp_webhook(request: Request):
         )
 
     if guided and guided.get("stage") in {"debt_amount", "payment_amount"}:
+        no_amount_phrases = {
+            "waxba", "ma jiro", "ma jirto", "lacag ma jirto", "lacag ma hayo",
+            "wax lacag ah ma jirto", "wax lacag ah ma hayo", "ma hayo lacag",
+            "ma hayo", "waxba ma hayo", "lacag ma jirto hadda",
+        }
+        if guided_normalized in no_amount_phrases or is_missing_value(guided_text):
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            no_amount_reply = (
+                "Waan fahmay. Lacag lama diiwaangelin, hawshiina waa la joojiyey. "
+                "Markaad diyaar tahay, mar kale bilow."
+            )
+            remember_conversation_outcome(sender_phone, guided_text, no_amount_reply)
+            send_whatsapp(sender_phone, no_amount_reply)
+            return {"status": "guided_no_amount_cancelled"}
         # A user may correct a payment assumption in natural Somali instead of
         # entering a number. Handle this BEFORE the numeric-only amount parser.
         # No payment is ever recorded from a denial/correction message.
@@ -5867,7 +5940,6 @@ async def whatsapp_webhook(request: Request):
             return {"status": "guided_customer_name_required"}
         if transaction_type not in {"debt", "payment"}:
             GUIDED_SESSIONS.pop(sender_phone, None)
-            activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "guided_session_invalid"}
         GUIDED_SESSIONS.pop(sender_phone, None)
@@ -5926,7 +5998,7 @@ async def whatsapp_webhook(request: Request):
         pause_guided_session_for_replacement(sender_phone)
         GUIDED_SESSIONS[sender_phone] = {
             "stage": "menu",
-            "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+            "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
         }
         send_whatsapp(sender_phone, "Waan kuu fududayn karaa isticmaalka Nidaamkan.\n\n" + deynjir_main_menu())
         return {"status": "friendly_guidance_sent"}
@@ -6924,7 +6996,7 @@ async def whatsapp_webhook(request: Request):
                 pause_guided_session_for_replacement(sender_phone)
                 GUIDED_SESSIONS[sender_phone] = {
                     "stage": "menu",
-                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
                 }
                 if is_rate_limited:
                     send_whatsapp(
@@ -6933,7 +7005,6 @@ async def whatsapp_webhook(request: Request):
                         "Waxaad dooran kartaa mid ka mid ah hawlahan: \n" + deynjir_main_menu()
                     )
                     return {"status": "gemini_rate_limited_guidance_sent"}
-                activate_guided_menu(sender_phone)
                 send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "friendly_fallback_sent"}
 
@@ -6954,7 +7025,6 @@ async def whatsapp_webhook(request: Request):
         ]
         if not usable_entries:
             print(f"⚠️ No usable intent extracted; message={message_text!r}; entries={entries!r}")
-            activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "unrecognized_message"}
         entries = usable_entries
@@ -6969,7 +7039,6 @@ async def whatsapp_webhook(request: Request):
             and not is_explicit_appointment_list_request(message_text)
         ):
             print(f"⚠️ Rejected LIST intent without an explicit list command: {message_text!r}")
-            activate_guided_menu(sender_phone)
             send_whatsapp(sender_phone, deynjir_unrecognized_message())
             return {"status": "unrecognized_message"}
 
@@ -7000,7 +7069,6 @@ async def whatsapp_webhook(request: Request):
                     f"⚠️ Rejected empty SEARCH intent for unrecognized text: "
                     f"{message_text!r}"
                 )
-                activate_guided_menu(sender_phone)
                 send_whatsapp(sender_phone, deynjir_unrecognized_message())
                 return {"status": "unrecognized_message"}
 
@@ -7297,7 +7365,6 @@ async def whatsapp_webhook(request: Request):
                     str(message_text or ""), flags=re.I
                 ))
                 if clear_direction is None and not explicit_transaction_command:
-                    activate_guided_menu(sender_phone)
                     send_whatsapp(sender_phone, deynjir_unrecognized_message())
                     return {"status": "unrecognized_message"}
             send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca macmiilka ii sheeg.")
@@ -8136,7 +8203,6 @@ async def whatsapp_webhook(request: Request):
                             f"⚠️ Bare-word SEARCH did not match a customer; treating as unrecognized text: "
                             f"{message_text!r}"
                         )
-                        activate_guided_menu(sender_phone)
                         send_whatsapp(sender_phone, deynjir_unrecognized_message())
                     continue
 
