@@ -38,6 +38,20 @@ def now_eat():
 def today_eat():
     return now_eat().date()
 
+
+def fetch_all_supabase_rows(query_factory, page_size=1000):
+    """Fetch every matching Supabase row in stable pages, not just the first page."""
+    all_rows = []
+    offset = 0
+    while True:
+        result = query_factory().range(offset, offset + page_size - 1).execute()
+        page = result.data or []
+        all_rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return all_rows
+
 # Setup the core application framework
 app = FastAPI()
 
@@ -97,6 +111,8 @@ UNDO_CONFIRMATION_SESSIONS = {}
 UNDO_CONFIRMATION_TTL = timedelta(minutes=5)
 # Only a transaction actually recorded by this sender can trigger disagreement follow-up.
 LAST_TRANSACTION_CONTEXT = {}
+# Short-lived, sender/shop-scoped context for safely undoing the most recent committed batch.
+LAST_BATCH_CONTEXT = {}
 # After a short search result, remembers whether the shopkeeper wants the full customer statement.
 SEARCH_DETAIL_SESSIONS = {}
 
@@ -130,6 +146,7 @@ PERSISTED_SESSION_MAPS = {
     "delete": DELETE_SESSIONS,
     "undo": UNDO_CONFIRMATION_SESSIONS,
     "last_transaction": LAST_TRANSACTION_CONTEXT,
+    "last_batch": LAST_BATCH_CONTEXT,
     "search_detail": SEARCH_DETAIL_SESSIONS,
 }
 
@@ -397,6 +414,7 @@ def clear_sender_workflow_sessions(sender_phone):
     for session_map in WORKFLOW_SESSION_MAPS:
         session_map.pop(sender_phone, None)
     LAST_TRANSACTION_CONTEXT.pop(sender_phone, None)
+    LAST_BATCH_CONTEXT.pop(sender_phone, None)
     LAST_SELECTED_CUSTOMERS.pop(sender_phone, None)
     LAST_HISTORY_REQUESTS.pop(sender_phone, None)
 
@@ -610,6 +628,7 @@ _FINANCIAL_RPC_MAP = {
     "create_customer_with_credit_deposit": "create_customer_with_credit_deposit_idempotent",
     "correct_customer_transaction_amount": "correct_customer_transaction_amount_idempotent",
     "undo_customer_transaction_confirmed": "undo_customer_transaction_confirmed_idempotent",
+    "undo_debt_batch_confirmed": "undo_debt_batch_confirmed_idempotent",
     "record_debt_addition_batch": "record_debt_addition_batch_idempotent",
     "record_debt_payment_batch_with_history": "record_debt_payment_batch_idempotent",
 }
@@ -2262,6 +2281,8 @@ def remember_recent_transaction(sender_phone, business_user_id, customer_id, cus
     """Remember a real committed transaction for a brief disagreement follow-up."""
     if not customer_id:
         return
+    # A later single transaction supersedes the short-lived batch undo target.
+    LAST_BATCH_CONTEXT.pop(str(sender_phone), None)
     LAST_TRANSACTION_CONTEXT[str(sender_phone)] = {
         "business_user_id": str(business_user_id),
         "customer_id": str(customer_id),
@@ -2989,6 +3010,28 @@ def parse_transaction_batch_text(message_text):
     if not raw:
         return None
 
+    # Shopkeepers commonly put the direction and first customer on one line:
+    # "dayn Omar $44, Yuunus $21". Treat the leading word as a header, not
+    # part of the first customer's name. This is deterministic and Gemini-free.
+    inline_mode = None
+    inline_header = re.match(
+        r"^(?:deyn|dayn)(?:\s+(?:cusub|cusubta))?\s*[:.,-]?\s+",
+        raw, re.I,
+    )
+    if inline_header:
+        inline_mode = "debt"
+        raw = raw[inline_header.end():].strip()
+    else:
+        inline_payment_header = re.match(
+            r"^(?:lacag\s*bixin(?:ta)?|bixin|payments?)\s*[:.,-]?\s+",
+            raw, re.I,
+        )
+        if inline_payment_header:
+            inline_mode = "payment"
+            raw = raw[inline_payment_header.end():].strip()
+    if not raw:
+        return None
+
     add_header = re.compile(r"^(?:deyn|dayn)(?:\s+(?:cusub|cusubta))?$|^(?:add|new\s+debt)$", re.I)
     pay_header = re.compile(r"^(?:lacag\s*bixin(?:ta)?|bixin|payment(?:s)?)$", re.I)
     date_pattern = r"(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"
@@ -3035,7 +3078,7 @@ def parse_transaction_batch_text(message_text):
             continue
         source_rows.extend(split_line(clean))
 
-    mode = None
+    mode = inline_mode
     rows = []
     for line in source_rows:
         clean = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
@@ -4485,6 +4528,57 @@ def _commit_import(admin_phone, session):
         if added != len(prepared_debts):
             raise RuntimeError("Tirada deymaha la xaqiijiyey ma waafaqsana liiska.")
 
+        # Capture exact ledger transaction IDs immediately after commit. The
+        # batch-undo option is offered only if every row can be tied to one
+        # distinct customer and its latest transaction is the expected ADD.
+        # This avoids ever undoing a later unrelated transaction.
+        try:
+            returned_rows = batch_data.get("debts") or []
+            batch_transactions = []
+            seen_customer_ids = set()
+            if len(returned_rows) == len(prepared_debts):
+                for returned, prepared in zip(returned_rows, prepared_debts):
+                    if not isinstance(returned, dict):
+                        raise ValueError("Batch RPC did not return a customer row")
+                    customer_id = str(returned.get("id") or returned.get("customer_id") or "").strip()
+                    if not customer_id or customer_id in seen_customer_ids:
+                        raise ValueError("Batch has missing or repeated customer IDs")
+                    seen_customer_ids.add(customer_id)
+                    latest_result = supabase.rpc("get_latest_customer_transaction_for_undo", {
+                        "p_customer_id": customer_id,
+                        "p_business_user_id": str(business_user_id),
+                    }).execute()
+                    latest = latest_result.data
+                    if isinstance(latest, list):
+                        latest = latest[0] if latest else None
+                    if not isinstance(latest, dict) or not latest.get("transaction_id"):
+                        raise ValueError("Could not identify the committed ledger transaction")
+                    if str(latest.get("transaction_type") or "").upper() != "ADD":
+                        raise ValueError("Latest customer transaction is not a plain debt addition")
+                    if abs(float(latest.get("amount") or 0) - float(prepared["amount"])) > 0.009:
+                        raise ValueError("Latest ledger amount does not match the imported debt")
+                    batch_transactions.append({
+                        "customer_id": customer_id,
+                        "transaction_id": str(latest["transaction_id"]),
+                        "customer_name": str(latest.get("customer_name") or returned.get("name") or prepared["name"]),
+                        "amount": round(float(latest.get("amount") or prepared["amount"]), 2),
+                    })
+            if len(batch_transactions) == len(prepared_debts):
+                LAST_BATCH_CONTEXT[admin_phone] = {
+                    "business_user_id": str(business_user_id),
+                    "mode": "debt",
+                    "transactions": batch_transactions,
+                    "total": round(sum(float(x["amount"]) for x in batch_transactions), 2),
+                    "created_at": datetime.now(timezone.utc),
+                    "expires_at": datetime.now(timezone.utc) + UNDO_CONFIRMATION_TTL,
+                    "request_id": f"undo-batch:{session['request_id']}",
+                }
+            else:
+                LAST_BATCH_CONTEXT.pop(admin_phone, None)
+        except Exception as batch_undo_capture_error:
+            LAST_BATCH_CONTEXT.pop(admin_phone, None)
+            print(f"⚠️ Batch undo context not available (batch is still saved): {type(batch_undo_capture_error).__name__}: {batch_undo_capture_error}")
+
     if skipped:
         admin_confirmation = (
             "⚠️ Liiska deynta qayb ahaan ayaa loo diiwaangeliyey.\n\n"
@@ -5201,6 +5295,25 @@ async def _whatsapp_webhook_process(request: Request):
             if answer == "yes":
                 UNDO_CONFIRMATION_SESSIONS.pop(sender_phone, None)
                 try:
+                    if pending_undo.get("batch_transactions"):
+                        undo_result = _financial_rpc("undo_debt_batch_confirmed", {
+                            "p_business_user_id": str(business_user_id),
+                            "p_transactions": pending_undo["batch_transactions"],
+                        }, request_id=pending_undo.get("request_id") or f"undo-batch:{secrets.token_urlsafe(16)}").execute()
+                        undo_data = undo_result.data
+                        if isinstance(undo_data, list):
+                            undo_data = undo_data[0] if undo_data else None
+                        if not isinstance(undo_data, dict) or undo_data.get("success") is not True:
+                            raise RuntimeError("Database-ku ma xaqiijin ka-noqoshada dhammaan deymaha batch-ka.")
+                        LAST_BATCH_CONTEXT.pop(sender_phone, None)
+                        LAST_TRANSACTION_CONTEXT.pop(sender_phone, None)
+                        send_whatsapp(sender_phone,
+                            "✅ *Dhammaan deymaha batch-kii ugu dambeeyay waa laga noqday.*\n\n"
+                            f"Tirada macaamiisha: *{int(undo_data.get('count') or len(pending_undo['batch_transactions']))}*\n"
+                            f"Wadarta lacagta: *${float(pending_undo.get('total') or 0):.2f}*\n\n"
+                            "Taariikhda macaamillada waa la hayey si raad-raac loo helo.")
+                        return {"status": "batch_undo_completed"}
+
                     undo_result = _financial_rpc("undo_customer_transaction_confirmed", {
                         "p_customer_id": pending_undo["customer_id"],
                         "p_business_user_id": str(business_user_id),
@@ -5408,6 +5521,34 @@ async def _whatsapp_webhook_process(request: Request):
         if undo_match:
             undo_key = str(undo_match.group(1) or "").strip()
             if not undo_key:
+                recent_batch = LAST_BATCH_CONTEXT.get(sender_phone) or {}
+                batch_expiry = recent_batch.get("expires_at")
+                if (str(recent_batch.get("business_user_id") or "") == str(business_user_id)
+                        and recent_batch.get("mode") == "debt"
+                        and isinstance(batch_expiry, datetime)
+                        and datetime.now(timezone.utc) <= batch_expiry
+                        and recent_batch.get("transactions")):
+                    batch_transactions = list(recent_batch["transactions"])
+                    UNDO_CONFIRMATION_SESSIONS[sender_phone] = {
+                        "business_user_id": str(business_user_id),
+                        "batch_transactions": batch_transactions,
+                        "total": float(recent_batch.get("total") or 0),
+                        "request_id": f"undo-batch:{secrets.token_urlsafe(18)}",
+                        "expires_at": datetime.now(timezone.utc) + UNDO_CONFIRMATION_TTL,
+                    }
+                    summary = "\n".join(
+                        f"• {item['customer_name']} — ${float(item['amount']):.2f}"
+                        for item in batch_transactions[:10]
+                    )
+                    if len(batch_transactions) > 10:
+                        summary += f"\n• Iyo {len(batch_transactions) - 10} macaamiil oo kale"
+                    send_whatsapp(sender_phone,
+                        "⚠️ *Xaqiiji ka-noqoshada batch-kii ugu dambeeyay*\n\n"
+                        f"{summary}\n\n"
+                        f"Tirada: *{len(batch_transactions)}*\nWadarta: *${float(recent_batch.get('total') or 0):.2f}*\n\n"
+                        "1️⃣ *HAA* — Dhammaan ka noqo\n2️⃣ *MAYA* — Hayso\n\n"
+                        "Waxba lama beddelin ilaa aad xaqiijiso. (5 daqiiqo)")
+                    return {"status": "batch_undo_confirmation_requested"}
                 recent = get_recent_selected_customer(sender_phone, business_user_id)
                 undo_key = str((recent or {}).get("customer_name") or "").strip()
             if not undo_key:
@@ -8628,19 +8769,9 @@ async def _whatsapp_webhook_process(request: Request):
                     "date"
                 ])
 
-                # Start with unpaid debts only
-                query = (
-                    supabase.table("customers")
-                    .select("*")
-                    .eq("business_user_id", business_user_id)
-                    .eq("is_archived", False)
-                    .eq("is_paid", False)
-                )
-
-                # If a specific date was requested, filter by that date
+                # Build a fresh query for each range so Supabase's default row
+                # limit cannot silently hide customers from the full debt list.
                 if filter_date:
-                    query = query.eq("promised_date", filter_date)
-
                     if filter_type == "today":
                         message_title = "📋 *Balamaha Maanta*"
                     elif filter_type == "tomorrow":
@@ -8653,19 +8784,29 @@ async def _whatsapp_webhook_process(request: Request):
                         except (TypeError, ValueError):
                             display_date = str(filter_date)
                         message_title = f"📋 *Balamaha {display_date}*"
-
                     wants_due_dates = True
                 else:
-                    query = query.order("promised_date", desc=False)
-
                     if wants_due_dates:
                         message_title = "📋 *Liiska Deynta iyo Balamaha*"
                     else:
                         message_title = "📋 *Liiska Deynta*"
 
-                debts_query = query.execute()
+                def build_debt_list_query():
+                    query = (
+                        supabase.table("customers")
+                        .select("*")
+                        .eq("business_user_id", business_user_id)
+                        .eq("is_archived", False)
+                        .eq("is_paid", False)
+                    )
+                    if filter_date:
+                        query = query.eq("promised_date", filter_date)
+                    query = query.order("promised_date", desc=False).order("id", desc=False)
+                    return query
 
-                if not debts_query.data:
+                debt_rows = fetch_all_supabase_rows(build_debt_list_query)
+
+                if not debt_rows:
                     if filter_date:
                         date_label = "maanta" if filter_type == "today" else "berri" if filter_type == "tomorrow" else filter_date
                         empty_due_reply = f"✅ Ma jiraan macaamiil leh ballan {date_label} ({filter_date})."
@@ -8689,7 +8830,7 @@ async def _whatsapp_webhook_process(request: Request):
                 overdue_count = 0
                 today = today_eat()
 
-                for index, debt in enumerate(debts_query.data, start=1):
+                for index, debt in enumerate(debt_rows, start=1):
                     debtor_name = debt["name"]
                     debtor_amount = float(debt["amount"])
                     due_date = debt.get("promised_date")
@@ -8736,7 +8877,7 @@ async def _whatsapp_webhook_process(request: Request):
 
                 message = (
                     f"{message_title} "
-                    f"({len(debts_query.data)} macmiil):\n\n"
+                    f"({len(debt_rows)} macmiil):\n\n"
                     + "\n".join(debt_list)
                 )
 
@@ -8751,30 +8892,13 @@ async def _whatsapp_webhook_process(request: Request):
                     f"${total:,.2f}"
                 )
 
-                # WhatsApp long-message truncation is common on large debtor
-                # lists. Send compact pages of 10 records, retaining the full
-                # count and total on every page so users never mistake a partial
-                # page for the complete list.
-                page_size = 10
-                if len(debt_list) > page_size:
-                    total_pages = (len(debt_list) + page_size - 1) // page_size
-                    for page_index in range(total_pages):
-                        page_items = debt_list[page_index * page_size:(page_index + 1) * page_size]
-                        page_message = (
-                            f"{message_title} — Bogga {page_index + 1}/{total_pages} "
-                            f"({len(debts_query.data)} macmiil):\n\n"
-                            + "\n".join(page_items)
-                            + f"\n\n💰 Wadarta guud: ${total:,.2f}"
-                        )
-                        if wants_due_dates and overdue_count > 0 and page_index == 0:
-                            page_message = f"⚠️ {overdue_count} macmiil ayaa ballantoodii dhaaftay.\n\n" + page_message
-                        send_whatsapp(sender_phone, page_message)
-                else:
-                    send_whatsapp(sender_phone, message)
+                # Send the complete debt register as one WhatsApp message.
+                # Do not split a normal shop debt list into separate pages.
+                send_whatsapp(sender_phone, message)
 
                 remember_conversation_outcome(
                     sender_phone, message_text,
-                    f"Liiska deymaha waa la soo bandhigay ({len(debts_query.data)} macmiil)."
+                    f"Liiska deymaha oo dhan waa la soo bandhigay ({len(debt_rows)} macmiil)."
                 )
 
                 if filter_date:
@@ -9803,19 +9927,25 @@ async def daily_digest(request: Request):
             continue
 
         try:
-            debts_result = (
-                supabase.table("customers")
-                .select("name, amount, promised_date")
-                .eq("business_user_id", business_user_id)
-                .eq("is_archived", False)
-                .eq("is_paid", False)
-                .order("promised_date", desc=False)
-                .execute()
-            )
-            debts = debts_result.data or []
+            def build_daily_digest_query():
+                return (
+                    supabase.table("customers")
+                    .select("name, amount, promised_date, id")
+                    .eq("business_user_id", business_user_id)
+                    .eq("is_archived", False)
+                    .eq("is_paid", False)
+                    .order("promised_date", desc=False)
+                    .order("id", desc=False)
+                )
+
+            # Fetch every unpaid customer with a due date, across all database
+            # pages. The reminder below includes every overdue and due-today row.
+            debts = fetch_all_supabase_rows(build_daily_digest_query)
 
             overdue_items = []
             today_items = []
+            overdue_total = 0.0
+            today_total = 0.0
             today_date = today_eat()
             for debt in debts:
                 raw_due_date = debt.get("promised_date")
@@ -9831,10 +9961,14 @@ async def daily_digest(request: Request):
                 if due_date < today_date:
                     overdue_days = (today_date - due_date).days
                     overdue_items.append(
-                        f"• {customer_name}: {amount_text} — ⚠️ Mudo dhaaf ({overdue_days} maalin)"
+                        f"{len(overdue_items) + 1}. {customer_name}: {amount_text} — ⚠️ Mudo dhaaf ({overdue_days} maalin)"
                     )
+                    overdue_total += _safe_money(debt.get("amount"))
                 elif due_date == today_date:
-                    today_items.append(f"• {customer_name}: {amount_text} — 🔴 Maanta")
+                    today_items.append(
+                        f"{len(today_items) + 1}. {customer_name}: {amount_text} — 🔴 Maanta"
+                    )
+                    today_total += _safe_money(debt.get("amount"))
 
             all_items = overdue_items + today_items
             print(f"📅 Daily digest user={business_user_id}: overdue={len(overdue_items)}, due_today={len(today_items)}")
@@ -9842,26 +9976,37 @@ async def daily_digest(request: Request):
                 skipped_count += 1
                 continue
 
-            max_items = 40
-            shown_overdue = overdue_items[:max_items]
-            remaining_slots = max(0, max_items - len(shown_overdue))
-            shown_today = today_items[:remaining_slots]
-            omitted = len(all_items) - len(shown_overdue) - len(shown_today)
-            message_lines = ["☀️ *Xasuusin* ☀️", ""]
-            if shown_overdue:
-                message_lines.extend(["⚠️ *DEYMAHA BALAN DHAAFKA AH*", *shown_overdue, ""])
-            if shown_today:
-                message_lines.extend(["🔴 *BALANTA MAANTA*", *shown_today])
-            if omitted > 0:
-                message_lines.extend(["", f"➕ {omitted} kale ayaa jira. Qor *LIISKA DAYNTA* si aad u aragto dhammaan."])
-
+            # Include every overdue and due-today customer. No 40-item cap and
+            # no "more customers" omission notice: this is the complete reminder.
+            message_lines = ["☀️ *Xasuusinta Subaxnimo* ☀️", ""]
             if name:
-                message_lines.insert(1, f"👤 *{name}*")
+                message_lines.append(f"👤 *{name}*")
+                message_lines.append("")
+            message_lines.append(f"📅 Taariikh: {today_date.strftime('%d-%m-%Y')}")
+            message_lines.append("")
+            if overdue_items:
+                message_lines.extend([
+                    f"⚠️ *DEYMAHA BALAN DHAAFKA AH ({len(overdue_items)})*",
+                    *overdue_items,
+                    f"Wadarta balan-dhaafka: ${overdue_total:,.2f}",
+                    "",
+                ])
+            if today_items:
+                message_lines.extend([
+                    f"🔴 *BALANTA MAANTA ({len(today_items)})*",
+                    *today_items,
+                    f"Wadarta maanta: ${today_total:,.2f}",
+                ])
+            message_lines.extend([
+                "",
+                f"👥 Wadarta macaamiisha la xasuusinayo: {len(all_items)}",
+                f"💰 Wadarta guud: ${overdue_total + today_total:,.2f}",
+            ])
 
             ok = send_whatsapp(phone, "\n".join(message_lines))
             if ok:
                 sent_count += 1
-                print(f"✅ Daily digest sent: user={business_user_id}, overdue={len(overdue_items)}, due_today={len(today_items)}")
+                print(f"✅ Complete daily digest sent: user={business_user_id}, overdue={len(overdue_items)}, due_today={len(today_items)}, total={len(all_items)}")
             else:
                 error_count += 1
                 print(f"❌ Daily digest WhatsApp failed: user={business_user_id}")
