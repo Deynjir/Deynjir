@@ -657,6 +657,7 @@ SOMALI UNDERSTANDING (IMPORTANT): Understand the whole sentence, not only exact 
 - Understand forms such as qaatay, qaadatay, qaateen, qaadanayo; bixiyay, bixisay, bixiyeen; keenay, keentay; qabtay, qabatay; celiyay, celisay; shubay, shubtay.
 - "ka siiyay" can mean the shop gave the customer credit; classify as ADD only when the sentence clearly describes money given to that customer as a debt. Do not confuse it with money the customer paid back.
 - Remove grammatical filler (wuu, wuxuu, ayay, waxay, ayaan, baan, buu, bay) from the customer name, but preserve every actual name part.
+- Never include transaction wording in customer_name. In particular, remove "deyn cusub", "dayn cusub", "oo", "ah", and action phrases such as "wuxuu qaatay" from the END of a name. Examples: "omar wuxuu qaatay deyn cusub oo $35 ah" -> customer_name="omar", amount=35; "Cumar 35" -> customer_name="Cumar", amount=35; "Omar $35" -> customer_name="Omar", amount=35. Never save "omar deyn cusub oo" as a customer name.
 - Negative/no-activity statements are status information, not transactions. Understand natural variations of negated activity wording (for example, no money was received, no customer repaid, no new debt, or nothing happened today), including informal word order and spelling. Do not create ADD or PAY from them. If a guided workflow is waiting, interpret the reply against that stage; if it clearly reports no activity, end the unfinished flow without saving. If the user says the previous reply was not a name, never use that sentence as a customer name.
 - If a sentence says only that a customer has not paid, do not create a transaction. If the direction or amount is unclear, ask a short clarification. Never invent an amount or mark a partial payment as full.
 - Also understand common informal variants and typos: "wuu qaatay", "wuu qaaty", "qaatey", "qaadatay", "qaateen", "wuu soo celiyey", "soo celisay", "lacagtii wuu keenay", "lacag buu soo shubay", "lacagta waan ka qabtay", "wuu iga soo celiyey", and missing/extra spaces. Normalize spelling for intent, but preserve the customer's actual name as written.
@@ -2066,6 +2067,36 @@ def normalize_customer_name(value):
     return " ".join(value.split())
 
 
+def clean_extracted_customer_name(value):
+    """Remove transaction wording accidentally appended to an extracted name.
+
+    Only trims known action/filler phrases from the END, preserving genuine
+    multi-part names and never manufacturing a replacement name.
+    """
+    name = " ".join(str(value or "").strip().split())
+    if not name:
+        return None
+
+    trailing_patterns = (
+        r"\s+(?:(?:wuxuu|wuu|ayuu|ayaa|ayay|waxay|way|ayaan)\s+)?"
+        r"(?:qaatay|qaadatay|qaatey|qaateen|qaaty|bixiyay|bixiyey|bixisay|"
+        r"bixiyeen|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|"
+        r"keenay|keentay|amaahday|amaah)\b.*$",
+        r"\s+(?:deyn|dayn)(?:\s+cusub)?(?:\s+oo)?(?:\s+ah)?\s*$",
+        r"\s+(?:cusub\s+oo|oo\s+ah|oo|ah)\s*$",
+    )
+    previous = None
+    while name and name != previous:
+        previous = name
+        for pattern in trailing_patterns:
+            name = re.sub(pattern, "", name, flags=re.I).strip(" ,:;.-")
+    if not name or normalize_customer_name(name) in {
+        "deyn", "dayn", "deyn cusub", "dayn cusub", "cusub", "oo", "ah"
+    }:
+        return None
+    return name
+
+
 def parse_customer_phone_update(message_text):
     """Parse a clear customer + phone-only message before Gemini.
 
@@ -2173,6 +2204,49 @@ def get_recent_selected_customer(sender_phone, business_user_id, max_age_minutes
         return None
     name = str(saved.get("customer_name") or "").strip()
     return name or None
+
+
+def parse_contextual_due_date_update(message_text, recent_customer_name):
+    """Resolve a clearly labelled date-only follow-up to the recently selected customer."""
+    if not recent_customer_name:
+        return None
+    raw = " ".join(str(message_text or "").strip().split())
+    match = re.fullmatch(
+        r"(?:mudada|muddo(?:da)?|ballan(?:ta)?|taariikh(?:da)?)(?:\s+(?:waa|ah))?\s+"
+        r"(\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2})[.!؟]?",
+        raw,
+        re.I,
+    )
+    if not match:
+        return None
+    raw_date = match.group(1)
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date):
+            parsed = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        else:
+            parsed = datetime.strptime(raw_date.replace("-", "/"), "%d/%m/%Y").date()
+    except ValueError:
+        return None
+    return {
+        "action": "EDIT",
+        "customer_name": str(recent_customer_name).strip(),
+        "amount": None,
+        "new_amount": None,
+        "promised_date": parsed.isoformat(),
+        "new_date": parsed.isoformat(),
+        "days_until_due": None,
+        "description": None,
+        "_contextual_due_date_update": True,
+    }
+
+
+def is_explicit_due_date_change(message_text):
+    """Only bypass the existing-date confirmation when the user clearly orders a change."""
+    return bool(re.search(
+        r"\b(?:ka\s+dhig|kadhig|beddel|badal|cusboonaysii|update|change|edit)\b",
+        str(message_text or ""),
+        re.I,
+    ))
 
 
 def remember_recent_transaction(sender_phone, business_user_id, customer_id, customer_name):
@@ -2840,40 +2914,65 @@ def parse_transaction_clarification(message_text):
 
 
 def parse_transaction_batch_text(message_text):
-    """Parse an explicitly directed multi-row ADD/PAY text list conservatively.
+    """Parse a clear, explicitly directed multi-row ADD/PAY message.
 
-    Supported examples:
-      DEYN CUSUB\nCali 20\nAamina 35
-      LACAG BIXIN\nCali $10\nAamina $15
-      Cali $20 ayuu deyn qaatay\nAamina $30 ayay deyn qaadatay
-
-    Returns (mode, rows), or None. Every non-header row must parse; no row is
-    silently dropped. The caller stages a preview and requires the existing OK.
+    Supports headers (DEYN CUSUB / LACAG BIXIN), one-row-per-line input,
+    semicolon-separated rows, and comma-separated rows when each segment has
+    its own unambiguous amount. Every row must parse; nothing is silently lost.
     """
     raw = str(message_text or "").replace("\r", "\n").strip()
     if not raw:
         return None
 
-    source_lines = []
-    for source_line in raw.split("\n"):
-        line = " ".join(source_line.split()).strip()
-        if not line:
-            continue
-        money_tokens = re.findall(r"\$\s*\d+(?:[.,]\d{1,2})?|(?<![\w/.-])\d+(?:[.,]\d{1,2})?\s*\$", line)
-        if len(money_tokens) > 1 and ("," in line or ";" in line):
-            source_lines.extend(part.strip() for part in re.split(r"[,;]", line) if part.strip())
-        elif ";" in line:
-            source_lines.extend(part.strip() for part in line.split(";") if part.strip())
-        else:
-            source_lines.append(line)
-    if not source_lines:
-        return None
-
     add_header = re.compile(r"^(?:deyn|dayn)(?:\s+(?:cusub|cusubta))?$|^(?:add|new\s+debt)$", re.I)
     pay_header = re.compile(r"^(?:lacag\s*bixin(?:ta)?|bixin|payment(?:s)?)$", re.I)
+    date_pattern = r"(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"
+    due_re = re.compile(
+        rf"(?:\b(?:ballan(?:ta)?|wakhtiga\s+balanta|waqtiga\s+balanta|due(?:\s+date)?)\s*(?:waa)?\s*[:=-]?\s*)({date_pattern})",
+        re.I,
+    )
+    currency_re = re.compile(
+        r"\$\s*(\d+(?:[.,]\d{1,2})?)|(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)\s*\$"
+    )
+    plain_amount_re = re.compile(r"(?<![\w/.-])(\d{1,7}(?:[.,]\d{1,2})?)(?![\w/.-])")
+
+    def split_line(line):
+        line = " ".join(line.split()).strip()
+        if not line:
+            return []
+        if ";" in line:
+            return [part.strip() for part in line.split(";") if part.strip()]
+        # A comma is a row separator only if every side independently contains
+        # exactly one currency-marked amount or a plain amount. Decimal commas
+        # are not split because the next character must begin a word/name.
+        if re.search(r",\s*[A-Za-z\u0080-\uffff]", line):
+            parts = [part.strip() for part in re.split(r",\s*(?=[A-Za-z\u0080-\uffff])", line) if part.strip()]
+            if len(parts) > 1:
+                valid = True
+                for part in parts:
+                    stripped = due_re.sub(" ", part)
+                    matches = list(currency_re.finditer(stripped))
+                    if not matches:
+                        matches = list(plain_amount_re.finditer(stripped))
+                    if len(matches) != 1:
+                        valid = False
+                        break
+                if valid:
+                    return parts
+        return [line]
+
+    source_rows = []
+    for line in raw.splitlines():
+        clean = " ".join(line.split()).strip()
+        if not clean:
+            continue
+        if re.fullmatch(r"(?:menu|liis|liiska)\s*", clean, re.I):
+            continue
+        source_rows.extend(split_line(clean))
+
     mode = None
     rows = []
-    for line in source_lines:
+    for line in source_rows:
         clean = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
         if add_header.fullmatch(clean):
             if mode == "payment":
@@ -2892,17 +2991,20 @@ def parse_transaction_batch_text(message_text):
 
     parsed_rows = []
     row_actions = set()
-    for row in rows:
+    for row_number, row in enumerate(rows, start=1):
         folded = normalize_customer_name(row)
         add_mark = bool(re.search(
-            r"\b(?:deyn|dayn)\s+(?:cusub|qaato|qaatay|qaadatay|qaatey)\b|"
-            r"\b(?:iga\s+qaatay|ayuu\s+qaatay|wuxuu\s+iga\s+qaatay|amaah)\b",
+            r"\b(?:deyn(?:ta)?\s+(?:cusub|qaato|qaatay|qaadatay|qaatey)|"
+            r"iga\s+qaatay|ayuu\s+qaatay|wuxuu\s+iga\s+qaatay|amaah|dayn\s+qaatay)\b",
             folded, re.I))
         pay_mark = bool(re.search(
-            r"\b(?:lacag\s*bixin|bixiyay|bixiyey|bixisay|bixiyeen|soo\s+celiyay|"
-            r"soo\s+celiyey|celiyay|celiyey|lacagtii\s+waa\s+la\s+helay)\b",
+            r"\b(?:lacag\s*bixin(?:ta)?|bixiyay|bixiyey|bixisay|bixiyeen|"
+            r"soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|keenay|keentay|"
+            r"ii\s+keenay|lacagtii\s+waa\s+la\s+helay)\b",
             folded, re.I))
         row_action = "debt" if add_mark and not pay_mark else ("payment" if pay_mark and not add_mark else None)
+        if add_mark and pay_mark:
+            return None
         if row_action:
             row_actions.add(row_action)
         effective_mode = row_action or mode
@@ -2911,19 +3013,20 @@ def parse_transaction_batch_text(message_text):
         if mode and row_action and row_action != mode:
             return None
 
-        # Exactly one amount per row; a currency marker is preferred, while a
-        # plain trailing amount is accepted only under an explicit global header.
-        amount_matches = list(re.finditer(
-            r"\$\s*(\d+(?:[.,]\d{1,2})?)|(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)\s*\$",
-            row))
+        due_match = due_re.search(row)
+        due_date = None
+        row_without_date = row
+        if due_match:
+            due_date = _import_parse_date(due_match.group(1))
+            row_without_date = due_re.sub(" ", row, count=1)
+
+        amount_matches = list(currency_re.finditer(row_without_date))
         if not amount_matches and (mode or row_action):
-            # Unmarked amounts are accepted only when the transaction direction
-            # is explicit and the number is short enough not to be a phone number.
-            amount_matches = list(re.finditer(r"(?<![\w/.-])(\d{1,7}(?:[.,]\d{1,2})?)(?![\w/.-])", row))
+            amount_matches = list(plain_amount_re.finditer(row_without_date))
         if len(amount_matches) != 1:
             return None
-        m = amount_matches[0]
-        amount_text = next((g for g in m.groups() if g is not None), None)
+        amount_match = amount_matches[0]
+        amount_text = next((group for group in amount_match.groups() if group is not None), None)
         try:
             amount = float(amount_text.replace(",", "."))
         except (TypeError, ValueError):
@@ -2931,15 +3034,24 @@ def parse_transaction_batch_text(message_text):
         if not math.isfinite(amount) or amount <= 0:
             return None
 
-        name = (row[:m.start()] + " " + row[m.end():]).strip()
-        name = re.sub(r"(?i)\b(?:deyn|dayn|cusub|lacag|bixin|bixiyay|bixiyey|bixisay|"
-                      r"bixiyeen|ayuu|wuxuu|wuu|ayaa|ayay|waxay|way|iga|qaatay|"
-                      r"qaadatay|qaatey|qaato|soo|celiyay|celiyey|amaah|usd|dollars?|dollar)\b", " ", name)
+        name = (row_without_date[:amount_match.start()] + " " + row_without_date[amount_match.end():]).strip()
+        name = re.sub(
+            r"(?i)\b(?:deyn(?:ta)?|dayn|cusub|lacag|bixin(?:ta)?|bixiyay|bixiyey|bixisay|"
+            r"bixiyeen|ayuu|buu|bay|baan|wuxuu|wuu|ayaa|ayay|waxay|way|iga|qaatay|"
+            r"qaadatay|qaatey|qaato|soo|celiyay|celiyey|keenay|keentay|amaah|"
+            r"usd|dollars?|dollar)\b", " ", name)
         name = re.sub(r"[$]", " ", name)
         name = " ".join(name.split()).strip(" .,:;-")
         if not name or len(name) > 120 or not re.search(r"[A-Za-z\u0080-\uffff]", name):
             return None
-        parsed_rows.append({"name": name, "amount": round(amount, 2), "promised_date": None, "phone_number": None})
+
+        parsed_rows.append({
+            "name": name,
+            "amount": round(amount, 2),
+            "promised_date": due_date if effective_mode == "debt" else None,
+            "phone_number": None,
+            "description": None,
+        })
 
     if len(row_actions) > 1:
         return None
@@ -3927,11 +4039,15 @@ def _validate_import_entries(entries):
         if str(phone or "").strip().lower() in ("nan", "none", "null"):
             phone = None
         phone = re.sub(r"[^0-9+]", "", str(phone)) if phone else None
+        description = str(entry.get("description") or "").strip()
+        if description.lower() in ("nan", "none", "null"):
+            description = ""
         clean.append({
             "name": name,
             "amount": round(amount, 2),
             "promised_date": _import_parse_date(entry.get("promised_date") or entry.get("due_date") or entry.get("due")),
             "phone_number": phone or None,
+            "description": description[:160] or None,
         })
     return clean
 
@@ -4300,7 +4416,7 @@ def _commit_import(admin_phone, session):
     if skipped:
         admin_confirmation = (
             "⚠️ Liiska deynta qayb ahaan ayaa loo diiwaangeliyey.\n\n"
-            f"✅ Deymo cusub oo lagu daray: {added}\\n"
+            f"✅ Deymo cusub oo lagu daray: {added}\n"
             f"⏭️ Deymo hore oo laga booday: {skipped}\n\n"
             "Deymaha hore laguma darin mar labaad."
         )
@@ -4872,9 +4988,10 @@ async def _whatsapp_webhook_process(request: Request):
                 (
                     "🎉 *Waa laguu oggolaaday Deynjir!*\n\n"
                     "👋 Soo dhawoow! Waxaan kaa caawinayaa la socodka deymaha iyo lacag-bixinta.\n\n"
-                    "Si fudud ku bilow: qor *MENU*, kadib dooro *1* deyn cusub ama *2* lacag-bixin.\n"
-                    "Waxaan ku weydiin doonaa magaca macmiilka iyo lacagta.\n\n"
-                    "Tusaale: *Cali* kadib *20*. Lacag-bixinta, waxaan ku weydiin doonaa *HAA/MAYA* ka hor kaydinta."
+                    "Habka ugu fudud: hal fariin ku qor magaca iyo lacagta.\n\n"
+                    "Deyn cusub: *Cali $20 deyn cusub*\n"
+                    "Lacag-bixin: *Cali $10 ayuu bixiyay*\n\n"
+                    "Waxaad kaloo qori kartaa *MENU* si tallaabo-tallaabo laguugu hago. Lacag-bixin kasta waa la xaqiijinayaa ka hor kaydinta."
                 )
                 if new_status == "approved"
                 else "❌ Waan ka xunnahay, codsigaaga waa la diiday."
@@ -5401,25 +5518,32 @@ async def _whatsapp_webhook_process(request: Request):
                         AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
                         send_whatsapp(sender_phone, "⚠️ Haraaga macmiilka wuu isbeddelay intii xaqiijintu sugaysay. Waxba lama beddelin. Fadlan dib u eeg liiska deynta.")
                         return {"status": "amount_edit_stale_balance"}
-                    payment_history = (supabase.table("payments").select("customer_id")
-                        .eq("business_user_id", str(business_user_id))
-                        .eq("customer_id", str(amount_edit_state["customer_id"]))
-                        .limit(1).execute())
-                    transaction_history = (supabase.table("customer_transactions").select("customer_id")
-                        .eq("business_user_id", str(business_user_id))
-                        .eq("customer_id", str(amount_edit_state["customer_id"]))
-                        .limit(1).execute())
-                    if payment_history.data or transaction_history.data:
-                        AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
-                        send_whatsapp(sender_phone, "⚠️ Macmiilkani wuxuu leeyahay taariikh macaamil/lacag-bixin. Si aan taariikhda iyo haraaga isugu khaldin, si toos ah looma beddeli karo lacagta. Waxba lama beddelin.")
-                        return {"status": "amount_edit_blocked_by_ledger"}
                     update_data = dict(amount_edit_state.get("update_data") or {})
-                    updated_result = (supabase.table("customers").update(update_data)
+                    if "amount" in update_data:
+                        payment_history = (supabase.table("payments").select("customer_id")
+                            .eq("business_user_id", str(business_user_id))
+                            .eq("customer_id", str(amount_edit_state["customer_id"]))
+                            .limit(1).execute())
+                        transaction_history = (supabase.table("customer_transactions").select("customer_id")
+                            .eq("business_user_id", str(business_user_id))
+                            .eq("customer_id", str(amount_edit_state["customer_id"]))
+                            .limit(1).execute())
+                        if payment_history.data or transaction_history.data:
+                            AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
+                            send_whatsapp(sender_phone, "⚠️ Macmiilkani wuxuu leeyahay taariikh macaamil/lacag-bixin. Si aan taariikhda iyo haraaga isugu khaldin, si toos ah looma beddeli karo lacagta. Waxba lama beddelin.")
+                            return {"status": "amount_edit_blocked_by_ledger"}
+                    update_query = (supabase.table("customers").update(update_data)
                         .eq("id", str(amount_edit_state["customer_id"]))
                         .eq("business_user_id", str(business_user_id))
                         .eq("is_archived", False)
-                        .eq("amount", float(amount_edit_state["old_amount"]))
-                        .select("id, name, amount, promised_date, is_paid").execute())
+                        .eq("amount", float(amount_edit_state["old_amount"])))
+                    if amount_edit_state.get("date_confirmation_only"):
+                        old_due = amount_edit_state.get("old_promised_date")
+                        if old_due:
+                            update_query = update_query.eq("promised_date", str(old_due))
+                        else:
+                            update_query = update_query.is_("promised_date", "null")
+                    updated_result = update_query.select("id, name, amount, promised_date, is_paid").execute()
                     AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
                     if not updated_result.data:
                         send_whatsapp(sender_phone, "❌ Waxba lama beddelin. Hubi rukhsadaha database-ka (RLS).")
@@ -5429,7 +5553,7 @@ async def _whatsapp_webhook_process(request: Request):
                     if "amount" in update_data:
                         lines.append(f"💵 Lacag: ${float(current_customer.get('amount') or 0):.2f} → ${float(updated_customer.get('amount') or 0):.2f}")
                     if "promised_date" in update_data:
-                        lines.append(f"📅 Ballan: {current_customer.get('promised_date') or 'lama gelin'} → {updated_customer.get('promised_date')}")
+                        lines.append(f"📅 Ballan: {current_customer.get('promised_date') or '-'} → {updated_customer.get('promised_date')}")
                     send_whatsapp(sender_phone, f"✅ Wax-ka-beddelka waa la xaqiijiyey.\n{updated_customer.get('name')}:\n" + "\n".join(lines))
                     return {"status": "amount_edit_confirmed"}
                 except Exception as edit_confirm_error:
@@ -7293,6 +7417,10 @@ async def _whatsapp_webhook_process(request: Request):
         "Examples: 'Aamina waxay bixisay 20', 'Aamina 20 ayay bixisay', 'Aamina way soo celisay 20', "
         "'Aamina lacagtii way keentay', 'Cali 50 ayuu iga qaatay', 'Cali maanta 50 buu qaatay', "
         "'lacagtii Aamina waa la helay', 'Aamina deyntii oo dhan way bixisay'. "
+        "DUE-DATE FOLLOW-UPS: If a recent customer was just added/selected and the user replies with a labelled date "
+        "such as 'Mudada 13/11/2026', 'Muddo 13/11/2026', or 'Ballanta 13/11/2026', attach that date to that same customer; "
+        "do not ask them to create another debt. If that customer already has a different promised date, ask whether to replace it. "
+        "A clear command such as 'ka dhig ballanta Fawsi 13/11/2026' means update it directly. "
         "DUE-DATE CHANGES: If the user gives one or more existing customer names with new promised dates and "
         "no debt/payment amount, treat EVERY name-date pair as EDIT of that customer's promised_date only. "
         "Return one EDIT object per customer, with new_date and promised_date set to the requested date, "
@@ -7313,6 +7441,7 @@ async def _whatsapp_webhook_process(request: Request):
     )
     recent_selected_customer = get_recent_selected_customer(sender_phone, business_user_id)
     contextual_payment_entry = parse_contextual_somali_payment(message_text, recent_selected_customer)
+    contextual_due_date_entry = parse_contextual_due_date_update(message_text, recent_selected_customer)
     if recent_selected_customer:
         dynamic_system_prompt += (
             "\nRECENT CUSTOMER CONTEXT (same shop, selected within the last 2 minutes): "
@@ -7362,6 +7491,12 @@ async def _whatsapp_webhook_process(request: Request):
         print(f"📱 Customer phone-only update parsed locally: {entries[0]['customer_name']!r}; skipping Gemini")
     elif forced_transaction_action:
         print(f"🔁 Using saved entries with confirmed action {forced_transaction_action}")
+    elif contextual_due_date_entry:
+        entries = [contextual_due_date_entry]
+        print(
+            "📅 Contextual due-date follow-up resolved to recently selected customer: "
+            f"{contextual_due_date_entry['customer_name']!r} -> {contextual_due_date_entry['new_date']}"
+        )
     elif contextual_payment_entry:
         entries = [contextual_payment_entry]
         print(
@@ -7380,7 +7515,7 @@ async def _whatsapp_webhook_process(request: Request):
         and item.get("customer_name")
         and item.get("amount") is not None
         for item in direct_somali_entries
-    ) and classify_transaction_direction(message_text) in {"ADD", "PAY"}:
+    ):
         entries = direct_somali_entries
         print(f"⚡ Explicit Somali transaction parsed locally before Gemini: {entries!r}")
     elif (structured_entries := parse_structured_somali_transaction(message_text)):
@@ -7512,6 +7647,14 @@ async def _whatsapp_webhook_process(request: Request):
         for parsed_item in entries:
             if isinstance(parsed_item, dict) and parsed_item.get("action") is not None:
                 parsed_item["action"] = str(parsed_item["action"]).upper()
+            if isinstance(parsed_item, dict) and parsed_item.get("customer_name"):
+                cleaned_name = clean_extracted_customer_name(parsed_item.get("customer_name"))
+                parsed_item["customer_name"] = cleaned_name
+                if not cleaned_name:
+                    print(
+                        "⚠️ Rejected transaction with no valid customer name after "
+                        f"removing action wording: {parsed_item!r}"
+                    )
 
     # Reject invalid/empty AI intents before they can reach database handlers.
     # Gemini sometimes labels meaningless text as SEARCH with customer_name=null.
@@ -7620,6 +7763,61 @@ async def _whatsapp_webhook_process(request: Request):
             for parsed_entry in entries:
                 if parsed_entry.get("action") in {"ADD", "PAY"}:
                     parsed_entry["action"] = explicit_direction
+
+    # Any clearly directed multi-customer ADD/PAY message (including rows
+    # extracted by Gemini from natural Somali) uses one reviewed batch import.
+    # This prevents the ordinary per-customer PAY loop from creating one
+    # pending confirmation and then blocking every later payment in the list.
+    if len(entries) >= 2 and all(
+        isinstance(item, dict)
+        and str(item.get("action") or "").upper() in {"ADD", "PAY"}
+        and item.get("customer_name")
+        and item.get("amount") is not None
+        for item in entries
+    ):
+        batch_actions = {str(item.get("action") or "").upper() for item in entries}
+        if len(batch_actions) != 1:
+            send_whatsapp(
+                sender_phone,
+                "Liiska wuxuu isku daray deyn iyo lacag-bixin. Fadlan laba liis u kala dir; waxba lama kaydin."
+            )
+            return {"status": "mixed_transaction_batch_rejected"}
+        batch_action = next(iter(batch_actions))
+        batch_mode = "debt" if batch_action == "ADD" else "payment"
+        try:
+            batch_rows = _validate_import_entries([
+                {
+                    "name": item.get("customer_name"),
+                    "amount": item.get("amount"),
+                    "promised_date": item.get("promised_date"),
+                    "phone_number": item.get("new_phone") or item.get("customer_phone"),
+                    "description": item.get("description"),
+                }
+                for item in entries
+            ])
+            IMPORT_SESSIONS[sender_phone] = {
+                "business_user_id": str(business_user_id),
+                "shop_phone": sender_phone,
+                "shop_name": str((business_user or {}).get("name") or sender_phone),
+                "entries": batch_rows,
+                "mode": batch_mode,
+                "request_id": secrets.token_urlsafe(24),
+                "stage": "ready",
+                "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
+            }
+            _stage_import(sender_phone, batch_rows, batch_mode)
+            return {
+                "status": "ai_batch_preview_ready",
+                "mode": batch_mode,
+                "count": len(batch_rows),
+            }
+        except Exception as batch_error:
+            print(f"❌ AI multi-row batch staging failed: {type(batch_error).__name__}: {batch_error}")
+            send_whatsapp(
+                sender_phone,
+                f"Liiska si sax ah looma diyaarin karin: {str(batch_error)[:160]}\nWaxba lama kaydin. Fadlan sax safafka oo mar kale dir."
+            )
+            return {"status": "ai_batch_preview_error"}
 
     # Both Gemini and local fallback use the same downstream business rules.
     # In particular, ordinary amounts add; explicit edit/ka dhig replaces.
@@ -8601,6 +8799,44 @@ async def _whatsapp_webhook_process(request: Request):
                         send_whatsapp(sender_phone, "❌ Taariikh khaldan. Isticmaal YYYY-MM-DD, tusaale 2026-10-20.")
                         continue
 
+                # If a date already exists, do not silently overwrite it when the
+                # user merely supplies another date. Ask once; explicit change
+                # commands (e.g. "ka dhig ballanta ...") are clear authorization.
+                if (
+                    date_only_update
+                    and "promised_date" in update_data
+                    and debtor.get("promised_date")
+                    and str(debtor.get("promised_date")) != str(update_data["promised_date"])
+                    and not is_explicit_due_date_change(message_text)
+                ):
+                    old_due = str(debtor.get("promised_date"))
+                    new_due = str(update_data["promised_date"])
+                    try:
+                        old_due_display = datetime.strptime(old_due, "%Y-%m-%d").strftime("%d/%m/%Y")
+                    except ValueError:
+                        old_due_display = old_due
+                    try:
+                        new_due_display = datetime.strptime(new_due, "%Y-%m-%d").strftime("%d/%m/%Y")
+                    except ValueError:
+                        new_due_display = new_due
+                    AMOUNT_EDIT_SESSIONS[sender_phone] = {
+                        "business_user_id": str(business_user_id),
+                        "customer_id": str(debtor["id"]),
+                        "customer_name": str(debtor.get("name") or name),
+                        "old_amount": _safe_money(debtor.get("amount")),
+                        "old_promised_date": old_due,
+                        "update_data": dict(update_data),
+                        "date_confirmation_only": True,
+                        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+                    }
+                    send_whatsapp(
+                        sender_phone,
+                        f"📅 *{debtor.get('name') or name}* wuxuu hore u lahaa ballan *{old_due_display}*.\n\n"
+                        f"Ma ku beddelaa *{new_due_display}*?\n\n"
+                        "Qor *HAA* si loo beddelo ama *MAYA* si loo daayo. Waxba lama beddelin weli."
+                    )
+                    continue
+
                 if not update_data:
                     send_whatsapp(
                         sender_phone,
@@ -8663,7 +8899,7 @@ async def _whatsapp_webhook_process(request: Request):
                 if "amount" in update_data:
                     changes.append(f"💵 Lacag: ${float(debtor['amount']):.2f} → ${float(updated['amount']):.2f}")
                 if "promised_date" in update_data:
-                    changes.append(f"📅 Ballan: {debtor.get('promised_date') or 'lama gelin'} → {updated['promised_date']}")
+                    changes.append(f"📅 Ballan: {debtor.get('promised_date') or '-'} → {updated['promised_date']}")
 
                 send_whatsapp(sender_phone, f"✅ {updated['name']} waa la cusboonaysiiyay:\n" + "\n".join(changes))
                 successful_inserts.append(entry)
@@ -9194,9 +9430,7 @@ async def whatsapp_webhook(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook JSON") from exc
     message_data = payload.get("messageData") or {}
-    # Green-API's documented webhook schema places idMessage at the ROOT
-    # of the notification body (not inside messageData).
-    event_id = (payload.get("idMessage") or payload.get("id") or payload.get("eventId")
+    event_id = (payload.get("id") or payload.get("eventId")
                 or message_data.get("idMessage") or message_data.get("id"))
     if payload.get("typeWebhook") in {"incomingMessageReceived", "outgoingMessageReceived"} and not event_id:
         # Financial messages must have a stable provider event ID. Processing an
