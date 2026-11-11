@@ -7,6 +7,8 @@ import hmac
 import time
 import secrets
 import math
+import hashlib
+from contextvars import ContextVar
 from zoneinfo import ZoneInfo
 import difflib
 import unicodedata
@@ -105,6 +107,123 @@ WORKFLOW_SESSION_MAPS = (
     UNDO_CONFIRMATION_SESSIONS, SEARCH_DETAIL_SESSIONS,
     DEPOSIT_OFFER_SESSIONS, CORRECTION_SESSIONS,
 )
+
+# Database-backed workflow recovery. These maps contain JSON-serializable
+# conversation state; asyncio tasks and transient inbound snapshots are excluded.
+PERSISTED_SESSION_MAPS = {
+    "last_history": LAST_HISTORY_REQUESTS,
+    "last_selected": LAST_SELECTED_CUSTOMERS,
+    "onboarding": ONBOARDING_SESSIONS,
+    "conversation": CONVERSATION_SESSIONS,
+    "reminder": REMINDER_SESSIONS,
+    "rename": RENAME_SESSIONS,
+    "amount_edit": AMOUNT_EDIT_SESSIONS,
+    "import": IMPORT_SESSIONS,
+    "payment_export": PAYMENT_EXPORT_SESSIONS,
+    "guided": GUIDED_SESSIONS,
+    "paused_guided": PAUSED_GUIDED_SESSIONS,
+    "customer_match": CUSTOMER_MATCH_SESSIONS,
+    "deposit_offer": DEPOSIT_OFFER_SESSIONS,
+    "correction": CORRECTION_SESSIONS,
+    "delete": DELETE_SESSIONS,
+    "undo": UNDO_CONFIRMATION_SESSIONS,
+    "last_transaction": LAST_TRANSACTION_CONTEXT,
+    "search_detail": SEARCH_DETAIL_SESSIONS,
+}
+
+
+def _session_json_default(value):
+    if isinstance(value, (datetime,)):
+        return value.isoformat()
+    if hasattr(value, "isoformat") and callable(value.isoformat):
+        return value.isoformat()
+    if isinstance(value, (set, tuple)):
+        return list(value)
+    if isinstance(value, (bytes, bytearray)):
+        import base64
+        return {"__deynjir_bytes__": base64.b64encode(bytes(value)).decode("ascii")}
+    raise TypeError(f"Unsupported workflow session value: {type(value).__name__}")
+
+
+def _restore_session_value(value, key=""):
+    if isinstance(value, dict):
+        if set(value) == {"__deynjir_bytes__"}:
+            import base64
+            try:
+                return base64.b64decode(value["__deynjir_bytes__"])
+            except Exception:
+                return b""
+        return {k: _restore_session_value(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_restore_session_value(v, key) for v in value]
+    if isinstance(value, str) and (key.endswith("_at") or key == "expires_at"):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _load_persisted_workflow_sessions(sender_phone):
+    """Restore this sender's unfinished conversations after a process restart."""
+    try:
+        result = (supabase.table("deynjir_workflow_sessions")
+            .select("session_name, payload, expires_at")
+            .eq("sender_phone", str(sender_phone)).execute())
+        now = datetime.now(timezone.utc)
+        for row in result.data or []:
+            name = row.get("session_name")
+            target = PERSISTED_SESSION_MAPS.get(name)
+            payload = row.get("payload")
+            if target is None or not isinstance(payload, dict):
+                continue
+            expiry = row.get("expires_at")
+            if expiry:
+                try:
+                    exp_dt = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+                    if exp_dt.tzinfo is None:
+                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                    if exp_dt <= now:
+                        target.pop(sender_phone, None)
+                        continue
+                except ValueError:
+                    pass
+            target[sender_phone] = _restore_session_value(payload)
+    except Exception as exc:
+        # Financial operations remain guarded by idempotent RPCs. Session
+        # persistence failures are logged; the active process can still proceed.
+        print(f"⚠️ Workflow session restore failed: {type(exc).__name__}: {exc}")
+
+
+def _save_persisted_workflow_sessions(sender_phone):
+    """Upsert or remove all persisted workflow state for one sender."""
+    rows = []
+    try:
+        for name, mapping in PERSISTED_SESSION_MAPS.items():
+            value = mapping.get(sender_phone)
+            if value is None:
+                continue
+            payload = json.loads(json.dumps(value, default=_session_json_default, ensure_ascii=False))
+            expiry = value.get("expires_at") if isinstance(value, dict) else None
+            if isinstance(expiry, datetime):
+                expiry = expiry.isoformat()
+            rows.append({
+                "sender_phone": str(sender_phone), "session_name": name,
+                "payload": payload, "expires_at": expiry,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+        # Replace the sender snapshot as a single logical save. Rows absent from
+        # this snapshot are removed so completed/cancelled flows do not return.
+        (supabase.table("deynjir_workflow_sessions").delete()
+            .eq("sender_phone", str(sender_phone)).execute())
+        if rows:
+            supabase.table("deynjir_workflow_sessions").upsert(
+                rows, on_conflict="sender_phone,session_name").execute()
+    except Exception as exc:
+        print(f"⚠️ Workflow session save failed: {type(exc).__name__}: {exc}")
 
 
 def deynjir_main_menu():
@@ -475,6 +594,47 @@ def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone, is_repeat=Fal
 
 
 # Securely load credentials from Render's Environment panel variables
+# Financial request context is isolated per async webhook request.
+# The same Green-API event ID produces the same request IDs when retried.
+_FINANCIAL_REQUEST_CONTEXT = ContextVar("deynjir_financial_request_context", default=None)
+
+_FINANCIAL_RPC_MAP = {
+    "record_debt_addition": "record_debt_addition_idempotent",
+    "record_debt_payment_with_history": "record_debt_payment_idempotent",
+    "record_customer_credit_deposit": "record_customer_credit_deposit_idempotent",
+    "create_customer_with_credit_deposit": "create_customer_with_credit_deposit_idempotent",
+    "correct_customer_transaction_amount": "correct_customer_transaction_amount_idempotent",
+    "undo_customer_transaction_confirmed": "undo_customer_transaction_confirmed_idempotent",
+    "record_debt_addition_batch": "record_debt_addition_batch_idempotent",
+    "record_debt_payment_batch_with_history": "record_debt_payment_batch_idempotent",
+}
+
+def _financial_request_id(operation, explicit_id=None):
+    if explicit_id:
+        return str(explicit_id)[:240]
+    context = _FINANCIAL_REQUEST_CONTEXT.get() or {}
+    event_id = str(context.get("event_id") or "")
+    if not event_id:
+        # Non-webhook callers should pass an explicit durable ID whenever they
+        # can retry. A random fallback avoids accidental collisions but cannot
+        # make an ID-less external delivery retry-safe.
+        return f"adhoc:{operation}:{secrets.token_urlsafe(18)}"
+    counts = context.setdefault("counts", {})
+    index = counts.get(operation, 0) + 1
+    counts[operation] = index
+    digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()
+    return f"wa:{digest}:{operation}:{index}"
+
+def _financial_rpc(function_name, params, request_id=None):
+    """Call an idempotent SQL wrapper for every financial write."""
+    wrapper = _FINANCIAL_RPC_MAP.get(function_name)
+    if not wrapper:
+        raise ValueError(f"No idempotent SQL wrapper configured for {function_name}")
+    payload = dict(params or {})
+    explicit_id = request_id or payload.pop("__request_id", None)
+    payload["p_request_id"] = _financial_request_id(function_name, explicit_id)
+    return supabase.rpc(wrapper, payload)
+
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
@@ -1481,7 +1641,26 @@ def _process_pending_payment_confirmation(pending_id, actor_phone, admin=False):
     if not admin and str(pending.get("sender_phone")) != str(actor_phone):
         return False, "Lacag-bixintan adiga kuma xirna."
     current_status = str(pending.get("status") or "")
-    if current_status != "pending" and not (admin and current_status == "rejected"):
+    reclaim_processing = False
+    if current_status == "processing":
+        processing_raw = pending.get("processing_started_at")
+        processing_started = None
+        if processing_raw:
+            try:
+                processing_started = datetime.fromisoformat(str(processing_raw).replace("Z", "+00:00"))
+                if processing_started.tzinfo is None:
+                    processing_started = processing_started.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                processing_started = None
+        if processing_started is None:
+            return False, (
+                "⚠️ Lacag-bixintan waxay ku hartay xaalad farsamayn oo aan lahayn waqti la xaqiijiyey. "
+                "Ha ku celin. Maamulka ha hubiyo diiwaanka Supabase."
+            )
+        if datetime.now(timezone.utc) - processing_started <= timedelta(minutes=5):
+            return False, "Lacag-bixintan weli waa la farsamaynayaa. Sug dhowr daqiiqo."
+        reclaim_processing = True
+    elif current_status != "pending" and not (admin and current_status == "rejected"):
         return False, f"Xaaladda lacag-bixintan waa {current_status}; mar kale lama diiwaangelin karo."
     if admin and current_status == "rejected":
         newer_active = (
@@ -1503,16 +1682,22 @@ def _process_pending_payment_confirmation(pending_id, actor_phone, admin=False):
         supabase.table("pending_payment_confirmations").update({"status": "expired"}).eq("id", str(pending_id)).eq("status", "pending").execute()
         return False, "Waqtigii xaqiijinta wuu dhammaaday. Lacag lama kaydin. Fadlan macaamilka mar kale dir."
 
-    # Conditional update is the one-time claim. A second HAA cannot claim it.
+    # Conditional one-time claim. An expired processing lease can be reclaimed;
+    # the SQL request ID below makes replay safe if the payment already committed.
     try:
-        claimed = (
+        claim_query = (
             supabase.table("pending_payment_confirmations")
-            .update({"status": "processing", "actor_phone": str(actor_phone)})
+            .update({
+                "status": "processing",
+                "actor_phone": str(actor_phone),
+                "processing_started_at": datetime.now(timezone.utc).isoformat(),
+            })
             .eq("id", str(pending_id))
             .eq("status", current_status)
-            .select("id")
-            .execute()
         )
+        if reclaim_processing:
+            claim_query = claim_query.eq("processing_started_at", str(pending.get("processing_started_at")))
+        claimed = claim_query.select("id").execute()
     except Exception as claim_error:
         print(f"⚠️ Could not claim pending payment {pending_id}: {claim_error}")
         return False, "Lacag-bixinta lama qaban karin si ammaan ah. Waxba lama diiwaangelin; maamulka ha hubiyo."
@@ -1542,12 +1727,12 @@ def _process_pending_payment_confirmation(pending_id, actor_phone, admin=False):
         if amount - balance > 0.009:
             raise ValueError(f"Lacagta ${amount:.2f} waxay ka badan tahay haraaga ${balance:.2f}.")
 
-        rpc_result = supabase.rpc("record_debt_payment_with_history", {
+        rpc_result = _financial_rpc("record_debt_payment_with_history", {
             "p_customer_id": str(debtor["id"]),
             "p_business_user_id": str(pending.get("business_user_id")),
             "p_amount": round(amount, 2),
             "p_description": str(pending.get("description") or "-").strip() or "-",
-        }).execute()
+        }, request_id=f"pending-payment:{pending_id}").execute()
         rpc_data = rpc_result.data
         if isinstance(rpc_data, list):
             rpc_data = rpc_data[0] if rpc_data else None
@@ -3353,9 +3538,14 @@ def start_customer_match_session(sender_phone, business_user_id, entry,
         )
     else:
         prompt = "⚠️ *Waxaan helay macaamiil magacyadoodu isku dhow yihiin.*\n\n"
-        for index, customer_name in enumerate(names[:10], start=1):
-            prompt += f"{index}️⃣ {customer_name}\n"
-        prompt += "\nDooro lambarka macmiilka saxda ah."
+        # Show useful context so the shopkeeper can distinguish same-name people
+        # and multiple outstanding debt records before choosing.
+        shown = (matches or [])[:10]
+        for index, debtor in enumerate(shown, start=1):
+            due = debtor.get("promised_date") or "ballan lama gelin"
+            amount = _safe_money(debtor.get("amount"))
+            prompt += f"{index}️⃣ {debtor.get('name') or 'Macmiil'} — ${amount:.2f} — {due}\n"
+        prompt += "\nDooro lambarka diiwaanka/macmiilka saxda ah."
         if allow_new:
             prompt += "\nHaddii uusan ku jirin, qor *CUSUB*."
         else:
@@ -3912,6 +4102,7 @@ def _commit_import(admin_phone, session):
     entries = list(session.get("entries") or [])
     business_user_id = session["business_user_id"]
     import_mode = session.get("mode", "debt")
+    session.setdefault("request_id", secrets.token_urlsafe(24))
 
     if not entries:
         raise ValueError("Liiska import-ku waa madhan yahay.")
@@ -3948,7 +4139,7 @@ def _commit_import(admin_phone, session):
             prepared.append((item, debtor))
 
         # One database function call commits the entire reviewed batch atomically.
-        # Apply deynjir_payment_batch_migration.sql before deploying this code.
+        # Apply the matching Deynjir idempotency migration before deploying this code.
         payment_payload = [
             {
                 "customer_id": str(debtor["id"]),
@@ -3960,12 +4151,12 @@ def _commit_import(admin_phone, session):
         if len(payment_payload) == 1:
             # Preserve compatibility for one-row imports; the batch RPC requires 2+.
             item, debtor = prepared[0]
-            rpc_result = supabase.rpc("record_debt_payment_with_history", {
+            rpc_result = _financial_rpc("record_debt_payment_with_history", {
                 "p_customer_id": str(debtor["id"]),
                 "p_business_user_id": str(business_user_id),
                 "p_amount": round(float(item["amount"]), 2),
                 "p_description": str(item.get("description") or "-").strip() or "-",
-            }).execute()
+            }, request_id=f"import:{session['request_id']}:payment:0").execute()
             rpc_data = rpc_result.data
             if isinstance(rpc_data, list):
                 rpc_data = rpc_data[0] if rpc_data else None
@@ -3973,10 +4164,10 @@ def _commit_import(admin_phone, session):
                 raise RuntimeError("record_debt_payment ma xaqiijin lacag-bixinta. Hubi Supabase.")
             saved = 1
         else:
-            batch_result = supabase.rpc("record_debt_payment_batch_with_history", {
+            batch_result = _financial_rpc("record_debt_payment_batch_with_history", {
                 "p_business_user_id": str(business_user_id),
                 "p_payments": payment_payload,
-            }).execute()
+            }, request_id=f"import:{session['request_id']}:payment:batch").execute()
             batch_data = batch_result.data
             if isinstance(batch_data, list):
                 batch_data = batch_data[0] if batch_data else None
@@ -4069,7 +4260,7 @@ def _commit_import(admin_phone, session):
     # atomically. One-row imports keep using the established single-row RPC.
     if len(prepared_debts) == 1:
         item = prepared_debts[0]
-        result = supabase.rpc("record_debt_addition", {
+        result = _financial_rpc("record_debt_addition", {
             "p_customer_id": None,
             "p_business_user_id": str(business_user_id),
             "p_name": str(item["name"]),
@@ -4078,7 +4269,7 @@ def _commit_import(admin_phone, session):
             "p_promised_date": item.get("promised_date"),
             "p_phone_number": item.get("phone_number"),
             "p_created_at": None,
-        }).execute()
+        }, request_id=f"import:{session['request_id']}:debt:0").execute()
         if not result.data:
             raise RuntimeError(f"Deynta {item['name']} lama xaqiijin in la kaydiyey.")
         added = 1
@@ -4093,10 +4284,10 @@ def _commit_import(admin_phone, session):
             }
             for item in prepared_debts
         ]
-        batch_result = supabase.rpc("record_debt_addition_batch", {
+        batch_result = _financial_rpc("record_debt_addition_batch", {
             "p_business_user_id": str(business_user_id),
             "p_debts": debt_payload,
-        }).execute()
+        }, request_id=f"import:{session['request_id']}:debt:batch").execute()
         batch_data = batch_result.data
         if isinstance(batch_data, list):
             batch_data = batch_data[0] if batch_data else None
@@ -4164,55 +4355,25 @@ def _commit_import(admin_phone, session):
 
 
 def is_duplicate_webhook(event_id):
-    """Record an event ID once; return True only for a confirmed duplicate.
-
-    A unique constraint on processed_webhook_events.event_id is required.
-    Database/network errors raise HTTP 503 so Green-API can retry instead of
-    silently dropping a legitimate financial command.
-    """
+    """Claim a webhook event; stale/failed deliveries can be retried safely."""
     if not event_id:
-        # No stable event ID means this delivery cannot safely be deduplicated.
         return False
-
     try:
-        (
-            supabase.table("processed_webhook_events")
-            .insert({"event_id": str(event_id)})
-            .execute()
-        )
-        return False
-    except Exception as dedup_error:
-        # PostgREST/Supabase reports PostgreSQL unique violations as 23505.
-        error_code = getattr(dedup_error, "code", None)
-        if error_code == "23505" or "23505" in str(dedup_error):
-            return True
-
-        print(
-            "⚠️ Webhook deduplication unavailable: "
-            f"{type(dedup_error).__name__}: {dedup_error}"
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="Webhook deduplication is temporarily unavailable; retry delivery.",
-        ) from dedup_error
+        result = supabase.rpc("claim_webhook_event", {"p_event_id": str(event_id)}).execute()
+        value = result.data
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if isinstance(value, dict):
+            return value.get("claimed") is not True
+        return value is not True
+    except Exception as exc:
+        print(f"⚠️ Webhook claim unavailable: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=503, detail="Webhook processing state unavailable; retry delivery.") from exc
 
 
-@app.post("/webhook")
-async def whatsapp_webhook(request: Request):
+async def _whatsapp_webhook_process(request: Request):
     data = await request.json()
     print(f"📥 Green-API webhook received: type={data.get('typeWebhook')}")
-
-    # Ignore a repeated Green-API webhook delivery before it can create a
-    # duplicate action or duplicate WhatsApp reply.
-    message_data_for_id = data.get("messageData") or {}
-    webhook_event_id = (
-        data.get("id")
-        or data.get("eventId")
-        or message_data_for_id.get("idMessage")
-        or message_data_for_id.get("id")
-    )
-    if is_duplicate_webhook(webhook_event_id):
-        return {"status": "duplicate_webhook_ignored"}
 
     type_webhook = data.get("typeWebhook")
 
@@ -4330,6 +4491,7 @@ async def whatsapp_webhook(request: Request):
                     "promised_date": row[due_col] if due_col else None,
                     "phone_number": row[phone_col] if phone_col else None})
             entries = _validate_import_entries(raw)
+            IMPORT_SESSIONS[sender_phone]["request_id"] = secrets.token_urlsafe(24)
             IMPORT_SESSIONS[sender_phone]["entries"] = entries
             IMPORT_SESSIONS[sender_phone].pop("duplicate_choice", None)
             IMPORT_SESSIONS[sender_phone].pop("duplicate_groups", None)
@@ -4363,6 +4525,7 @@ async def whatsapp_webhook(request: Request):
             mime = image_data.get("mimeType") or "image/jpeg"
             import_mode = IMPORT_SESSIONS[sender_phone].get("mode", "debt")
             entries = _extract_import_image(image_response.content, mime, import_mode)
+            IMPORT_SESSIONS[sender_phone]["request_id"] = secrets.token_urlsafe(24)
             IMPORT_SESSIONS[sender_phone]["entries"] = entries
             IMPORT_SESSIONS[sender_phone].pop("duplicate_choice", None)
             IMPORT_SESSIONS[sender_phone].pop("duplicate_groups", None)
@@ -4514,11 +4677,13 @@ async def whatsapp_webhook(request: Request):
         if session_for_choice and session_for_choice.get("stage") == "duplicate_choice":
             if re.fullmatch(r"\s*2\s*", import_text):
                 _apply_import_duplicate_choice(session_for_choice, "2")
+                session_for_choice["request_id"] = secrets.token_urlsafe(24)
                 session_for_choice["stage"] = "ready"
                 send_whatsapp(sender_phone, "✅ Labada deymood waa la kala gelinayaa. soo qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
                 return {"status": "import_duplicates_confirmed_separate"}
             if re.fullmatch(r"\s*1\s*", import_text):
                 _apply_import_duplicate_choice(session_for_choice, "1")
+                session_for_choice["request_id"] = secrets.token_urlsafe(24)
                 session_for_choice["stage"] = "ready"
                 send_whatsapp(sender_phone, "✅ Hal deyn oo keliya ayaan kaydinayaa. soo qor *OK* si aan u kaydiyo ama *CANCEL* si loo joojiyo.")
                 return {"status": "import_duplicates_confirmed_single"}
@@ -4580,7 +4745,7 @@ async def whatsapp_webhook(request: Request):
                 IMPORT_SESSIONS[sender_phone] = {
                     "business_user_id": own_shop["id"], "shop_phone": sender_phone,
                     "shop_name": own_shop.get("name") or sender_phone,
-                    "entries": None, "mode": None,
+                    "entries": None, "mode": None, "request_id": secrets.token_urlsafe(24),
                     "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
                 }
                 send_whatsapp(sender_phone,
@@ -4615,7 +4780,7 @@ async def whatsapp_webhook(request: Request):
                     return {"status": "import_shop_not_approved"}
                 IMPORT_SESSIONS[sender_phone] = {"business_user_id": shop["id"], "shop_phone": target_phone,
                     "shop_name": shop.get("name") or target_phone, "entries": None, "mode": None,
-                    "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL}
+                    "request_id": secrets.token_urlsafe(24), "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL}
                 send_whatsapp(sender_phone, f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\n\nMaxaad rabtaa inaad soo geliso?\n*DEYN* — deymo cusub.\n*LACAG BIXIN* — lacagaha laga bixiyay deymaha jira.\n\nKadib ii soo dir qoraal, Excel/CSV ama sawir.\nHubi hordhaca, kadib qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
                 return {"status": "import_shop_selected"}
             except Exception as exc:
@@ -4835,11 +5000,11 @@ async def whatsapp_webhook(request: Request):
             if answer == "yes":
                 UNDO_CONFIRMATION_SESSIONS.pop(sender_phone, None)
                 try:
-                    undo_result = supabase.rpc("undo_customer_transaction_confirmed", {
+                    undo_result = _financial_rpc("undo_customer_transaction_confirmed", {
                         "p_customer_id": pending_undo["customer_id"],
                         "p_business_user_id": str(business_user_id),
                         "p_expected_transaction_id": pending_undo["transaction_id"],
-                    }).execute()
+                    }, request_id=pending_undo.get("request_id") or f"undo:{pending_undo['transaction_id']}").execute()
                     undo_data = undo_result.data
                     if isinstance(undo_data, list):
                         undo_data = undo_data[0] if undo_data else None
@@ -4952,6 +5117,7 @@ async def whatsapp_webhook(request: Request):
                         "transaction_id": str(preview["transaction_id"]),
                         "transaction_type": str(preview.get("transaction_type") or ""),
                         "amount": float(preview.get("amount") or 0),
+                        "request_id": f"undo:{secrets.token_urlsafe(18)}",
                         "expires_at": datetime.now(timezone.utc) + UNDO_CONFIRMATION_TTL,
                     }
                     send_whatsapp(sender_phone,
@@ -5096,6 +5262,7 @@ async def whatsapp_webhook(request: Request):
                     "transaction_id": str(preview["transaction_id"]),
                     "transaction_type": str(preview.get("transaction_type") or ""),
                     "amount": float(preview.get("amount") or 0),
+                    "request_id": f"undo:{secrets.token_urlsafe(18)}",
                     "expires_at": datetime.now(timezone.utc) + UNDO_CONFIRMATION_TTL,
                 }
                 send_whatsapp(sender_phone,
@@ -5180,7 +5347,7 @@ async def whatsapp_webhook(request: Request):
                 deposit_amount = float(amount_text.replace(",", "."))
                 if not math.isfinite(deposit_amount) or deposit_amount <= 0:
                     raise ValueError("Lacagtu waa inay ka weyn tahay eber.")
-                deposit_result = supabase.rpc("record_customer_credit_deposit", {
+                deposit_result = _financial_rpc("record_customer_credit_deposit", {
                     "p_customer_id": str(customer_row["id"]),
                     "p_business_user_id": str(business_user_id),
                     "p_amount": round(deposit_amount, 2),
@@ -5591,19 +5758,19 @@ async def whatsapp_webhook(request: Request):
                     if not math.isfinite(amount) or amount <= 0:
                         raise ValueError("Deposit amount must be positive")
                     if deposit_offer.get("create_customer"):
-                        result = supabase.rpc("create_customer_with_credit_deposit", {
+                        result = _financial_rpc("create_customer_with_credit_deposit", {
                             "p_business_user_id": str(business_user_id),
                             "p_name": str(deposit_offer.get("customer_name") or "").strip(),
                             "p_amount": round(amount, 2),
                             "p_description": "DHIGAAL",
-                        }).execute()
+                        }, request_id=deposit_offer.get("request_id")).execute()
                     else:
-                        result = supabase.rpc("record_customer_credit_deposit", {
+                        result = _financial_rpc("record_customer_credit_deposit", {
                             "p_customer_id": str(deposit_offer.get("customer_id")),
                             "p_business_user_id": str(business_user_id),
                             "p_amount": round(amount, 2),
                             "p_description": "DHIGAAL",
-                        }).execute()
+                        }, request_id=deposit_offer.get("request_id")).execute()
                     data = result.data
                     if isinstance(data, list):
                         data = data[0] if data else None
@@ -5648,12 +5815,12 @@ async def whatsapp_webhook(request: Request):
             if answer in {"haa", "h", "yes", "y", "ok", "1"}:
                 CORRECTION_SESSIONS.pop(sender_phone, None)
                 try:
-                    result = supabase.rpc("correct_customer_transaction_amount", {
+                    result = _financial_rpc("correct_customer_transaction_amount", {
                         "p_customer_id": str(correction["customer_id"]),
                         "p_business_user_id": str(business_user_id),
                         "p_expected_transaction_id": str(correction["transaction_id"]),
                         "p_new_amount": round(float(correction["new_amount"]), 2),
-                    }).execute()
+                    }, request_id=correction.get("request_id") or f"correction:{correction['transaction_id']}").execute()
                     data = result.data
                     if isinstance(data, list):
                         data = data[0] if data else None
@@ -5709,6 +5876,7 @@ async def whatsapp_webhook(request: Request):
                             "transaction_id": str(preview["transaction_id"]),
                             "old_amount": old_amount,
                             "new_amount": round(new_amount, 2),
+                            "request_id": f"correction:{secrets.token_urlsafe(18)}",
                             "expires_at": datetime.now(timezone.utc) + CORRECTION_SESSION_TTL,
                         }
                         send_whatsapp(sender_phone,
@@ -7100,6 +7268,7 @@ async def whatsapp_webhook(request: Request):
                 "shop_name": str((business_user or {}).get("name") or sender_phone),
                 "entries": validated_batch,
                 "mode": batch_mode,
+                "request_id": secrets.token_urlsafe(24),
                 "stage": "ready",
                 "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
             }
@@ -7834,7 +8003,7 @@ async def whatsapp_webhook(request: Request):
                                 parsed_transaction_date, datetime.min.time(), tzinfo=EAT
                             ).isoformat()
 
-                        updated_result = supabase.rpc("record_debt_addition", {
+                        updated_result = _financial_rpc("record_debt_addition", {
                             "p_customer_id": str(existing["id"]),
                             "p_business_user_id": str(business_user_id),
                             "p_name": str(existing.get("name") or name),
@@ -7890,7 +8059,7 @@ async def whatsapp_webhook(request: Request):
                         parsed_transaction_date, datetime.min.time(), tzinfo=EAT
                     ).isoformat()
 
-                result = supabase.rpc("record_debt_addition", {
+                result = _financial_rpc("record_debt_addition", {
                     "p_customer_id": None,
                     "p_business_user_id": str(business_user_id),
                     "p_name": str(name),
@@ -7950,6 +8119,7 @@ async def whatsapp_webhook(request: Request):
                         "business_user_id": str(business_user_id), "customer_name": str(name).strip(),
                         "customer_id": None, "create_customer": True,
                         "amount": round(proposed_deposit, 2),
+                        "request_id": f"deposit-offer:{secrets.token_urlsafe(18)}",
                         "expires_at": datetime.now(timezone.utc) + DEPOSIT_OFFER_TTL,
                     }
                     send_whatsapp(sender_phone,
@@ -8008,6 +8178,7 @@ async def whatsapp_webhook(request: Request):
                         "customer_name": str(debtor.get("name") or name).strip(),
                         "customer_id": str(debtor.get("id")), "create_customer": False,
                         "amount": round(proposed_deposit, 2),
+                        "request_id": f"deposit-offer:{secrets.token_urlsafe(18)}",
                         "expires_at": datetime.now(timezone.utc) + DEPOSIT_OFFER_TTL,
                     }
                     send_whatsapp(sender_phone,
@@ -9013,6 +9184,50 @@ async def whatsapp_webhook(request: Request):
         print(f"❌ Transaction failures ({len(failed_inserts)}): {failed_inserts}")
     
     return {"status": "success"}
+
+
+@app.post("/webhook")
+async def whatsapp_webhook(request: Request):
+    """Claim webhook delivery, process it, then mark completion/failure."""
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid webhook JSON") from exc
+    message_data = payload.get("messageData") or {}
+    event_id = (payload.get("id") or payload.get("eventId")
+                or message_data.get("idMessage") or message_data.get("id"))
+    if payload.get("typeWebhook") in {"incomingMessageReceived", "outgoingMessageReceived"} and not event_id:
+        # Financial messages must have a stable provider event ID. Processing an
+        # ID-less delivery would make a retry indistinguishable from a new command.
+        raise HTTPException(status_code=503, detail="Missing stable Green-API message ID; retry delivery.")
+    if event_id and is_duplicate_webhook(event_id):
+        return {"status": "duplicate_webhook_ignored"}
+    sender_data = payload.get("senderData") or {}
+    sender_chat_id = str(sender_data.get("chatId") or "")
+    session_sender = sender_chat_id.split("@")[0] if sender_chat_id else ""
+    if session_sender:
+        _load_persisted_workflow_sessions(session_sender)
+    token = _FINANCIAL_REQUEST_CONTEXT.set({"event_id": str(event_id or secrets.token_urlsafe(24)), "counts": {}})
+    try:
+        result = await _whatsapp_webhook_process(request)
+        if event_id:
+            result_status = str((result or {}).get("status") or "") if isinstance(result, dict) else ""
+            if result_status.endswith(("_error", "_failed")) or result_status in {"error", "failed"}:
+                supabase.rpc("fail_webhook_event", {"p_event_id": str(event_id)}).execute()
+            else:
+                supabase.rpc("complete_webhook_event", {"p_event_id": str(event_id)}).execute()
+        return result
+    except Exception:
+        if event_id:
+            try:
+                supabase.rpc("fail_webhook_event", {"p_event_id": str(event_id)}).execute()
+            except Exception as mark_error:
+                print(f"⚠️ Could not mark webhook failed: {type(mark_error).__name__}")
+        raise
+    finally:
+        if session_sender:
+            _save_persisted_workflow_sessions(session_sender)
+        _FINANCIAL_REQUEST_CONTEXT.reset(token)
 
 
 def cron_authorized(request: Request):
