@@ -65,6 +65,9 @@ LAST_SELECTED_CUSTOMERS = {}
 LAST_APPOINTMENT_LIST_REQUESTS = {}
 # First-contact onboarding choices are temporary per-sender conversations.
 ONBOARDING_SESSIONS = {}
+# Admin-triggered, deterministic first-debt onboarding; independent of Gemini/chat AI.
+FIRST_DEBT_SESSIONS = {}
+FIRST_DEBT_SESSION_TTL = timedelta(minutes=30)
 # Short-lived conversational context for natural follow-ups (not financial state).
 CONVERSATION_SESSIONS = {}
 CONVERSATION_SESSION_TTL = timedelta(minutes=30)
@@ -122,6 +125,7 @@ WORKFLOW_SESSION_MAPS = (
     IMPORT_SESSIONS, PAYMENT_EXPORT_SESSIONS, REMINDER_SESSIONS,
     RENAME_SESSIONS, AMOUNT_EDIT_SESSIONS, GUIDED_SESSIONS,
     PAUSED_GUIDED_SESSIONS, CUSTOMER_MATCH_SESSIONS, DELETE_SESSIONS,
+    FIRST_DEBT_SESSIONS,
     UNDO_CONFIRMATION_SESSIONS, SEARCH_DETAIL_SESSIONS,
     DEPOSIT_OFFER_SESSIONS, CORRECTION_SESSIONS,
 )
@@ -132,6 +136,7 @@ PERSISTED_SESSION_MAPS = {
     "last_history": LAST_HISTORY_REQUESTS,
     "last_selected": LAST_SELECTED_CUSTOMERS,
     "onboarding": ONBOARDING_SESSIONS,
+    "first_debt": FIRST_DEBT_SESSIONS,
     "conversation": CONVERSATION_SESSIONS,
     "reminder": REMINDER_SESSIONS,
     "rename": RENAME_SESSIONS,
@@ -286,7 +291,7 @@ def deynjir_recovery_menu_message(intro=None):
 
 def deynjir_unrecognized_message():
     """One concise clarification; never display a menu or create hidden menu state."""
-    return "Ma fahmin fariintaas. Soo qor *MENU* si aan kuu tuso amarrada, ama ii sheeg waxa aad rabto inaad qabato."
+    return "Ma fahmin fariintaas. Ma ii caddayn kartaa waxa aad rabto?"
 
 
 def pause_guided_session_for_replacement(sender_phone):
@@ -841,51 +846,34 @@ Also support English:
 'Export' = EXPORT action
 """.replace("{APP_NAME}", APP_NAME)
 
-DEYNJIR_ASSISTANT_PROMPT = """You are Deynjir's CONVERSATIONAL GUIDE for a shopkeeper. Your primary job in conversational turns is to teach the user the simplest correct command to use, not to guess what database operation they intended.
-You speak to the BUSINESS OWNER, not to a customer. Deynjir supports debt entry, payments, debt lists, customer search and statements, promised payment dates, reminders, imports, reports and exports.
+DEYNJIR_ASSISTANT_PROMPT = """You are Deynjir, a concise, friendly Somali-speaking assistant for a shopkeeper's business.
+You are speaking to the BUSINESS OWNER, not to a customer. Deynjir helps the shopkeeper record customer debts, record money customers pay back, view unpaid customer debts, search customer balances and payment history, manage promised payment dates, reminders, and import customer debt/payment lists from Excel or images.
 
 BUSINESS PERSPECTIVE:
 - The shopkeeper is the creditor. Customers may owe money to the shop.
-- ADD means a customer takes goods/money on credit; PAY means the customer pays money back to the shop.
-- Never reverse this perspective or claim the shopkeeper owes customers money.
+- ADD means a customer takes goods/money on credit; the shop's receivable increases.
+- PAY means the customer pays money back to the shop; the receivable decreases.
+- "Deymaha maqan" means outstanding customer debts owed to the shop.
+- In this Deynjir business context, "Yaan weli deyn ku leeyahay?" is a request to view outstanding customer debts.
+- Never say that the shopkeeper owes customers money unless the user explicitly describes that separate situation.
 
-GUIDE-FIRST BEHAVIOUR:
-- When the user asks how to do something, is unsure, or sends an incomplete/ambiguous request, give the exact supported command and one short example.
-- Prefer a practical instruction such as "Si aad u hesho macluumaadka Cabdi Cumar, soo qor: *Raadi Cabdi Cumar*." Do not answer with a vague "maxaan kuu qabtaa?" when the topic is identifiable.
-- If the user writes only a feature/topic plus a customer name (for example "balanta Cabdi Cumar"), explain the next command to use; do not claim you looked up live data and do not change anything.
-- Keep the user's known customer name and the topic in the suggested command. Never ask them to repeat information already present in the conversation.
-- If the request is still ambiguous after giving the relevant command, ask only one short question.
-
-SUPPORTED COMMAND GUIDES (use only the relevant one):
-- Add a debt: *ADD Magaca $Lacag* (example: *ADD Cali $20*).
-- Record a payment: *Lacag bixin Magaca $Lacag* (example: *Lacag bixin Cali $10*).
-- View all debts: *LIISKA DAYNTA*.
-- Find a customer: *Raadi Magaca* (example: *Raadi Cabdi Cumar*).
-- View a full customer statement: *FAAHFAAHIN Magaca*.
-- View appointments: *Balamaha Maanta* or *Balamaha Berri*.
-- Change a due date: *Ka dhig ballanta Magaca 13/11/2026*.
-- Import a list: *IMPORT*, then choose *DEYN* or *LACAG BIXIN* and send the text, Excel/CSV or image. The user reviews it and confirms with *OK*; never say it was imported before confirmation succeeds.
-- Help/menu: *MENU*.
-- For payment reports, guide the user to *LIISKA LACAG BIXINTA* and ask for the date range if needed. Do not invent an export format or claim a file was created.
-- Correct a customer name: *SAX Magaca Hore -> Magaca Cusub*.
-- Start deleting a customer: *DELETE Magaca*; the application asks for confirmation.
-- Undo a recent transaction: *UNDO Magaca*; the application asks for confirmation.
-- Start customer reminders: *XUSUUSIN*; the application displays a list to select from.
-
-DUE-DATE GUIDANCE:
-- Never invent a customer, date, or existing appointment. Only repeat a date that the user or application has actually supplied.
-- If a date and customer are known but the user's intention to change the date is not explicit, guide them with a confirmation proposal: "Haddii aad rabto inaan taariikhda ballanta [magaca] u beddelo [taariikhda], soo qor *HAA*. Haddii aad rabto taariikh kale, si toos ah u soo qor taariikhda cusub." The Python application must stage and validate this proposal; this conversational reply itself never updates the database.
-- If the user supplies another date in response to that proposal, treat it as a replacement proposal and ask for *HAA* again. *MAYA/JOOJI* cancels it. Only the active Python confirmation session may authorize the update.
-- If the user asks only how to change a date, show the command format and one example instead of asking them to confirm a date that was never supplied.
-
-SAFETY AND CONTINUITY:
-- The transaction parser and Python handlers decide actions. You never create, edit, delete, pay, send reminders, or import records.
-- Never treat "HAA", "MAYA", "OK", or a conversational follow-up as financial authorization unless a matching active Python workflow is waiting for that exact confirmation.
-- If the user says "haye", "ok", "mahadsanid" or another acknowledgement, acknowledge briefly and wait; do not start another workflow.
-- If the user reports no activity, acknowledge it; do not ask for an amount or treat it as a customer name.
-- Never invent balances, counts, payment records, dates, customer matches, or system capabilities. For live data, say which command retrieves it; let the database handler return the facts.
-- Reply in natural, simple Somali unless the user writes in another language. Be warm, concise and practical. Usually 1-2 sentences, under 220 characters.
-- Do not give the full numbered menu unless the user asks for MENU/help. Do not output JSON, action labels, headings, or implementation details.
+HOW TO RESPOND:
+- Reply in natural, correct, simple Somali unless the user writes in another language.
+- Be warm, respectful, short, and practical. Do not give a numbered command menu unless the user explicitly asks for the menu.
+- Keep EVERY reply extremely short: one or two sentences, ideally 10-20 words total, and never more than 220 characters.
+- Answer only what the user asked. Do not repeat the user's question, introduce yourself again, list features, or add examples unless needed.
+- If a user is new, give just one simple next step and at most one short example.
+- If confused or frustrated, acknowledge briefly and give one helpful next step. No menus.
+- If the user says "haye", "ok", "okay", "waa hagaag", "mahadsanid", or another acknowledgement, reply naturally and briefly. Do not start a new debt/payment workflow unless the user clearly asks.
+- After a debt or payment is successfully recorded, do not assume the user wants to record another one. A simple acknowledgement means acknowledge and wait.
+- When describing money owed to the shop, use natural wording such as "lacagta lagu leeyahay" or "deynta lagu leeyahay"; avoid reversing the shopkeeper/customer perspective.
+- If the user's intent is unclear, ask one short question. Do not invent a transaction or turn an acknowledgement into ADD/PAY.
+- If the user reports no activity in natural or misspelled wording, acknowledge briefly; do not ask for an amount, treat the statement as a customer name, open another workflow, or claim database facts.
+- If the user corrects that a reply was not a name, ask for the actual customer name only when a name is currently required.
+- Do not claim that a debt/payment was saved. Python handles all financial writes and confirmations.
+- Do not invent balances, customer names, counts, payment records, due dates, or capabilities.
+- For live business data, answer only after the application has routed the request to its database handler. Otherwise ask one short clarification.
+- Never output JSON, action labels, headings, feature lists, or internal implementation details.
 """
 
 
@@ -1428,6 +1416,7 @@ def _pending_workflow_snapshot(sender_phone):
     snapshot = []
     session_maps = (
         ("guided", GUIDED_SESSIONS), ("paused_guided", PAUSED_GUIDED_SESSIONS), ("customer_match", CUSTOMER_MATCH_SESSIONS),
+        ("first_debt", FIRST_DEBT_SESSIONS),
         ("delete", DELETE_SESSIONS), ("undo", UNDO_CONFIRMATION_SESSIONS),
         ("amount_edit", AMOUNT_EDIT_SESSIONS), ("rename", RENAME_SESSIONS),
         ("import", IMPORT_SESSIONS), ("payment_export", PAYMENT_EXPORT_SESSIONS),
@@ -2294,111 +2283,6 @@ def is_explicit_due_date_change(message_text):
     ))
 
 
-def parse_guidance_date_reply(message_text):
-    """Parse an exact alternative date sent during a pending due-date proposal."""
-    raw = " ".join(str(message_text or "").strip().split()).strip(" .!?؟")
-    if not raw:
-        return None
-    formats = (
-        (r"\d{1,2}/\d{1,2}/\d{4}", "%d/%m/%Y"),
-        (r"\d{1,2}-\d{1,2}-\d{4}", "%d-%m-%Y"),
-        (r"\d{4}-\d{2}-\d{2}", "%Y-%m-%d"),
-    )
-    for pattern, date_format in formats:
-        if re.fullmatch(pattern, raw):
-            try:
-                return datetime.strptime(raw, date_format).date().isoformat()
-            except ValueError:
-                return None
-    return None
-
-
-def parse_appointment_customer_guidance(message_text):
-    """Return a customer name from an ambiguous 'balanta NAME' request.
-
-    This intentionally does not query or modify the database. It guides the
-    shopkeeper to the explicit customer-search command instead.
-    """
-    raw = " ".join(str(message_text or "").strip().split()).strip(" .!?؟")
-    match = re.fullmatch(r"(?:balanta|ballanta)\s+(.+)", raw, flags=re.I)
-    if not match:
-        return None
-    name = match.group(1).strip(" ,:;.-")
-    if not name or re.search(r"\d", name):
-        return None
-    if normalize_customer_name(name) in {
-        "maanta", "berri", "bari", "caawa", "today", "tomorrow", "shaqo"
-    }:
-        return None
-    if re.search(r"\b(?:ka\s+dhig|kadhig|beddel|badal|cusboonaysii|update|change|edit)\b", name, re.I):
-        return None
-    return name if len(name) <= 100 else None
-
-
-def is_how_to_usage_question(message_text):
-    """Identify questions asking how to use a Deynjir feature, not execute it."""
-    text = normalize_customer_name(str(message_text or "")).strip()
-    if not text:
-        return False
-    has_how_to = bool(re.search(
-        r"^(?:sidee|sida|how\s+do\s+i|how\s+to|show\s+me\s+how)\b|"
-        r"\b(?:sidee\s+baan|sideen|sida\s+loo|ma\s+i\s+tusi\s+kartaa)\b",
-        text, re.I,
-    ))
-    feature = bool(re.search(
-        r"\b(?:deyn|dayn|lacag|bixin|ballan\w*|balan\w*|taariikh\w*|macmiil|xisaab|"
-        r"raadi|liis|import|excel|sawir|xusuusin|remind|warbixin|report|"
-        r"tirtir|delete|undo|magac|beddel|badal|edit|export|isticmaal\w*|"
-        r"shaqeey\w*|deynjir|nidaam|system|barnaamij)\b",
-        text, re.I,
-    ))
-    return has_how_to and feature
-
-
-def build_command_guide_fallback(message_text):
-    """Return a short, deterministic command example for a how-to question."""
-    text = normalize_customer_name(str(message_text or ""))
-    if re.search(r"\b(?:ballan\w*|balan\w*|taariikh\w*)\b", text, re.I):
-        if re.search(r"\b(?:ka\s+dhig|kadhig|beddel\w*|bedel\w*|badal\w*|cusboonaysii|update|change|edit)\b", text, re.I):
-            name = None
-            name_match = re.search(r"\b(?:ballanta|balanta)\s+(.+?)(?:\s+(?:ka\s+dhig|kadhig|beddel\w*|bedel\w*|badal\w*|cusboonaysii|update|change|edit))?\s*[.!؟?]*$", str(message_text or ""), re.I)
-            if name_match:
-                candidate = name_match.group(1).strip(" ,:;.-")
-                if candidate and not re.search(r"\d", candidate):
-                    name = candidate
-            command = f"Ka dhig ballanta {name} [DD/MM/YYYY]" if name else "Ka dhig ballanta [Magaca] [DD/MM/YYYY]"
-            example = f"Tusaale: *Ka dhig ballanta {name} 13/11/2026*." if name else "Tusaale: *Ka dhig ballanta Cabdi 13/11/2026*."
-            return f"Si aad u beddesho taariikhda ballanta, qor: *{command}*. {example}"
-        name = parse_appointment_customer_guidance(message_text)
-        if not name:
-            lookup_match = re.search(r"\b(?:ballanta|balanta)\s+(.+?)[.!؟?]*$", str(message_text or ""), re.I)
-            if lookup_match:
-                candidate = lookup_match.group(1).strip(" ,:;.-")
-                if candidate and not re.search(r"\d", candidate):
-                    name = candidate
-        command = f"Raadi {name}" if name else "Raadi [Magaca]"
-        return f"Si aad u hesho macluumaadka ballanta, soo qor: *{command}*."
-    if re.search(r"\b(?:import|excel|sawir|soo\s+geli)\b", text, re.I):
-        return "Si aad liis u soo geliso, qor *IMPORT*, dooro *DEYN* ama *LACAG BIXIN*, kadib soo dir liiska."
-    if re.search(r"\b(?:xusuusin|xasuusin|remind)\b", text, re.I):
-        return "Si aad u bilowdo xusuusinta, qor *XUSUUSIN*; kadib dooro macaamiisha aad rabto."
-    if re.search(r"\b(?:lacag\s*bixin|bixinta|bixiyo|bixisay|payment)\b", text, re.I):
-        return "Si aad lacag-bixin u diiwaangeliso, qor *Lacag bixin Magaca $Lacag*. Tusaale: *Lacag bixin Cali $10*."
-    if re.search(r"\b(?:faahfaahin|xisaab|history|statement)\b", text, re.I):
-        return "Si aad u aragto xisaabta macmiilka, qor *FAAHFAAHIN Magaca*. Tusaale: *FAAHFAAHIN Cali Xasan*."
-    if re.search(r"\b(?:raadi|macmiil|customer)\b", text, re.I):
-        return "Si aad macmiil u hesho, qor *Raadi Magaca*. Tusaale: *Raadi Cabdi Cumar*."
-    if re.search(r"\b(?:liis|deymaha|daymaha)\b", text, re.I):
-        return "Si aad u aragto dhammaan deymaha, qor *LIISKA DAYNTA*."
-    if re.search(r"\b(?:deyn|dayn)\b", text, re.I):
-        return "Si aad deyn cusub u diiwaangeliso, qor *ADD Magaca $Lacag*. Tusaale: *ADD Cali $20*."
-    if re.search(r"\b(?:tirtir|delete)\b", text, re.I):
-        return "Si aad u bilowdo tirtirid, qor *DELETE Magaca*. Deynjir wuxuu ku weydiin doonaa xaqiijin."
-    if re.search(r"\b(?:undo|ka\s+noqo)\b", text, re.I):
-        return "Si aad uga noqoto macaamilkii ugu dambeeyay, qor *UNDO Magaca*; xaqiiji marka lagu weydiiyo."
-    return "Soo qor *MENU* si aad u aragto amarrada Deynjir, ama ii sheeg adeegga aad rabto inaan kuu sharaxo."
-
-
 def remember_recent_transaction(sender_phone, business_user_id, customer_id, customer_name):
     """Remember a real committed transaction for a brief disagreement follow-up."""
     if not customer_id:
@@ -2888,6 +2772,36 @@ def _parse_somali_date(value):
             return datetime.strptime(raw, fmt).date()
         except ValueError:
             pass
+    return None
+
+
+def parse_first_debt_due_date(value):
+    """Parse a first-debt onboarding due date without AI. Return date, 'none', or None."""
+    original = str(value or "").strip().strip(" .!?؟")
+    if not original:
+        return None
+    # Parse numeric dates before text normalization, which removes separators.
+    explicit = _parse_somali_date(original)
+    if explicit:
+        return explicit
+    raw = normalize_customer_name(original).strip(" .!?؟")
+    if raw in {"ma hubo", "ma aqaan", "ma garanayo", "ballan ma leh", "balan ma leh",
+               "ballan ma jiro", "balan ma jiro", "lama sheegin", "ma jiro", "none", "no date"}:
+        return "none"
+    today = today_eat()
+    if raw in {"maanta", "today", "h maanta"}:
+        return today
+    if raw in {"berri", "bari", "tomorrow", "maalinta berri"}:
+        return today + timedelta(days=1)
+    weekday_map = {
+        "isniin": 0, "isniinta": 0, "talaado": 1, "talaadada": 1,
+        "arbaco": 2, "arbacada": 2, "khamiis": 3, "khamiista": 3,
+        "jimco": 4, "jimcaha": 4, "sabti": 5, "sabtida": 5,
+        "axad": 6, "axadda": 6,
+    }
+    for label, weekday in weekday_map.items():
+        if re.fullmatch(r"(?:maalinta\s+)?" + re.escape(label), raw):
+            return today + timedelta(days=(weekday - today.weekday()) % 7)
     return None
 
 
@@ -5237,6 +5151,49 @@ async def _whatsapp_webhook_process(request: Request):
     parts = message_text.strip().split(maxsplit=1)
     command = parts[0].upper() if parts else ""
 
+    welcome_match = re.fullmatch(r"\s*WELCOME\s+(\+?\d{8,15})\s*", str(message_text or ""), re.I)
+    if welcome_match:
+        if sender_phone != owner_phone:
+            send_whatsapp(sender_phone, "❌ Amarkan waxaa isticmaali kara maamulka oo keliya.")
+            return {"status": "welcome_command_forbidden"}
+        target_phone = welcome_match.group(1).replace("+", "").strip()
+        try:
+            target_result = (supabase.table("business_users")
+                .select("id, phone_number, name, approval_status")
+                .eq("phone_number", target_phone).limit(1).execute())
+            if not target_result.data:
+                send_whatsapp(sender_phone, "❌ Lambarkan dukaan kuma jiro systemka. Marka hore diiwaangeli oo ansixi.")
+                return {"status": "welcome_target_not_found"}
+            target_shop = target_result.data[0]
+            if str(target_shop.get("approval_status") or "").casefold() != "approved":
+                send_whatsapp(sender_phone, "❌ Dukaankan weli lama ansixin. Marka hore ku ansixi APPROVE 252... kadib dir WELCOME 252...")
+                return {"status": "welcome_target_not_approved"}
+            FIRST_DEBT_SESSIONS[target_phone] = {
+                "business_user_id": str(target_shop["id"]),
+                "stage": "entry",
+                "request_id": f"first-debt:{secrets.token_urlsafe(18)}",
+                "expires_at": datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL,
+            }
+            welcome_sent = send_whatsapp(
+                target_phone,
+                "Ku soo dhawoow Deynjir! 👋\n\n"
+                "Aan kuu diiwaangeliyo dayntaada koowaad.\n\n"
+                "Ii soo qor magaca qofka iyo lacagta aad ku leedahay.\n"
+                "Tusaale: *Cali $50*",
+                schedule_pending=False,
+            )
+            if not welcome_sent:
+                FIRST_DEBT_SESSIONS.pop(target_phone, None)
+                send_whatsapp(sender_phone, "❌ WhatsApp-ku ma xaqiijin dirista fariinta. Fadlan hubi Green-API iyo lambarka, kadib mar kale isku day.")
+                return {"status": "first_debt_welcome_send_failed"}
+            _save_persisted_workflow_sessions(target_phone)
+            send_whatsapp(sender_phone, f"✅ Fariinta soo-dhaweynta waxaa loo diray {target_phone}.")
+            return {"status": "first_debt_welcome_sent"}
+        except Exception as welcome_error:
+            print(f"❌ WELCOME command failed: {type(welcome_error).__name__}: {welcome_error}")
+            send_whatsapp(sender_phone, "❌ Fariinta lama diri karin. Hubi lambarka iyo isku-xirka WhatsApp-ka.")
+            return {"status": "first_debt_welcome_error"}
+
     if sender_phone == owner_phone and command in {"APPROVE", "REJECT"}:
         if len(parts) != 2:
             send_whatsapp(sender_phone, "Isticmaal mid ka mid ah amarradan:\n*APPROVE 252...* — oggolow codsiga.\n*REJECT 252...* — diid codsiga.")
@@ -5319,6 +5276,180 @@ async def _whatsapp_webhook_process(request: Request):
             return {"status": "unapproved_user_silenced"}
 
         business_user_id = business_user["id"]
+
+        # Admin-triggered first-debt onboarding. This flow is deterministic and
+        # deliberately runs before conversational AI, Gemini parsing, and the
+        # general guided transaction system.
+        first_debt = FIRST_DEBT_SESSIONS.get(sender_phone)
+        if first_debt and first_debt.get("business_user_id") == str(business_user_id):
+            expiry = first_debt.get("expires_at")
+            if not expiry or datetime.now(timezone.utc) > expiry:
+                FIRST_DEBT_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "Waqtigii bilowga daynta koowaad wuu dhammaaday. Haddii aad rabto inaad mar kale bilowdo, maamulka ha kuu soo diro WELCOME.")
+                return {"status": "first_debt_session_expired"}
+
+            first_text = str(message_text or "").strip()
+            first_norm = normalize_customer_name(first_text).strip(" .!?؟")
+            if first_norm in {"jooji", "cancel", "baaji", "dhamaad", "dhammaad", "done", "finish", "menu"}:
+                FIRST_DEBT_SESSIONS.pop(sender_phone, None)
+                if first_norm == "menu":
+                    send_whatsapp(sender_phone, deynjir_help_message())
+                else:
+                    send_whatsapp(sender_phone, "Waa hagaag. Habkii diiwaangelinta daynta koowaad waa la joojiyey. Wax kale lama kaydin. Markaad diyaar tahay, qor MENU ama la xiriir maamulka.")
+                return {"status": "first_debt_onboarding_closed"}
+
+            # Let explicit non-onboarding commands interrupt the flow safely.
+            if first_debt.get("stage") != "entry" and re.match(
+                r"^(?:liiska|liis|raadi|raadso|search|history|faahfaahin|import|lacag\s*bixin|xusuusin|report|export|delete|tirtir|undo|balamaha|ballamaha)\b",
+                first_norm, re.I,
+            ):
+                FIRST_DEBT_SESSIONS.pop(sender_phone, None)
+                first_debt = None
+            else:
+                stage = first_debt.get("stage")
+                if stage == "entry":
+                    parsed_first = local_fallback_parse(first_text) or []
+                    valid = (
+                        isinstance(parsed_first, list) and len(parsed_first) == 1
+                        and str(parsed_first[0].get("action") or "").upper() == "ADD"
+                        and parsed_first[0].get("customer_name")
+                        and parsed_first[0].get("amount") is not None
+                        and not parsed_first[0].get("customer_phone")
+                    )
+                    if not valid:
+                        send_whatsapp(sender_phone,
+                            "Fadlan ii soo qor magaca qofka iyo lacagta aad ku leedahay.\n"
+                            "Tusaale: *Cali $50*.\n\nQor *JOOJI* haddii aad rabto inaad ka baxdo.")
+                        return {"status": "first_debt_entry_invalid"}
+                    entry = parsed_first[0]
+                    amount_value = float(entry["amount"])
+                    customer_name = str(entry["customer_name"]).strip()
+                    if not customer_name or len(customer_name) > 100 or not math.isfinite(amount_value) or amount_value <= 0:
+                        send_whatsapp(sender_phone, "Magaca ama lacagtu sax ma aha. Tusaale ahaan qor: *Cali $50*.")
+                        return {"status": "first_debt_entry_invalid"}
+                    first_debt.update({"customer_name": customer_name, "amount": round(amount_value, 2), "stage": "due_date"})
+                    first_debt["expires_at"] = datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL
+                    send_whatsapp(sender_phone,
+                        f"Goorma ayuu *{customer_name}* ballan qaaday inuu lacagta bixiyo?\n\n"
+                        "Soo qor taariikhda, tusaale *13/11/2026* ama *berri*.\n"
+                        "Haddii uusan ballan lahayn, qor *MA HUBO*.")
+                    return {"status": "first_debt_due_date_requested"}
+
+                if stage == "due_date":
+                    parsed_due = parse_first_debt_due_date(first_text)
+                    if parsed_due is None:
+                        send_whatsapp(sender_phone,
+                            "Ma fahmin taariikhda. Fadlan soo qor sida *13/11/2026*, *berri*, *Jimcaha*, ama *MA HUBO* haddii uusan ballan lahayn.")
+                        return {"status": "first_debt_due_date_invalid"}
+                    first_debt["promised_date"] = None if parsed_due == "none" else parsed_due.isoformat()
+                    first_debt["stage"] = "confirm"
+                    first_debt["expires_at"] = datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL
+                    due_label = "Ballan lama sheegin" if not first_debt["promised_date"] else parsed_due.strftime("%d/%m/%Y")
+                    send_whatsapp(sender_phone,
+                        "Hubi xogta daynta:\n\n"
+                        f"• Qofka: *{first_debt['customer_name']}*\n"
+                        f"• Lacagta: *${first_debt['amount']:.2f}*\n"
+                        f"• Ballanta: *{due_label}*\n\n"
+                        "Ma diiwaangeliyaa? Soo qor *HAA* ama *MAYA*.\n"
+                        "Waxba lama kaydin ilaa aad HAA tiraahdo.")
+                    return {"status": "first_debt_confirmation_requested"}
+
+                if stage == "name_correction":
+                    if len(first_text) < 2 or len(first_text) > 100 or re.search(r"\d", first_text):
+                        send_whatsapp(sender_phone, "Fadlan soo qor magaca buuxa ee qofka, ama qor JOOJI.")
+                        return {"status": "first_debt_name_correction_invalid"}
+                    first_debt["customer_name"] = first_text
+                    first_debt["stage"] = "confirm"
+                    due = first_debt.get("promised_date")
+                    due_label = "Ballan lama sheegin" if not due else datetime.strptime(due, "%Y-%m-%d").strftime("%d/%m/%Y")
+                    send_whatsapp(sender_phone,
+                        "Hubi xogta daynta:\n\n"
+                        f"• Qofka: *{first_text}*\n"
+                        f"• Lacagta: *${float(first_debt['amount']):.2f}*\n"
+                        f"• Ballanta: *{due_label}*\n\n"
+                        "Ma diiwaangeliyaa? Soo qor *HAA* ama *MAYA*.")
+                    return {"status": "first_debt_name_corrected"}
+
+                if stage == "confirm":
+                    if first_norm in {"maya", "may", "no", "2"}:
+                        first_debt["stage"] = "due_date"
+                        send_whatsapp(sender_phone,
+                            "Waa hagaag. Soo qor taariikhda saxda ah, tusaale *13/11/2026* ama *berri*. "
+                            "Haddii uusan ballan lahayn, qor *MA HUBO*.")
+                        return {"status": "first_debt_due_date_correction_requested"}
+                    if first_norm not in {"haa", "h", "yes", "y", "ok", "sax", "1"}:
+                        send_whatsapp(sender_phone, "Fadlan ku jawaab *HAA* si loo diiwaangeliyo ama *MAYA* si aad taariikhda u saxdo. Qor *JOOJI* si aad uga baxdo.")
+                        return {"status": "first_debt_confirmation_invalid"}
+
+                    customer_name = str(first_debt.get("customer_name") or "").strip()
+                    amount_value = float(first_debt.get("amount") or 0)
+                    if not customer_name or not math.isfinite(amount_value) or amount_value <= 0:
+                        FIRST_DEBT_SESSIONS.pop(sender_phone, None)
+                        send_whatsapp(sender_phone, "Xogtii daynta ma dhammaystirnayn. Fadlan mar kale bilow.")
+                        return {"status": "first_debt_state_invalid"}
+
+                    try:
+                        matches = find_debtor_matches(business_user_id, customer_name)
+                        distinct_names = _unique_customer_names(matches)
+                        if len(distinct_names) > 1:
+                            first_debt["stage"] = "name_correction"
+                            send_whatsapp(sender_phone,
+                                f"Waxaan helay dhowr qof oo magacyadoodu u egyihiin *{customer_name}*. "
+                                "Fadlan soo qor magaca buuxa si aan qofka saxda ah u doorto. Waxba weli lama kaydin.")
+                            return {"status": "first_debt_name_disambiguation_requested"}
+                        active_matches = [row for row in matches if row.get("is_paid") is not True and float(row.get("amount") or 0) > 0]
+                        if len(active_matches) > 1:
+                            FIRST_DEBT_SESSIONS.pop(sender_phone, None)
+                            send_whatsapp(sender_phone,
+                                f"Waxaan helay dhowr deyn oo hore ugu qoran *{customer_name}*. Si aanan u khaldin xisaabta, habkan koowaad waa la joojiyey. "
+                                "Fadlan isticmaal habka caadiga ah ee ku darista deynta ama la xiriir maamulka.")
+                            return {"status": "first_debt_multiple_active_records"}
+                        matched_customer = active_matches[0] if active_matches else None
+                        write_result = _financial_rpc("record_debt_addition", {
+                            "p_customer_id": str(matched_customer["id"]) if matched_customer else None,
+                            "p_business_user_id": str(business_user_id),
+                            "p_name": str((matched_customer or {}).get("name") or customer_name),
+                            "p_amount": round(amount_value, 2),
+                            "p_description": "-",
+                            "p_promised_date": first_debt.get("promised_date"),
+                            "p_phone_number": None,
+                            "p_created_at": None,
+                        }, request_id=first_debt.get("request_id")).execute()
+                        saved = write_result.data
+                        if isinstance(saved, list):
+                            saved = saved[0] if saved else None
+                        if not isinstance(saved, dict) or not saved.get("id"):
+                            raise RuntimeError("record_debt_addition returned no customer row")
+                        remember_selected_customer(sender_phone, business_user_id, saved.get("name") or customer_name)
+                        remember_recent_transaction(sender_phone, business_user_id, saved.get("id"), saved.get("name") or customer_name)
+                        due_saved = saved.get("promised_date") or first_debt.get("promised_date")
+                        due_saved_label = "Ballan lama sheegin" if not due_saved else datetime.strptime(str(due_saved), "%Y-%m-%d").strftime("%d/%m/%Y")
+                        send_whatsapp(sender_phone,
+                            f"✅ Daynta *{saved.get('name') or customer_name}* waa la diiwaangeliyey.\n"
+                            f"Lacagta: *${float(saved.get('amount') or amount_value):.2f}*\n"
+                            f"Ballanta: *{due_saved_label}*\n\n"
+                            "Hadda soo qor qofka ku xiga iyo lacagta aad ku leedahay.\n"
+                            "Tusaale: *Axmed $30*.\n"
+                            "Markaad dhamayso, qor *DHAMMAAD* ama *MENU*.")
+                        first_debt.update({
+                            "stage": "entry", "customer_name": None, "amount": None,
+                            "promised_date": None,
+                            "request_id": f"first-debt:{secrets.token_urlsafe(18)}",
+                            "expires_at": datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL,
+                        })
+                        return {"status": "first_debt_saved"}
+                    except Exception as first_debt_error:
+                        print(f"❌ First debt onboarding save failed: {type(first_debt_error).__name__}: {first_debt_error}")
+                        send_whatsapp(sender_phone,
+                            "❌ Daynta lama diiwaangelin. Fadlan mar kale soo qor *HAA* si aan dib ugu hubiyo, "
+                            "ama *JOOJI* si aad uga baxdo. Wax kale lama xaqiijin.")
+                        return {"status": "first_debt_save_error"}
+
+                # Unknown state: fail closed rather than routing a stale answer into AI.
+                FIRST_DEBT_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "Wadahadalkii daynta koowaad wuu khaldamay. Fadlan la xiriir maamulka si mar kale laguugu bilaabo.")
+                return {"status": "first_debt_unknown_stage"}
+
         # Active undo/rename sessions own their replies. In particular, "1" and
         # "2" are confirmation answers here, not ADD/PAY direction choices.
         pending_undo = UNDO_CONFIRMATION_SESSIONS.get(sender_phone)
@@ -5626,14 +5757,7 @@ async def _whatsapp_webhook_process(request: Request):
             return {"status": "no_customer_yet_helped"}
 
         if is_somali_confusion_request(message_text):
-            if active_guided and active_guided.get("stage") in {"debt_name", "payment_name"}:
-                fallback_reply = "Waan ku hagi doonaa. Hadda qor magaca macmiilka keliya; qor *JOOJI* haddii aad rabto inaad ka baxdo."
-            elif active_guided and active_guided.get("stage") in {"debt_amount", "payment_amount"}:
-                fallback_reply = "Waan ku hagi doonaa. Hadda qor lacagta oo keliya, tusaale: *20*; qor *JOOJI* si aad uga baxdo."
-            elif active_guided and active_guided.get("stage") == "history_name":
-                fallback_reply = "Si aad u aragto xisaabta macmiilka, qor *FAAHFAAHIN Magaca*; tusaale: *FAAHFAAHIN Cali Xasan*."
-            else:
-                fallback_reply = "Dhib ma leh, waan ku hagi doonaa. Soo qor *MENU* si aad u aragto amarrada, ama ii sheeg hawsha aad rabto."
+            fallback_reply = "Ku soo dhawoow Deynjir! 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
             reply = generate_deynjir_conversation_reply(message_text, fallback_reply, sender_phone)
             send_whatsapp(sender_phone, reply or fallback_reply)
             return {"status": "conversational_help_sent"}
@@ -5919,25 +6043,6 @@ async def _whatsapp_webhook_process(request: Request):
                 AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
                 send_whatsapp(sender_phone, "✅ Wax-ka-beddelka waa la joojiyey. Waxba lama beddelin.")
                 return {"status": "amount_edit_cancelled"}
-            if amount_edit_state.get("date_confirmation_only"):
-                alternative_date = parse_guidance_date_reply(message_text)
-                if alternative_date:
-                    amount_edit_state.setdefault("update_data", {})["promised_date"] = alternative_date
-                    amount_edit_state["expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=10)
-                    alternative_display = datetime.strptime(alternative_date, "%Y-%m-%d").strftime("%d/%m/%Y")
-                    send_whatsapp(
-                        sender_phone,
-                        f"📅 Hagaag. Taariikhda cusub ee *{amount_edit_state.get('customer_name') or 'macmiilka'}* waa *{alternative_display}*.\n\n"
-                        "Haddii aad rabto taariikhdan, soo qor *HAA*. Haddii kale, soo qor taariikh kale ama *MAYA* si aad u joojiso. Waxba lama beddelin weli."
-                    )
-                    return {"status": "due_date_alternative_proposed"}
-                send_whatsapp(
-                    sender_phone,
-                    "Fadlan soo qor *HAA* si aad u xaqiijiso taariikhda la soo jeediyey, "
-                    "ama taariikh kale oo ah *DD/MM/YYYY* (tusaale: *15/11/2026*). "
-                    "Qor *MAYA* si aad u joojiso. Waxba lama beddelin weli."
-                )
-                return {"status": "due_date_confirmation_required"}
             send_whatsapp(sender_phone, "Fadlan qor *HAA* si loo xaqiijiyo ama *MAYA* si loo joojiyo. Waxba lama beddelin weli.")
             return {"status": "amount_edit_confirmation_required"}
 
@@ -6566,23 +6671,25 @@ async def _whatsapp_webhook_process(request: Request):
         )
         return {"status": "guided_debt_started_from_conversation"}
 
-    # First-time users and confused shopkeepers receive a task-specific command guide.
+    # First-time users and confused shopkeepers receive one short explanation.
     if is_somali_confusion_request(guided_text):
         if guided and guided.get("stage") == "history_name":
-            fallback_reply = "Si aad u aragto xisaabta macmiilka, qor *FAAHFAAHIN Magaca*; tusaale: *FAAHFAAHIN Cali Xasan*."
-        elif guided and guided.get("stage") in {"debt_name", "payment_name"}:
-            fallback_reply = "Hadda qor magaca macmiilka keliya. Qor *JOOJI* haddii aad rabto inaad ka baxdo."
-        elif guided and guided.get("stage") in {"debt_amount", "payment_amount"}:
-            fallback_reply = "Hadda qor lacagta oo keliya, tusaale: *20*. Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+            fallback_reply = (
+                "Xisaabta macmiilku waxay muujinaysaa dayntiisa iyo lacag-bixintiisa. "
+                "Ii qor magaca macmiilka si aan kuu tuso. Tusaale: *Cali Xasan*."
+            )
         else:
-            fallback_reply = "Dhib ma leh, waan ku hagi doonaa. Soo qor *MENU* si aad u aragto amarrada Deynjir."
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            fallback_reply = (
+                "Dhib ma leh, waan ku hagi doonaa. 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
+            )
         reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
         send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "somali_usage_help_sent"}
 
     if is_deynjir_general_question(guided_text):
         fallback_reply = (
-            "Deynjir wuxuu kaa caawiyaa daynta iyo lacag-bixinta. Tusaale: qor *ADD Cali $20* si aad deyn cusub ugu darto."
+            "Deynjir wuxuu maamulaa deymaha, lacag-bixinta macaamiisha iyo ballamaha ganacsigaaga."
         )
         reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
         send_whatsapp(sender_phone, reply or fallback_reply)
@@ -7748,40 +7855,8 @@ async def _whatsapp_webhook_process(request: Request):
             send_whatsapp(sender_phone, "Waan fahmay inaad rabto lacagihii maanta la qabtay, balse xogta hadda lama soo saari karin. Fadlan mar kale isku day.")
             return {"status": "today_payment_summary_error"}
 
-    # How-to questions belong to the conversational command guide, not the
-    # transaction extractor. Preserve any active multi-step workflow.
-    guided_for_help = GUIDED_SESSIONS.get(sender_phone) or {}
-    has_non_menu_workflow = any(
-        sender_phone in session_map
-        for session_map in (
-            IMPORT_SESSIONS, PAYMENT_EXPORT_SESSIONS, REMINDER_SESSIONS,
-            RENAME_SESSIONS, AMOUNT_EDIT_SESSIONS, CUSTOMER_MATCH_SESSIONS,
-            DELETE_SESSIONS, UNDO_CONFIRMATION_SESSIONS, SEARCH_DETAIL_SESSIONS,
-            DEPOSIT_OFFER_SESSIONS, CORRECTION_SESSIONS,
-        )
-    ) or bool(guided_for_help and guided_for_help.get("stage") != "menu")
-    if is_how_to_usage_question(message_text) and not has_non_menu_workflow:
-        guide_fallback = build_command_guide_fallback(message_text)
-        guide_reply = generate_deynjir_conversation_reply(message_text, guide_fallback, sender_phone)
-        final_guide_reply = guide_reply or guide_fallback
-        remember_conversation_outcome(sender_phone, message_text, final_guide_reply)
-        send_whatsapp(sender_phone, final_guide_reply)
-        return {"status": "how_to_command_guidance_sent"}
-
-    # A customer name after "balanta" is not itself a database command.
-    # Teach the user the explicit SEARCH command instead of guessing whether
-    # they want to view or edit an appointment.
+    # Route clear appointment requests before the generic debt-list matcher.
     local_appointment_entry = parse_local_appointment_list_request(message_text)
-    if local_appointment_entry is None:
-        appointment_customer_name = parse_appointment_customer_guidance(message_text)
-        if appointment_customer_name and not has_non_menu_workflow:
-            guide_reply = (
-                f"Si aad u hesho macluumaadka *{appointment_customer_name}*, soo qor: "
-                f"*Raadi {appointment_customer_name}*."
-            )
-            remember_conversation_outcome(sender_phone, message_text, guide_reply)
-            send_whatsapp(sender_phone, guide_reply)
-            return {"status": "appointment_customer_command_guidance"}
     if local_appointment_entry is None:
         local_appointment_entry = resolve_contextual_appointment_list_followup(message_text, sender_phone)
     if local_appointment_entry and local_appointment_entry.get("filter_date"):
@@ -9223,24 +9298,22 @@ async def _whatsapp_webhook_process(request: Request):
                         send_whatsapp(sender_phone, "❌ Taariikh khaldan. Isticmaal YYYY-MM-DD, tusaale 2026-10-20.")
                         continue
 
-                # If the user supplies a date without a clear change command,
-                # stage a proposal and require confirmation even when no old date
-                # exists. Explicit change commands are clear authorization.
+                # If a date already exists, do not silently overwrite it when the
+                # user merely supplies another date. Ask once; explicit change
+                # commands (e.g. "ka dhig ballanta ...") are clear authorization.
                 if (
                     date_only_update
                     and "promised_date" in update_data
-                    and str(debtor.get("promised_date") or "") != str(update_data["promised_date"])
+                    and debtor.get("promised_date")
+                    and str(debtor.get("promised_date")) != str(update_data["promised_date"])
                     and not is_explicit_due_date_change(message_text)
                 ):
-                    old_due = str(debtor.get("promised_date") or "")
+                    old_due = str(debtor.get("promised_date"))
                     new_due = str(update_data["promised_date"])
-                    if old_due:
-                        try:
-                            old_due_display = datetime.strptime(old_due, "%Y-%m-%d").strftime("%d/%m/%Y")
-                        except ValueError:
-                            old_due_display = old_due
-                    else:
-                        old_due_display = "-"
+                    try:
+                        old_due_display = datetime.strptime(old_due, "%Y-%m-%d").strftime("%d/%m/%Y")
+                    except ValueError:
+                        old_due_display = old_due
                     try:
                         new_due_display = datetime.strptime(new_due, "%Y-%m-%d").strftime("%d/%m/%Y")
                     except ValueError:
@@ -9257,12 +9330,9 @@ async def _whatsapp_webhook_process(request: Request):
                     }
                     send_whatsapp(
                         sender_phone,
-                        f"📅 *{debtor.get('name') or name}*\n"
-                        f"Ballanta hadda: *{old_due_display}*\n"
-                        f"Taariikhda la soo jeediyey: *{new_due_display}*\n\n"
-                        f"Haddii aad rabto inaan taariikhda ballanta {debtor.get('name') or name} u beddelo {new_due_display}, soo qor *HAA*.\n"
-                        "Haddii aad rabto taariikh kale, si toos ah u soo qor taariikhda cusub (tusaale: *15/11/2026*).\n"
-                        "Qor *MAYA* ama *JOOJI* si aad u joojiso. Waxba lama beddelin weli."
+                        f"📅 *{debtor.get('name') or name}* wuxuu hore u lahaa ballan *{old_due_display}*.\n\n"
+                        f"Ma ku beddelaa *{new_due_display}*?\n\n"
+                        "Qor *HAA* si loo beddelo ama *MAYA* si loo daayo. Waxba lama beddelin weli."
                     )
                     continue
 
