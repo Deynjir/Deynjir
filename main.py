@@ -5177,9 +5177,8 @@ async def _whatsapp_webhook_process(request: Request):
             welcome_sent = send_whatsapp(
                 target_phone,
                 "Ku soo dhawoow Deynjir! 👋\n\n"
-                "Aan kuu diiwaangeliyo dayntaada koowaad.\n\n"
-                "Ii soo qor magaca qofka iyo lacagta aad ku leedahay.\n"
-                "Tusaale: *Cali $50*",
+                "Aan kuu diiwaangeliyo Deymaha kaa maqan.\n\n"
+                "Ii soo qor magaca qofka iyo lacagta aad ku leedahay.\n",
                 schedule_pending=False,
             )
             if not welcome_sent:
@@ -5191,12 +5190,12 @@ async def _whatsapp_webhook_process(request: Request):
             return {"status": "first_debt_welcome_sent"}
         except Exception as welcome_error:
             print(f"❌ WELCOME command failed: {type(welcome_error).__name__}: {welcome_error}")
-            send_whatsapp(sender_phone, "❌ Fariinta lama diri karin. Hubi lambarka iyo isku-xirka WhatsApp-ka.")
+            send_whatsapp(sender_phone, "❌ Fariintii lama dirin. Hubi lambarka.")
             return {"status": "first_debt_welcome_error"}
 
     if sender_phone == owner_phone and command in {"APPROVE", "REJECT"}:
         if len(parts) != 2:
-            send_whatsapp(sender_phone, "Isticmaal mid ka mid ah amarradan:\n*APPROVE 252...* — oggolow codsiga.\n*REJECT 252...* — diid codsiga.")
+            send_whatsapp(sender_phone, "Isticmaal Qaababkan:\n*APPROVE 252...* — oggolow codsiga.\n*REJECT 252...* — diid codsiga.")
             return {"status": "invalid_approval_command"}
 
         applicant_phone = parts[1].replace("+", "").split("@")[0].strip()
@@ -5231,12 +5230,9 @@ async def _whatsapp_webhook_process(request: Request):
             send_whatsapp(
                 applicant_phone,
                 (
-                    "🎉 *Waa laguu oggolaaday Deynjir!*\n\n"
-                    "Aan ku bilowno hal macaamil oo keliya. Waxaan kaa caawinayaa inaad si fudud ula socoto daymaha iyo lacagaha macaamiisha.\n\n"
-                    "*Deyn cusub:* Cali $20 deyn cusub\n"
-                    "*Lacag-bixin:* Cali $10 ayuu bixiyey\n\n"
-                    "Haddii aad hore u lahayd daymo, qor *IMPORT* si aad sawir, Excel ama qoraal ugu soo geliso. Uma baahnid inaad dhammaan gacanta ku qorto.\n\n"
-                    "Qor *MENU* si aad u aragto adeegyada. Lacag-bixin kasta oo u baahan xaqiijin waa lagu weydiinayaa ka hor kaydinta."
+                    "🎉 *Waxaa lagugu soo daray Nidaamka Deynjir!*\n\n"
+                    "Waxaan kaa caawinayaa inaad si fudud ula socoto daymaha iyo balamaha macaamiishaada. Aan ku bilowno hal macaamil oo keliya. \n\n"
+                    "*Ii soo qor magaca qofka iyo lacagta aad ku leedahay*"
                 )
                 if new_status == "approved"
                 else "❌ Waan ka xunnahay, codsigaaga waa la diiday."
@@ -5285,7 +5281,7 @@ async def _whatsapp_webhook_process(request: Request):
             expiry = first_debt.get("expires_at")
             if not expiry or datetime.now(timezone.utc) > expiry:
                 FIRST_DEBT_SESSIONS.pop(sender_phone, None)
-                send_whatsapp(sender_phone, "Waqtigii bilowga daynta koowaad wuu dhammaaday. Haddii aad rabto inaad mar kale bilowdo, maamulka ha kuu soo diro WELCOME.")
+                send_whatsapp(sender_phone, "si aad u xarayso deyn cusub soo qor magaca macmiilka iyo lacagta lagu leeyahay.")
                 return {"status": "first_debt_session_expired"}
 
             first_text = str(message_text or "").strip()
@@ -5295,7 +5291,7 @@ async def _whatsapp_webhook_process(request: Request):
                 if first_norm == "menu":
                     send_whatsapp(sender_phone, deynjir_help_message())
                 else:
-                    send_whatsapp(sender_phone, "Waa hagaag. Habkii diiwaangelinta daynta koowaad waa la joojiyey. Wax kale lama kaydin. Markaad diyaar tahay, qor MENU ama la xiriir maamulka.")
+                    send_whatsapp(sender_phone, "Waa hagaag. Habkii diiwaangelinta daynta waa la joojiyey. Markaad diyaar tahay, soo qor MENU.")
                 return {"status": "first_debt_onboarding_closed"}
 
             # Let explicit non-onboarding commands interrupt the flow safely.
@@ -5351,7 +5347,7 @@ async def _whatsapp_webhook_process(request: Request):
                         f"• Lacagta: *${first_debt['amount']:.2f}*\n"
                         f"• Ballanta: *{due_label}*\n\n"
                         "Ma diiwaangeliyaa? Soo qor *HAA* ama *MAYA*.\n"
-                        "Waxba lama kaydin ilaa aad HAA tiraahdo.")
+                        "Waxba lama kaydin ilaa aad soo qorto *HAA*.")
                     return {"status": "first_debt_confirmation_requested"}
 
                 if stage == "name_correction":
@@ -5428,8 +5424,7 @@ async def _whatsapp_webhook_process(request: Request):
                             f"✅ Daynta *{saved.get('name') or customer_name}* waa la diiwaangeliyey.\n"
                             f"Lacagta: *${float(saved.get('amount') or amount_value):.2f}*\n"
                             f"Ballanta: *{due_saved_label}*\n\n"
-                            "Hadda soo qor qofka ku xiga iyo lacagta aad ku leedahay.\n"
-                            "Tusaale: *Axmed $30*.\n"
+                            "Hadda soo qor qofka ku xiga iyo lacagta aad ku leedahay.\n\n"
                             "Markaad dhamayso, qor *DHAMMAAD* ama *MENU*.")
                         first_debt.update({
                             "stage": "entry", "customer_name": None, "amount": None,
@@ -5585,13 +5580,12 @@ async def _whatsapp_webhook_process(request: Request):
                     send_whatsapp(sender_phone,
                         f"✅ Macaamilkii waa laga noqday.\n\nMacmiil: *{customer_after.get('name') or pending_undo.get('customer_name')}*\n"
                         f"Nooca: {type_so}\nLacagta: *${float(undo_data.get('amount') or 0):.2f}*\n"
-                        f"Haraaga deynta: *${float(customer_after.get('amount') or 0):.2f}*{credit_line}\n\n"
-                        "Taariikhda waa la hayey si raad-raac loo helo.")
+                        f"Hadhaaga Hada: *${float(customer_after.get('amount') or 0):.2f}*{credit_line}\n\n")
                     LAST_TRANSACTION_CONTEXT.pop(sender_phone, None)
                     return {"status": "undo_completed", "transaction_type": undone_type}
                 except Exception as undo_error:
                     print(f"❌ Confirmed UNDO error: {type(undo_error).__name__}: {undo_error}")
-                    send_whatsapp(sender_phone, "⚠️ Macaamilka lama celin. Waxaa laga yaabaa in macaamil cusub dhacay ama diiwaanku aanu ammaan u ahayn in la celiyo. Waxba lama beddelin.")
+                    send_whatsapp(sender_phone, "⚠️ Deyntan lagama noqon. khalad jira awgii.")
                     return {"status": "undo_failed"}
             send_whatsapp(sender_phone, "Fadlan ku jawaab *1* = HAA, ka noqo; ama *2* = MAYA, xaree oo sii hay.\nWaqtigu waa 5 daqiiqo.")
             return {"status": "undo_confirmation_waiting"}
@@ -5694,7 +5688,7 @@ async def _whatsapp_webhook_process(request: Request):
                         "*Ma rabtaa inaad ka noqoto macaamilkan?*\n\n"
                         "1️⃣ HAA — Ka noqo (UNDO)\n"
                         "2️⃣ MAYA — Waa sax, xaree oo sii hay\n\n"
-                        "Waxba lama beddelayo ilaa aad xaqiijiso. Ku jawaab 1 ama 2 (5 daqiiqo).")
+                        "Waxba lama beddelayo ilaa aad xaqiijiso.")
                     return {"status": "undo_confirmation_requested"}
             except Exception as preview_error:
                 print(f"⚠️ Could not preview latest transaction for disagreement: {type(preview_error).__name__}: {preview_error}")
