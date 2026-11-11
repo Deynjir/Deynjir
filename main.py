@@ -9194,7 +9194,9 @@ async def whatsapp_webhook(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook JSON") from exc
     message_data = payload.get("messageData") or {}
-    event_id = (payload.get("id") or payload.get("eventId")
+    # Green-API's documented webhook schema places idMessage at the ROOT
+    # of the notification body (not inside messageData).
+    event_id = (payload.get("idMessage") or payload.get("id") or payload.get("eventId")
                 or message_data.get("idMessage") or message_data.get("id"))
     if payload.get("typeWebhook") in {"incomingMessageReceived", "outgoingMessageReceived"} and not event_id:
         # Financial messages must have a stable provider event ID. Processing an
