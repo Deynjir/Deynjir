@@ -227,18 +227,20 @@ def _save_persisted_workflow_sessions(sender_phone):
 
 
 def deynjir_main_menu():
-    """Return the welcome menu with real WhatsApp line breaks."""
+    """A short, shopkeeper-first menu with an obvious first action and old-debt import."""
     return (
-        "👋 *Soo Dhawoow!*\n\n"
-        "Nidaamkan waxaad kula soconaysaa daymaha, lacag-bixinta iyo ballamaha ganacsigaaga.\n\n"
-        "*Raac Tilmaamahan Hoose:*\n\n"
-        "Deyn cusub – Qor 1\n"
-        "Lacag bixin – Qor 2\n"
-        "Liiska daynta – Qor 3\n"
-        "Raadi macmiil – Qor 4\n"
-        "Ballamaha maanta – Qor 5\n"
-        "Caawimaad – Qor 6\n\n"
-        "Dooro 1 ilaa 6."
+        "👋 *Soo Dhawoow Deynjir!*\n\n"
+        "Halkan waxaad si fudud ugu diiwaangelin kartaa daymaha iyo lacagaha macaamiisha. "
+        "Waxaad u qori kartaa sida aad caadi ahaan u hadasho.\n\n"
+        "*Ku bilow hal tallaabo:*\n"
+        "1️⃣ Deyn cusub\n"
+        "2️⃣ Lacag bixin\n"
+        "3️⃣ Liiska daynta\n"
+        "4️⃣ Raadi macmiil\n"
+        "5️⃣ Ballamaha maanta\n"
+        "6️⃣ Caawimaad\n\n"
+        "*Haddii daymo hore kuu yaallaan:* qor *IMPORT* si aad sawir, Excel ama qoraal ugu soo geliso.\n\n"
+        "Dooro 1 ilaa 6, ama si toos ah u qor tusaale: *Cali $20 deyn cusub*."
     )
 
 def deynjir_recovery_menu_message(intro=None):
@@ -291,8 +293,9 @@ def activate_guided_menu(sender_phone):
 def deynjir_help_message():
     return (
         "ℹ️ *Raac Tilmaamahan*\n\n"
-        "• Deyn cusub: qor *ADD Cali $50*\n"
-        "• Lacag bixin: qor *Lacag bixin Cali $20*\n"
+        "• Deyn cusub: qor *Cali $50 deyn cusub* ama *ADD Cali $50*\n"
+        "• Lacag bixin: qor *Cali $20 ayuu bixiyey* ama *Lacag bixin Cali $20*\n"
+        "• Daymihii hore: qor *IMPORT* (sawir, Excel ama qoraal)\n"
         "• Liiska daynta: qor *LIISKA DAYNTA*\n"
         "• Raadi qof: qor *Raadi Cali*\n"
         "• Faahfaahin: qor *FAAHFAAHIN Cali*\n"
@@ -1753,7 +1756,11 @@ def _process_pending_payment_confirmation(pending_id, actor_phone, admin=False):
             f"Baaqiga: ${float(rpc_data.get('amount') or 0):.2f}"
         )
         if ONBOARDING_SESSIONS.get(transaction_sender, {}).get("stage") == "first_successful_action":
-            success_text += "\n\n🎉 Bilow fiican! Deynjir wuxuu kaa caawin doonaa la socodka deymahaaga."
+            success_text += (
+                "\n\n🎉 *Bilow fiican!* Deynjir hadda wuxuu kuu hayaa diiwaanka macaamilkan. "
+                "Waxaad ku dari kartaa macaamiil kale ama lacag-bixintooda. "
+                "Haddii daymo hore kuu yaallaan, qor *IMPORT* si aad si fudud ugu soo geliso."
+            )
             ONBOARDING_SESSIONS.pop(transaction_sender, None)
         remember_conversation_outcome(
             transaction_sender,
@@ -2056,7 +2063,7 @@ OWNER_PHONE = os.getenv("OWNER_PHONE", "").lstrip("+").strip()
 # Required for /cron/* endpoints: set a long random CRON_SECRET and send it as
 # the x-cron-secret header (or Authorization: Bearer <secret>).
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def home():
     return {"status": f"{APP_NAME} Bot Engine is running live.", "app": APP_NAME}
 def normalize_customer_name(value):
@@ -4987,11 +4994,11 @@ async def _whatsapp_webhook_process(request: Request):
                 applicant_phone,
                 (
                     "🎉 *Waa laguu oggolaaday Deynjir!*\n\n"
-                    "👋 Soo dhawoow! Waxaan kaa caawinayaa la socodka deymaha iyo lacag-bixinta.\n\n"
-                    "Habka ugu fudud: hal fariin ku qor magaca iyo lacagta.\n\n"
-                    "Deyn cusub: *Cali $20 deyn cusub*\n"
-                    "Lacag-bixin: *Cali $10 ayuu bixiyay*\n\n"
-                    "Waxaad kaloo qori kartaa *MENU* si tallaabo-tallaabo laguugu hago. Lacag-bixin kasta waa la xaqiijinayaa ka hor kaydinta."
+                    "Aan ku bilowno hal macaamil oo keliya. Waxaan kaa caawinayaa inaad si fudud ula socoto daymaha iyo lacagaha macaamiisha.\n\n"
+                    "*Deyn cusub:* Cali $20 deyn cusub\n"
+                    "*Lacag-bixin:* Cali $10 ayuu bixiyey\n\n"
+                    "Haddii aad hore u lahayd daymo, qor *IMPORT* si aad sawir, Excel ama qoraal ugu soo geliso. Uma baahnid inaad dhammaan gacanta ku qorto.\n\n"
+                    "Qor *MENU* si aad u aragto adeegyada. Lacag-bixin kasta oo u baahan xaqiijin waa lagu weydiinayaa ka hor kaydinta."
                 )
                 if new_status == "approved"
                 else "❌ Waan ka xunnahay, codsigaaga waa la diiday."
@@ -9410,7 +9417,11 @@ async def _whatsapp_webhook_process(request: Request):
                     for entry in add_entries
                 ) + "."
             if ONBOARDING_SESSIONS.get(sender_phone, {}).get("stage") == "first_successful_action":
-                success_message += "\n\n🎉 Bilow fiican! Deynjir wuxuu kaa caawin doonaa la socodka deymahaaga."
+                success_message += (
+                    "\n\n🎉 *Bilow fiican!* Deynjir hadda wuxuu kuu hayaa diiwaanka macaamilkan. "
+                    "Waxaad ku dari kartaa macaamiil kale ama lacag-bixintooda. "
+                    "Haddii daymo hore kuu yaallaan, qor *IMPORT* si aad si fudud ugu soo geliso."
+                )
                 ONBOARDING_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, success_message)
             remember_conversation_outcome(sender_phone, message_text, success_message)
@@ -9429,13 +9440,30 @@ async def whatsapp_webhook(request: Request):
         payload = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Webhook payload must be a JSON object")
     message_data = payload.get("messageData") or {}
-    event_id = (payload.get("id") or payload.get("eventId")
-                or message_data.get("idMessage") or message_data.get("id"))
-    if payload.get("typeWebhook") in {"incomingMessageReceived", "outgoingMessageReceived"} and not event_id:
-        # Financial messages must have a stable provider event ID. Processing an
-        # ID-less delivery would make a retry indistinguishable from a new command.
+    if not isinstance(message_data, dict):
+        message_data = {}
+    event_id = (
+        payload.get("id") or payload.get("eventId") or payload.get("idMessage")
+        or message_data.get("idMessage") or message_data.get("id")
+    )
+    event_type = payload.get("typeWebhook")
+    if event_type in {"incomingMessageReceived", "outgoingMessageReceived"} and not event_id:
+        # Never process a financial command without a stable provider event ID:
+        # doing so would make a retry indistinguishable from a new transaction.
+        print(
+            "❌ Webhook rejected: stable Green-API message ID missing; "
+            f"type={event_type!r}, top_level_keys={sorted(payload.keys())}, "
+            f"messageData_keys={sorted(message_data.keys())}"
+        )
         raise HTTPException(status_code=503, detail="Missing stable Green-API message ID; retry delivery.")
+    if event_id:
+        event_id = str(event_id).strip()
+        if not event_id or len(event_id) > 300:
+            print(f"❌ Webhook rejected: invalid event ID length; type={event_type!r}")
+            raise HTTPException(status_code=400, detail="Invalid Green-API message ID")
     if event_id and is_duplicate_webhook(event_id):
         return {"status": "duplicate_webhook_ignored"}
     sender_data = payload.get("senderData") or {}
@@ -9453,12 +9481,20 @@ async def whatsapp_webhook(request: Request):
             else:
                 supabase.rpc("complete_webhook_event", {"p_event_id": str(event_id)}).execute()
         return result
-    except Exception:
+    except Exception as webhook_exc:
+        print(
+            "❌ Webhook processing failed: "
+            f"type={type(webhook_exc).__name__}, event_id={str(event_id or '')[:80]}, "
+            f"error={webhook_exc}"
+        )
         if event_id:
             try:
                 supabase.rpc("fail_webhook_event", {"p_event_id": str(event_id)}).execute()
             except Exception as mark_error:
-                print(f"⚠️ Could not mark webhook failed: {type(mark_error).__name__}")
+                print(
+                    "⚠️ Could not mark webhook failed: "
+                    f"{type(mark_error).__name__}: {mark_error}"
+                )
         raise
     finally:
         if session_sender:
