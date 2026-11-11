@@ -47,6 +47,8 @@ LAST_HISTORY_REQUESTS = {}
 # Remembers the last customer added, searched, or opened for this sender.
 # Used for short-lived, same-shop follow-ups that clearly refer to that customer.
 LAST_SELECTED_CUSTOMERS = {}
+# Remembers the last appointment-list date so terse follow-ups can repeat the result.
+LAST_APPOINTMENT_LIST_REQUESTS = {}
 # First-contact onboarding choices are temporary per-sender conversations.
 ONBOARDING_SESSIONS = {}
 # Short-lived conversational context for natural follow-ups (not financial state).
@@ -2394,22 +2396,78 @@ def is_missing_value(value):
 
 
 def parse_local_appointment_list_request(message_text):
-    """Return a date-filtered LIST entry for clear today/tomorrow appointment commands."""
+    """Recognize natural Somali requests for customers whose debts are due on a date.
+
+    Keep this deterministic: appointment-list requests must not wait for Gemini
+    or be interpreted as a new debt/payment.
+    """
     raw = normalize_customer_name(message_text).strip(" .!?؟")
-    appointment_prefix = r"(?:balamaha|ballamaha|balanta|ballanta|balan(?:ta)?)"
-    if re.fullmatch(appointment_prefix + r"\s+(?:maanta|today)", raw, re.I):
+    raw = re.sub(r"\s+", " ", raw)
+    appointment_word = r"(?:balam(?:aha|a)?|ballam(?:aha|a)?|balan(?:ta|san|s)?|ballan(?:ta|san|s)?)"
+    today_word = r"(?:maanta|today|maantaas)"
+    tomorrow_word = r"(?:beri|berri|tomorrow)"
+    list_action = r"(?:i\s+tus|ii\s+tus|soo\s+saar|soo\s+bixi|i\s+sheeg|ii\s+sheeg|muuji|eeg|liiska|yaa|kuwa)"
+    people_word = r"\b(?:kuwa|macaamiisha|dadka|dadkaas|macmiisha)\b"
+
+    target_type = None
+    if re.search(today_word, raw, re.I):
+        # Require an appointment term plus either a list/show verb or a people
+        # reference. This avoids stealing ordinary date edits such as "Cali
+        # ballantiisa maanta ka dhig".
+        if re.search(appointment_word, raw, re.I) and (
+            re.search(list_action, raw, re.I) or re.search(people_word, raw, re.I)
+        ):
+            target_type = "today"
+    elif re.search(tomorrow_word, raw, re.I):
+        if re.search(appointment_word, raw, re.I) and (
+            re.search(list_action, raw, re.I) or re.search(people_word, raw, re.I)
+        ):
+            target_type = "tomorrow"
+
+    # Also accept the short canonical commands, independent of word order.
+    if target_type is None and re.fullmatch(
+        r"(?:balamaha|ballamaha|balanta|ballanta|balan|ballan)\s+(?:maanta|today)", raw, re.I
+    ):
+        target_type = "today"
+    if target_type is None and re.fullmatch(
+        r"(?:balamaha|ballamaha|balanta|ballanta|balan|ballan)\s+(?:beri|berri|tomorrow)", raw, re.I
+    ):
+        target_type = "tomorrow"
+
+    if target_type == "today":
         target_date = today_eat()
-        return {
-            "action": "LIST", "customer_name": None, "amount": None,
-            "filter_date": target_date.isoformat(), "filter_type": "today",
-        }
-    if re.fullmatch(appointment_prefix + r"\s+(?:beri|berri|tomorrow)", raw, re.I):
+    elif target_type == "tomorrow":
         target_date = today_eat() + timedelta(days=1)
-        return {
-            "action": "LIST", "customer_name": None, "amount": None,
-            "filter_date": target_date.isoformat(), "filter_type": "tomorrow",
-        }
-    return None
+    else:
+        return None
+
+    return {
+        "action": "LIST", "customer_name": None, "amount": None,
+        "filter_date": target_date.isoformat(), "filter_type": target_type,
+    }
+
+
+
+def resolve_contextual_appointment_list_followup(message_text, sender_phone):
+    """Reuse the last requested appointment date for clear result-retry phrases."""
+    raw = normalize_customer_name(message_text).strip(" .!?؟")
+    retry_phrases = {
+        "soo saar", "soo bixi", "mar kale soo saar", "sii wad",
+        "ilaa intee sugaa", "ilaa intee ayaan sugaa", "maxaan sugaa",
+        "wali sugayaa", "soo bandhig",
+    }
+    if raw not in retry_phrases:
+        return None
+    saved = LAST_APPOINTMENT_LIST_REQUESTS.get(sender_phone) or {}
+    expires_at = saved.get("expires_at")
+    if not expires_at or datetime.now(timezone.utc) > expires_at:
+        LAST_APPOINTMENT_LIST_REQUESTS.pop(sender_phone, None)
+        return None
+    return {
+        "action": "LIST", "customer_name": None, "amount": None,
+        "filter_date": saved.get("filter_date"),
+        "filter_type": saved.get("filter_type"),
+    }
 
 
 def is_explicit_appointment_list_request(message_text):
@@ -3585,8 +3643,15 @@ def find_debtor_matches(business_user_id, name, include_archived=False):
     # Only then consider typo-tolerant fuzzy matches.
     scored = []
     for normalized, item in names.items():
+        stored_parts = normalized.split()
+        # A one-word request such as "Omar" must not fuzzy-match a different
+        # multi-word name such as "CABDI CUMAR". Exact token matches were
+        # already handled above; fuzzy matching is only safe here when both
+        # sides have the same number of name parts.
+        if len(requested_parts) != len(stored_parts):
+            continue
         score = _name_similarity(requested, normalized)
-        if score >= 0.78:
+        if score >= 0.82:
             scored.append((score, normalized, item))
 
     if not scored:
@@ -5071,6 +5136,18 @@ async def _whatsapp_webhook_process(request: Request):
             and not (rename_waiting_for_this_shop and not rename_interrupt)
             and is_clear_new_supported_request(message_text, include_transactions=True)
         )
+        # CUSUB and help are replies inside an active customer-match workflow,
+        # not new financial requests. Keep the saved ADD/PAY entry (name + amount)
+        # so rejecting a suggested match never forces the shopkeeper to retype it.
+        active_customer_match = CUSTOMER_MATCH_SESSIONS.get(sender_phone) or {}
+        customer_match_waiting_for_shop = (
+            active_customer_match.get("business_user_id") == str(business_user_id)
+        )
+        if customer_match_waiting_for_shop and (
+            normalized_inbound in {"cusub"}
+            or re.search(r"\b(?:caawin|caawi|help)\b", normalized_inbound, re.I)
+        ):
+            pending_new_request = False
         if rename_waiting_for_this_shop and rename_interrupt:
             RENAME_SESSIONS.pop(sender_phone, None)
         direction_reply = parse_transaction_clarification(message_text)
@@ -6791,6 +6868,15 @@ async def _whatsapp_webhook_process(request: Request):
     if customer_match_state and not pending_new_request:
         answer = str(message_text or "").strip()
         answer_folded = normalize_customer_name(answer)
+        if re.search(r"\b(?:caawin|caawi|help|menu|adeegyada)\b", answer_folded, re.I):
+            send_whatsapp(
+                sender_phone,
+                deynjir_help_message() + "\n\n" +
+                "ℹ️ Xulashadii macmiilka weli way kuu furan tahay. "
+                "Ku jawaab *HAA*, *MAYA*, ama *CUSUB* si aad u sii wadato. "
+                "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+            )
+            return {"status": "help_sent_customer_match_preserved"}
         if classify_no_activity_statement(answer):
             CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, "Waan fahmay. Xulashadii macmiilka waa la joojiyey; waxba lama diiwaangelin.")
@@ -6842,7 +6928,7 @@ async def _whatsapp_webhook_process(request: Request):
             elif answer_folded in {"maya", "no", "n", "2"}:
                 customer_match_state["stage"] = "enter_full_name"
                 customer_match_state["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-                send_whatsapp(sender_phone, "Hagaag. Fadlan qor magaca buuxa ee macmiilka aad ula jeeddo.\nQor *CUSUB* haddii aad rabto macmiil cusub, ama *JOOJI*.")
+                send_whatsapp(sender_phone, "Hagaag. Ma aha macmiilkaas.\n\nQor magaca saxda ah ee macmiilka kale, ama *CUSUB* si aan u sameeyo macmiil cusub anigoo ilaalinaya magaca iyo lacagtii aad markii hore dirtay.\nQor *JOOJI* si aad u baajiso.")
                 return {"status": "customer_match_full_name_requested"}
             else:
                 send_whatsapp(sender_phone, "Fadlan ku jawaab *HAA* ama *MAYA*.")
@@ -7377,6 +7463,14 @@ async def _whatsapp_webhook_process(request: Request):
 
     # Route clear appointment requests before the generic debt-list matcher.
     local_appointment_entry = parse_local_appointment_list_request(message_text)
+    if local_appointment_entry is None:
+        local_appointment_entry = resolve_contextual_appointment_list_followup(message_text, sender_phone)
+    if local_appointment_entry and local_appointment_entry.get("filter_date"):
+        LAST_APPOINTMENT_LIST_REQUESTS[sender_phone] = {
+            "filter_date": local_appointment_entry["filter_date"],
+            "filter_type": local_appointment_entry.get("filter_type"),
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+        }
 
     # Fast read-only command matching: avoid a Gemini request for debt lists.
     fuzzy_list_requested = (
@@ -8573,7 +8667,8 @@ async def _whatsapp_webhook_process(request: Request):
 
                 if not debts_query.data:
                     if filter_date:
-                        empty_due_reply = f"✅ Ma jiraan deymo balantoodu tahay {filter_date}."
+                        date_label = "maanta" if filter_type == "today" else "berri" if filter_type == "tomorrow" else filter_date
+                        empty_due_reply = f"✅ Ma jiraan macaamiil leh ballan {date_label} ({filter_date})."
                         send_whatsapp(sender_phone, empty_due_reply)
                         remember_conversation_outcome(
                             sender_phone, message_text,
@@ -8656,7 +8751,27 @@ async def _whatsapp_webhook_process(request: Request):
                     f"${total:,.2f}"
                 )
 
-                send_whatsapp(sender_phone, message)
+                # WhatsApp long-message truncation is common on large debtor
+                # lists. Send compact pages of 10 records, retaining the full
+                # count and total on every page so users never mistake a partial
+                # page for the complete list.
+                page_size = 10
+                if len(debt_list) > page_size:
+                    total_pages = (len(debt_list) + page_size - 1) // page_size
+                    for page_index in range(total_pages):
+                        page_items = debt_list[page_index * page_size:(page_index + 1) * page_size]
+                        page_message = (
+                            f"{message_title} — Bogga {page_index + 1}/{total_pages} "
+                            f"({len(debts_query.data)} macmiil):\n\n"
+                            + "\n".join(page_items)
+                            + f"\n\n💰 Wadarta guud: ${total:,.2f}"
+                        )
+                        if wants_due_dates and overdue_count > 0 and page_index == 0:
+                            page_message = f"⚠️ {overdue_count} macmiil ayaa ballantoodii dhaaftay.\n\n" + page_message
+                        send_whatsapp(sender_phone, page_message)
+                else:
+                    send_whatsapp(sender_phone, message)
+
                 remember_conversation_outcome(
                     sender_phone, message_text,
                     f"Liiska deymaha waa la soo bandhigay ({len(debts_query.data)} macmiil)."
