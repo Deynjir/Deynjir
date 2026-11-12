@@ -253,7 +253,7 @@ def _save_persisted_workflow_sessions(sender_phone):
 def deynjir_main_menu():
     """A short, shopkeeper-first menu with an obvious first action and old-debt import."""
     return (
-        "👋 *Soo Dhawoow Deynjir!*\n\n"
+        "👋 *Soo Dhawoow*\n\n"
         "Halkan waxaad si fudud ugu diiwaangelin kartaa daymaha kaa baxa iyo kuwa kuusoo xarooda maalin kasta.\n\n "
         "*Raac tallaabooyinkan:*\n\n"
         "Deyn cusub: Taabo 1️⃣\n"
@@ -262,7 +262,7 @@ def deynjir_main_menu():
         "Raadi macmiil: Taabo 4️⃣\n"
         "Balanta maanta: Taabo 5️⃣\n"
         "Caawimaad: Taabo 6️⃣\n\n"
-        "*Si aad daymo badan halmar u wada xarayso:* soo qor *IMPORT* si aad sawir, Excel ama qoraal ahaan ugu soo geliso.\n\n"
+        "*Hadii aad rabto inaad daymo badan halmar wada xarayso:* soo qor *IMPORT* kadibna sawir, Excel ama qoraal ahaan usoo geli.\n\n"
     )
 
 def deynjir_recovery_menu_message(intro=None):
