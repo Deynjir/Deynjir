@@ -39,6 +39,12 @@ def today_eat():
     return now_eat().date()
 
 
+def default_debt_due_date(base_date=None):
+    """Default a new debt's missing due date to three calendar days later in Somalia."""
+    base = base_date or today_eat()
+    return (base + timedelta(days=3)).isoformat()
+
+
 def fetch_all_supabase_rows(query_factory, page_size=1000):
     """Fetch every matching Supabase row in stable pages, not just the first page."""
     all_rows = []
@@ -4332,6 +4338,12 @@ def _extract_import_image(image_bytes, mime_type, import_mode="debt"):
 
 
 def _stage_import(admin_phone, entries, import_mode="debt"):
+    # Apply the default before showing the preview so the shopkeeper sees the
+    # exact due dates that will be saved. Payment imports never get due dates.
+    if import_mode == "debt":
+        for item in entries:
+            if not item.get("promised_date"):
+                item["promised_date"] = default_debt_due_date()
     total = sum(item["amount"] for item in entries)
     if import_mode == "payment":
         lines = ["📋 *HORDHACA LACAG-BIXINTA*", f"Tirada lacag-bixinnada: {len(entries)}", ""]
@@ -4412,6 +4424,11 @@ def _commit_import(admin_phone, session):
     business_user_id = session["business_user_id"]
     import_mode = session.get("mode", "debt")
     session.setdefault("request_id", secrets.token_urlsafe(24))
+
+    if import_mode == "debt":
+        for item in entries:
+            if not item.get("promised_date"):
+                item["promised_date"] = default_debt_due_date()
 
     if not entries:
         raise ValueError("Liiska import-ku waa madhan yahay.")
@@ -5366,9 +5383,12 @@ async def _whatsapp_webhook_process(request: Request):
                         return {"status": "first_debt_entry_invalid"}
                     first_debt.update({"customer_name": customer_name, "amount": round(amount_value, 2), "stage": "due_date"})
                     first_debt["expires_at"] = datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL
+                    default_due_label = datetime.strptime(
+                        default_debt_due_date(), "%Y-%m-%d"
+                    ).strftime("%d/%m/%Y")
                     send_whatsapp(sender_phone,
                         f"Goorma ayuu *{customer_name}* ballan qaaday inuu lacagta bixiyo?\n\n"
-                        "Haddii uusan ballan lahayn, qor *MA HUBO*.")
+                        f"Haddii uusan ballan lahayn, qor *MA HUBO* (waxaa loo dejinayaa {default_due_label}).")
                     return {"status": "first_debt_due_date_requested"}
 
                 if stage == "due_date":
@@ -5377,10 +5397,16 @@ async def _whatsapp_webhook_process(request: Request):
                         send_whatsapp(sender_phone,
                             "Ma fahmin taariikhda. Fadlan soo qor sida *13/11/2026*, *berri*, *Jimcaha*, ama *MA HUBO* haddii uusan ballan lahayn.")
                         return {"status": "first_debt_due_date_invalid"}
-                    first_debt["promised_date"] = None if parsed_due == "none" else parsed_due.isoformat()
+                    first_debt["promised_date"] = (
+                        default_debt_due_date()
+                        if parsed_due == "none"
+                        else parsed_due.isoformat()
+                    )
                     first_debt["stage"] = "confirm"
                     first_debt["expires_at"] = datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL
-                    due_label = "-" if not first_debt["promised_date"] else parsed_due.strftime("%d/%m/%Y")
+                    due_label = datetime.strptime(
+                        first_debt["promised_date"], "%Y-%m-%d"
+                    ).strftime("%d/%m/%Y")
                     send_whatsapp(sender_phone,
                         "Hubi xogta daynta:\n\n"
                         f"• Qofka: *{first_debt['customer_name']}*\n"
@@ -5441,6 +5467,8 @@ async def _whatsapp_webhook_process(request: Request):
                                 "Fadlan isticmaal habka caadiga ah ee ku darista deynta ama la xiriir maamulka.")
                             return {"status": "first_debt_multiple_active_records"}
                         matched_customer = active_matches[0] if active_matches else None
+                        if not first_debt.get("promised_date"):
+                            first_debt["promised_date"] = default_debt_due_date()
                         write_result = _financial_rpc("record_debt_addition", {
                             "p_customer_id": str(matched_customer["id"]) if matched_customer else None,
                             "p_business_user_id": str(business_user_id),
@@ -8703,7 +8731,14 @@ async def _whatsapp_webhook_process(request: Request):
                     continue
                 if not promised_date and days_until_due is not None:
                     promised_date = (today_eat() + timedelta(days=int(days_until_due))).isoformat()
-                # Keep promised_date as None when the user did not specify a due date.
+                # Every actual new debt addition gets a three-day default when
+                # the shopkeeper did not provide an explicit due date.
+                # This is applied only to ADD entries with an amount; phone-only
+                # customer updates and PAY transactions remain unaffected.
+                if action == "ADD" and amount is not None and not promised_date:
+                    promised_date = default_debt_due_date()
+                    entry["promised_date"] = promised_date
+                    print(f"📅 No due date supplied for new debt {name!r}; defaulting to {promised_date}")
                 
                 if new_phone and not amount:
                     phone_matches = find_debtor_matches(business_user_id, name)
