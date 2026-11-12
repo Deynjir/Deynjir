@@ -4983,6 +4983,17 @@ async def _whatsapp_webhook_process(request: Request):
 
     print(f"📩 INCOMING MESSAGE TYPE: {type_message}")
     print(f"💬 EXTRACTED MESSAGE TEXT: {message_text!r}")
+    # Green-API may return either a button ID ("3") or its visible title.
+    # Normalize both forms so the same menu routing works for every response shape.
+    _button_label = str(message_text or "").strip().casefold()
+    _button_label_map = {
+        "deyn cusub": "1",
+        "dayn cusub": "1",
+        "dayn soo xarootay": "2",
+        "adeeg kale": "3",
+    }
+    message_text = _button_label_map.get(_button_label, message_text)
+
 
     # Emoji-only messages (including checkmarks/reactions) are acknowledgements,
     # not requests. Ignore them silently: never send "Fadlan Qoraal soo qor."
@@ -5555,7 +5566,7 @@ async def _whatsapp_webhook_process(request: Request):
             guided_expiry = guided_waiting.get("expires_at")
             if not guided_expiry or datetime.now(timezone.utc) > guided_expiry:
                 expired_menu_choice = (
-                    guided_waiting.get("stage") == "menu"
+                    guided_waiting.get("stage") in {"menu", "menu_other"}
                     and str(message_text or "").strip() in {"1", "2", "3", "4", "5", "6"}
                 )
                 GUIDED_SESSIONS.pop(sender_phone, None)
@@ -5594,7 +5605,10 @@ async def _whatsapp_webhook_process(request: Request):
             RENAME_SESSIONS.pop(sender_phone, None)
         direction_reply = parse_transaction_clarification(message_text)
         numeric_reply = str(message_text or "").strip()
-        guided_menu_choice = guided_waiting.get("stage") == "menu" and numeric_reply in {"1", "2", "3", "4", "5", "6"}
+        guided_menu_choice = (
+            guided_waiting.get("stage") in {"menu", "menu_other"}
+            and numeric_reply in {"1", "2", "3", "4", "5", "6"}
+        )
         guided_amount_reply = guided_waiting.get("stage") in {"debt_amount", "payment_amount"} and _guided_amount(numeric_reply) is not None
         deposit_waiting = DEPOSIT_OFFER_SESSIONS.get(sender_phone) or {}
         correction_waiting = CORRECTION_SESSIONS.get(sender_phone) or {}
@@ -5704,37 +5718,86 @@ async def _whatsapp_webhook_process(request: Request):
 
         if guided_menu_choice:
             choice = numeric_reply
-            if choice == "1":
-                GUIDED_SESSIONS[sender_phone] = {
-                    "stage": "debt_name", "transaction_type": "debt",
-                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
-                }
-                send_whatsapp(sender_phone, "Magaca macmiilka deynta lagu leeyahay?\n\nQor *JOOJI* si aad uga baxdo.")
-                return {"status": "guided_debt_name_requested"}
-            if choice == "2":
-                GUIDED_SESSIONS[sender_phone] = {
-                    "stage": "payment_name", "transaction_type": "payment",
-                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
-                }
-                send_whatsapp(sender_phone, "Magaca qofka lacagta bixiyey?\n\nQor *JOOJI* si aad uga baxdo.")
-                return {"status": "guided_payment_name_requested"}
-            if choice == "3":
-                GUIDED_SESSIONS.pop(sender_phone, None)
-                message_text = "LIISKA DAYNTA"
-            elif choice == "4":
-                GUIDED_SESSIONS[sender_phone] = {
-                    "stage": "search_name",
-                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
-                }
-                send_whatsapp(sender_phone, "Qor magaca macmiilka aad raadinayso.\n\nQor *JOOJI* si aad uga baxdo.")
-                return {"status": "guided_search_name_requested"}
-            elif choice == "5":
-                GUIDED_SESSIONS.pop(sender_phone, None)
-                message_text = "Balamaha Maanta"
-            elif choice == "6":
-                GUIDED_SESSIONS.pop(sender_phone, None)
-                send_whatsapp(sender_phone, deynjir_help_message())
-                return {"status": "help_sent"}
+            menu_stage = guided_waiting.get("stage")
+
+            # MAIN MENU: 1 = new debt, 2 = received payment, 3 = other services.
+            if menu_stage == "menu":
+                if choice == "1":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "debt_name",
+                        "transaction_type": "debt",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
+                    send_whatsapp(
+                        sender_phone,
+                        "Magaca macmiilka deynta lagu leeyahay?\\n\\n"
+                        "Qor *JOOJI* si aad uga baxdo."
+                    )
+                    return {"status": "guided_debt_name_requested"}
+
+                if choice == "2":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "payment_name",
+                        "transaction_type": "payment",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
+                    send_whatsapp(
+                        sender_phone,
+                        "Magaca qofka lacagta bixiyey?\\n\\n"
+                        "Qor *JOOJI* si aad uga baxdo."
+                    )
+                    return {"status": "guided_payment_name_requested"}
+
+                if choice == "3":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "menu_other",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+                    }
+                    send_whatsapp(sender_phone, deynjir_other_services_menu())
+                    return {"status": "other_services_menu_sent"}
+
+            # OTHER SERVICES MENU: numbers are interpreted only in this stage.
+            elif menu_stage == "menu_other":
+                if choice == "1":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    message_text = "LIISKA DAYNTA"
+
+                elif choice == "2":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "search_name",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
+                    send_whatsapp(
+                        sender_phone,
+                        "Qor magaca macmiilka aad raadinayso.\\n\\n"
+                        "Qor *JOOJI* si aad uga baxdo."
+                    )
+                    return {"status": "guided_search_name_requested"}
+
+                elif choice == "3":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    message_text = "Balamaha Maanta"
+
+                elif choice == "4":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    send_whatsapp(sender_phone, deynjir_help_message())
+                    return {"status": "help_sent"}
+
+                elif choice == "5":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    message_text = "IMPORT"
+
+                elif choice == "6":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    message_text = "LIISKA LACAG BIXINTA"
+
+                else:
+                    send_whatsapp(
+                        sender_phone,
+                        "Fadlan dooro lambar u dhexeeya 1 iyo 6.\\n\\n"
+                        + deynjir_other_services_menu()
+                    )
+                    return {"status": "other_services_invalid_choice"}
 
         # A disagreement shortly after a committed transaction opens a confirmation;
         # the bot never reverses anything based on AI classification alone.
