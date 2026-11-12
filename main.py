@@ -254,17 +254,15 @@ def deynjir_main_menu():
     """A short, shopkeeper-first menu with an obvious first action and old-debt import."""
     return (
         "👋 *Soo Dhawoow Deynjir!*\n\n"
-        "Halkan waxaad si fudud ugu diiwaangelin kartaa daymaha iyo lacagaha macaamiisha. "
-        "Waxaad u qori kartaa sida aad caadi ahaan u hadasho.\n\n"
-        "*Ku bilow hal tallaabo:*\n"
-        "1️⃣ Deyn cusub\n"
-        "2️⃣ Lacag bixin\n"
-        "3️⃣ Liiska daynta\n"
-        "4️⃣ Raadi macmiil\n"
-        "5️⃣ Ballamaha maanta\n"
-        "6️⃣ Caawimaad\n\n"
-        "*Haddii daymo hore kuu yaallaan:* qor *IMPORT* si aad sawir, Excel ama qoraal ugu soo geliso.\n\n"
-        "Dooro 1 ilaa 6, ama si toos ah u qor tusaale: *Cali $20 deyn cusub*."
+        "Halkan waxaad si fudud ugu diiwaangelin kartaa daymaha kaa baxa iyo kuwa kuusoo xarooda maalin kasta.\n\n "
+        "*Raac tallaabooyinkan:*\n"
+        "Deyn cusub Taabo 1️⃣\n"
+        "Lacag bixin Taabo 2️⃣\n"
+        "Liiska daynta Taabo 3️⃣\n"
+        "Raadi macmiil Taabo 4️⃣\n"
+        "Balanta maanta Taabo 5️⃣\n"
+        "Caawimaad Taabo 6️⃣\n\n"
+        "*Si aad daymo badan halmar uwada xarayso:* soo qor *IMPORT* si aad sawir, Excel ama qoraal ahaan ugu soo geliso.\n\n"
     )
 
 def deynjir_recovery_menu_message(intro=None):
@@ -275,14 +273,13 @@ def deynjir_recovery_menu_message(intro=None):
         lines.append("")
     lines.extend([
         "🤝 *Si aad u fahanto habka uu nidaamkani u shaqeeyo.*\n\n",
-        "Raac tallaabooyinkan:",
-        "",
-        "1️⃣  Deyn cusub",
-        "2️⃣  Lacag bixin",
-        "3️⃣  Liiska deymaha",
-        "4️⃣  Raadi macmiil",
-        "5️⃣  Ballamaha maanta",
-        "6️⃣  Caawimaad",
+        "*Raac tallaabooyinkan:*\n"
+        "Deyn cusub Taabo 1️⃣\n"
+        "Lacag bixin Taabo 2️⃣\n"
+        "Liiska daynta Taabo 3️⃣\n"
+        "Raadi macmiil Taabo 4️⃣\n"
+        "Balanta maanta Taabo 5️⃣\n"
+        "Caawimaad Taabo 6️⃣\n\n"
         "",
         "✍️ *Dooro 1-6.*",
     ])
@@ -2111,6 +2108,19 @@ def clean_extracted_customer_name(value):
     if not name:
         return None
 
+    # Strip command words accidentally included at the START of a name.
+    # Examples: "cusub Cali", "dayn Omar", "deyn cusub Axmed".
+    leading_patterns = (
+        r"^(?:deyn|dayn)\s+cusub\s+",
+        r"^(?:deyn|dayn|cusub)\s+",
+        r"^(?:lacag\s*bixin|add|pay)\s+",
+    )
+    previous = None
+    while name and name != previous:
+        previous = name
+        for pattern in leading_patterns:
+            name = re.sub(pattern, "", name, flags=re.I).strip(" ,:;.-")
+
     trailing_patterns = (
         r"\s+(?:(?:wuxuu|wuu|ayuu|ayaa|ayay|waxay|way|ayaan)\s+)?"
         r"(?:qaatay|qaadatay|qaatey|qaateen|qaaty|bixiyay|bixiyey|bixisay|"
@@ -2129,6 +2139,38 @@ def clean_extracted_customer_name(value):
     }:
         return None
     return name
+
+
+def customer_name_is_grounded_in_source(customer_name, source_message):
+    """True only when the proposed name appears contiguously in the user's message."""
+    proposed = normalize_customer_name(customer_name)
+    source = normalize_customer_name(source_message)
+    if not proposed or not source:
+        return False
+    return f" {proposed} " in f" {source} "
+
+
+def is_name_confirmation_interrupt_command(message_text):
+    """A real command interrupts name confirmation; a bare reply is a name correction."""
+    raw = " ".join(str(message_text or "").strip().split())
+    folded = normalize_customer_name(raw).strip(" .!?؟")
+    if not folded:
+        return False
+    command_prefix = (
+        r"^(?:menu|start|help|caawi|caawimaad|add|pay|deyn|dayn|"
+        r"lacag\s*bixin|import|delete|remove|tirtir|undo|dhigaal|"
+        r"liiska|raadi|raadso|search|find|history|taariikh|faahfaahin|"
+        r"report|warbixin|export|download|xusuusin|remind|"
+        r"balamaha|ballamaha|ballanta|balanta|sax|edit|rename|pdf)\b"
+    )
+    if re.match(command_prefix, folded, re.I):
+        return True
+    if parse_transaction_clarification(raw) in {"ADD", "PAY", "CANCEL"}:
+        return True
+    # A message with an amount is a new transaction, not a name-only correction.
+    if re.search(r"(?:\$\s*\d|\b\d+(?:[.,]\d{1,2})?\s*(?:usd|dollar|dollars)\b|(?<!\w)\d+(?:[.,]\d{1,2})?(?!\w))", raw, re.I):
+        return True
+    return False
 
 
 def parse_customer_phone_update(message_text):
@@ -4655,10 +4697,9 @@ def _commit_import(admin_phone, session):
 
     if shop_phone and shop_phone != admin_clean:
         business_message = (
-        "✅ *Deymo cusub ayaa lagu daray liiskaaga.*\n\n"
-        f"Dukaan: *{shop_name}*\n"
-        f"Macaamiil/deymo cusub: *{added}*\n"
-        "Qor *LIISKA DAYNTA* si aad u aragto deymaha cusub."
+        "✅ *Deyn cusub ayaa lagu daray liiskaaga.*\n\n"
+        f"Name: *{shop_name}*\n\n"
+        "soo Qor *LIISKA DAYNTA* si aad u aragto dhamaan liiska deymaha."
         )
         notification_sent = send_whatsapp(shop_phone, business_message)
         print(
@@ -5327,7 +5368,6 @@ async def _whatsapp_webhook_process(request: Request):
                     first_debt["expires_at"] = datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL
                     send_whatsapp(sender_phone,
                         f"Goorma ayuu *{customer_name}* ballan qaaday inuu lacagta bixiyo?\n\n"
-                        "Soo qor taariikhda, tusaale *13/11/2026* ama *berri*.\n"
                         "Haddii uusan ballan lahayn, qor *MA HUBO*.")
                     return {"status": "first_debt_due_date_requested"}
 
@@ -5340,7 +5380,7 @@ async def _whatsapp_webhook_process(request: Request):
                     first_debt["promised_date"] = None if parsed_due == "none" else parsed_due.isoformat()
                     first_debt["stage"] = "confirm"
                     first_debt["expires_at"] = datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL
-                    due_label = "Ballan lama sheegin" if not first_debt["promised_date"] else parsed_due.strftime("%d/%m/%Y")
+                    due_label = "-" if not first_debt["promised_date"] else parsed_due.strftime("%d/%m/%Y")
                     send_whatsapp(sender_phone,
                         "Hubi xogta daynta:\n\n"
                         f"• Qofka: *{first_debt['customer_name']}*\n"
@@ -5357,7 +5397,7 @@ async def _whatsapp_webhook_process(request: Request):
                     first_debt["customer_name"] = first_text
                     first_debt["stage"] = "confirm"
                     due = first_debt.get("promised_date")
-                    due_label = "Ballan lama sheegin" if not due else datetime.strptime(due, "%Y-%m-%d").strftime("%d/%m/%Y")
+                    due_label = "-" if not due else datetime.strptime(due, "%Y-%m-%d").strftime("%d/%m/%Y")
                     send_whatsapp(sender_phone,
                         "Hubi xogta daynta:\n\n"
                         f"• Qofka: *{first_text}*\n"
@@ -5419,7 +5459,7 @@ async def _whatsapp_webhook_process(request: Request):
                         remember_selected_customer(sender_phone, business_user_id, saved.get("name") or customer_name)
                         remember_recent_transaction(sender_phone, business_user_id, saved.get("id"), saved.get("name") or customer_name)
                         due_saved = saved.get("promised_date") or first_debt.get("promised_date")
-                        due_saved_label = "Ballan lama sheegin" if not due_saved else datetime.strptime(str(due_saved), "%Y-%m-%d").strftime("%d/%m/%Y")
+                        due_saved_label = "-" if not due_saved else datetime.strptime(str(due_saved), "%Y-%m-%d").strftime("%d/%m/%Y")
                         send_whatsapp(sender_phone,
                             f"✅ Daynta *{saved.get('name') or customer_name}* waa la diiwaangeliyey.\n"
                             f"Lacagta: *${float(saved.get('amount') or amount_value):.2f}*\n"
@@ -5490,6 +5530,13 @@ async def _whatsapp_webhook_process(request: Request):
             or re.search(r"\b(?:caawin|caawi|help)\b", normalized_inbound, re.I)
         ):
             pending_new_request = False
+        if (
+            customer_match_waiting_for_shop
+            and active_customer_match.get("stage") == "confirm_extracted_name"
+            and not is_name_confirmation_interrupt_command(message_text)
+        ):
+            # The next bare message is the requested correction, not a new search.
+            pending_new_request = False
         if rename_waiting_for_this_shop and rename_interrupt:
             RENAME_SESSIONS.pop(sender_phone, None)
         direction_reply = parse_transaction_clarification(message_text)
@@ -5521,6 +5568,11 @@ async def _whatsapp_webhook_process(request: Request):
         if pending_new_request:
             # A clearly new request replaces an unfinished guided task. Do not
             # leave it hidden in memory where it can intercept a later number.
+            if (
+                customer_match_waiting_for_shop
+                and active_customer_match.get("stage") == "confirm_extracted_name"
+            ):
+                CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
             GUIDED_SESSIONS.pop(sender_phone, None)
             PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
             print(
@@ -6699,7 +6751,11 @@ async def _whatsapp_webhook_process(request: Request):
 
     # Acknowledgements are not new financial instructions. Keep the reply short
     # and do not restart ADD/PAY after a completed transaction.
-    if not guided and is_simple_acknowledgement(guided_text):
+    active_name_confirmation = (
+        (CUSTOMER_MATCH_SESSIONS.get(sender_phone) or {}).get("business_user_id") == str(business_user_id)
+        and (CUSTOMER_MATCH_SESSIONS.get(sender_phone) or {}).get("stage") == "confirm_extracted_name"
+    )
+    if not guided and is_simple_acknowledgement(guided_text) and not active_name_confirmation:
         # Acknowledgements should not create another notification or restart a task.
         # Workflow-specific confirmations have already been handled by their owners.
         print(f"🔕 Silent acknowledgement: {guided_text!r}")
@@ -7283,7 +7339,35 @@ async def _whatsapp_webhook_process(request: Request):
         selected_name = None
         force_new = False
 
-        if stage == "choose":
+        if stage == "confirm_extracted_name":
+            proposed_name = clean_extracted_customer_name(entry.get("customer_name"))
+            if answer_folded in {"ok", "okay", "haa", "sax", "yes", "y", "1"}:
+                corrected_name = proposed_name
+            elif answer_folded in {"maya", "no", "n", "2"}:
+                send_whatsapp(
+                    sender_phone,
+                    "Fadlan qor magaca saxda ah ee macmiilka. Waxba lama diiwaangelin."
+                )
+                return {"status": "customer_name_correction_required"}
+            else:
+                corrected_name = clean_extracted_customer_name(answer)
+                if not corrected_name or len(corrected_name) > 120 or re.search(r"\d", corrected_name):
+                    send_whatsapp(
+                        sender_phone,
+                        f"Magaca waxaan u fahmay *{proposed_name or 'magac aan caddayn'}*. "
+                        "Haddii uu sax yahay soo qor *OK*; haddii kale soo qor magaca saxda ah."
+                    )
+                    return {"status": "customer_name_correction_invalid"}
+
+            if not corrected_name:
+                CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+                send_whatsapp(sender_phone, "Magaca si sax ah looma aqoonsan. Fadlan macaamilka mar kale soo dir. Waxba lama diiwaangelin.")
+                return {"status": "customer_name_confirmation_missing"}
+
+            entry["customer_name"] = corrected_name
+            entry["_customer_name_source_confirmed"] = True
+
+        elif stage == "choose":
             if answer_folded == "cusub" and customer_match_state.get("allow_new"):
                 force_new = True
             elif answer_folded == "cusub":
@@ -8484,6 +8568,42 @@ async def _whatsapp_webhook_process(request: Request):
                 return {"status": "guided_customer_name_required", "action": action, "amount_collected": amount is not None}
             send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca macmiilka ii sheeg.")
             continue
+
+        # Never save a model-supplied ADD/PAY name unless its words occur in
+        # the user's message or the user explicitly approved/corrected it.
+        if (
+            action in {"ADD", "PAY"}
+            and name
+            and not entry.get("_customer_name_source_confirmed")
+        ):
+            grounded_name = clean_extracted_customer_name(name)
+            if not grounded_name:
+                send_whatsapp(
+                    sender_phone,
+                    "Magaca macmiilka si cad uma fahmin. Fadlan mar kale ii qor magaca. Waxba lama diiwaangelin."
+                )
+                return {"status": "customer_name_not_understood"}
+            name = grounded_name
+            entry["customer_name"] = grounded_name
+            if not customer_name_is_grounded_in_source(grounded_name, message_text):
+                CUSTOMER_MATCH_SESSIONS[sender_phone] = {
+                    "business_user_id": str(business_user_id),
+                    "entry": dict(entry),
+                    "original_message": str(message_text or ""),
+                    "candidate_names": [],
+                    "stage": "confirm_extracted_name",
+                    "remaining_entries": [dict(item) for item in entries[entry_index + 1:]],
+                    "allow_new": False,
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                }
+                send_whatsapp(
+                    sender_phone,
+                    f"Magaca waxaan u fahmay *{grounded_name}*. "
+                    "Haddii uu sax yahay soo qor *OK*; haddii kale soo qor magaca saxda ah.\\n\\n"
+                    "Waxba lama diiwaangelin ilaa magaca la xaqiijiyo. Qor *JOOJI* si aad u baajiso."
+                )
+                return {"status": "customer_name_confirmation_pending"}
+
         if action in {"ADD", "PAY"} and not new_phone and (amount is None or (action == "ADD" and date_intent_without_amount)):
             date_only = promised_date if action == "ADD" else None
             if action == "ADD" and not date_only and days_until_due is not None:
