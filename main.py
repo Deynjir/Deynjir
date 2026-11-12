@@ -39,12 +39,6 @@ def today_eat():
     return now_eat().date()
 
 
-def default_debt_due_date(base_date=None):
-    """Default a new debt's missing due date to three calendar days later in Somalia."""
-    base = base_date or today_eat()
-    return (base + timedelta(days=3)).isoformat()
-
-
 def fetch_all_supabase_rows(query_factory, page_size=1000):
     """Fetch every matching Supabase row in stable pages, not just the first page."""
     all_rows = []
@@ -257,19 +251,58 @@ def _save_persisted_workflow_sessions(sender_phone):
 
 
 def deynjir_main_menu():
-    """A short, shopkeeper-first menu with an obvious first action and old-debt import."""
+    """Text fallback for the three most-used actions."""
     return (
-        "👋 *Soo Dhawoow*\n\n"
-        "Halkan waxaad si fudud ugu diiwaangelin kartaa daymaha kaa baxa iyo kuwa kuusoo xarooda maalin kasta.\n\n "
-        "*Raac tallaabooyinkan:*\n\n"
-        "Deyn cusub: Taabo 1️⃣\n"
-        "Lacag bixin: Taabo 2️⃣\n"
-        "Liiska daynta: Taabo 3️⃣\n"
-        "Raadi macmiil: Taabo 4️⃣\n"
-        "Balanta maanta: Taabo 5️⃣\n"
-        "Caawimaad: Taabo 6️⃣\n\n"
-        "*Hadii aad rabto inaad daymo badan halmar wada xarayso:* soo qor *IMPORT* kadibna sawir, Excel ama qoraal ahaan usoo geli.\n\n"
+        "👋 *Ku soo dhawoow Deynjir!*\\n\\n"
+        "Maxaad rabtaa inaad qabato?\\n\\n"
+        "1️⃣ Deyn cusub\\n"
+        "2️⃣ Dayn soo xarootay\\n"
+        "3️⃣ Adeeg kale\\n\\n"
+        "Dooro badhanka hoose ama soo dir 1, 2 ama 3."
     )
+
+
+def deynjir_other_services_menu():
+    """Long, text-based menu for secondary and supporting services."""
+    return (
+        "📋 *ADEEGYADA KALE*\\n\\n"
+        "Dooro adeegga aad rabto:\\n\\n"
+        "1️⃣ Liiska daynta\\n"
+        "2️⃣ Raadi macmiil\\n"
+        "3️⃣ Ballamaha maanta\\n"
+        "4️⃣ Caawimaad\\n"
+        "5️⃣ Soo geli daymo hore (IMPORT)\\n"
+        "6️⃣ Liiska lacag-bixinta\\n\\n"
+        "Soo dir lambarka adeegga (1–6)."
+    )
+
+
+def send_deynjir_main_menu(to_phone):
+    """Try Green-API reply buttons; fall back to the numbered text menu."""
+    clean_phone = str(to_phone).lstrip("+").split("@")[0].strip()
+    if GREEN_API_TOKEN:
+        url = f"{GREEN_API_BASE}/waInstance{INSTANCE_ID}/sendInteractiveButtonsReply/{GREEN_API_TOKEN}"
+        payload = {
+            "chatId": f"{clean_phone}@c.us",
+            "header": "Deynjir",
+            "body": "Maxaad rabtaa inaad qabato?",
+            "footer": "Dooro mid ka mid ah adeegyada",
+            "buttons": [
+                {"buttonId": "1", "buttonText": "Deyn cusub"},
+                {"buttonId": "2", "buttonText": "Dayn soo xarootay"},
+                {"buttonId": "3", "buttonText": "Adeeg kale"},
+            ],
+        }
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            print(f"📡 Green-API interactive menu: {response.status_code} - {response.text}")
+            if response.ok and response.json().get("idMessage"):
+                schedule_pending_reply_reminder(clean_phone, "Maxaad rabtaa inaad qabato?")
+                return True
+        except Exception as exc:
+            print(f"⚠️ Interactive menu unavailable; using text fallback: {exc}")
+    return send_whatsapp(to_phone, deynjir_main_menu())
+
 
 def deynjir_recovery_menu_message(intro=None):
     """Short recovery menu used when the bot is confused or an operation fails."""
@@ -2113,6 +2146,17 @@ def clean_extracted_customer_name(value):
     name = " ".join(str(value or "").strip().split())
     if not name:
         return None
+
+    # The AI may accidentally return the whole input as the name, including
+    # the amount (for example: "cusub Cali $33"). Remove a trailing amount
+    # before validating the remaining customer name. Currency markers make
+    # this safe without stripping ordinary numeric parts from names.
+    name = re.sub(
+        r"\s+(?:[$€£]|USD\s*)\s*\d+(?:[.,]\d{1,2})?\s*$",
+        "",
+        name,
+        flags=re.I,
+    ).strip(" ,:;.-")
 
     # Strip command words accidentally included at the START of a name.
     # Examples: "cusub Cali", "dayn Omar", "deyn cusub Axmed".
@@ -4338,12 +4382,6 @@ def _extract_import_image(image_bytes, mime_type, import_mode="debt"):
 
 
 def _stage_import(admin_phone, entries, import_mode="debt"):
-    # Apply the default before showing the preview so the shopkeeper sees the
-    # exact due dates that will be saved. Payment imports never get due dates.
-    if import_mode == "debt":
-        for item in entries:
-            if not item.get("promised_date"):
-                item["promised_date"] = default_debt_due_date()
     total = sum(item["amount"] for item in entries)
     if import_mode == "payment":
         lines = ["📋 *HORDHACA LACAG-BIXINTA*", f"Tirada lacag-bixinnada: {len(entries)}", ""]
@@ -4424,11 +4462,6 @@ def _commit_import(admin_phone, session):
     business_user_id = session["business_user_id"]
     import_mode = session.get("mode", "debt")
     session.setdefault("request_id", secrets.token_urlsafe(24))
-
-    if import_mode == "debt":
-        for item in entries:
-            if not item.get("promised_date"):
-                item["promised_date"] = default_debt_due_date()
 
     if not entries:
         raise ValueError("Liiska import-ku waa madhan yahay.")
@@ -4938,6 +4971,20 @@ async def _whatsapp_webhook_process(request: Request):
             # The user's actual reply text is in extendedTextMessageData.text;
             # quotedMessage contains the message being replied to, not the new text.
             message_text = message_data.get("extendedTextMessageData", {}).get("text", "")
+        elif type_message in {"interactiveButtonReply", "interactiveButtonsResponse"}:
+            reply_data = (
+                message_data.get("interactiveButtonReply")
+                or message_data.get("interactiveButtonsResponse")
+                or message_data.get("templateButtonReplyMessage")
+                or {}
+            )
+            message_text = str(
+                reply_data.get("selectedId")
+                or reply_data.get("selectedDisplayText")
+                or reply_data.get("buttonId")
+                or reply_data.get("buttonText")
+                or ""
+            )
         else:
             print(f"⚠️ Unsupported incoming message type: {type_message}")
             return {"status": "unsupported_message_type", "type_message": type_message}
@@ -5285,16 +5332,19 @@ async def _whatsapp_webhook_process(request: Request):
                     "stage": "first_successful_action",
                     "created_at": datetime.now(timezone.utc),
                 }
-            send_whatsapp(
-                applicant_phone,
-                (
-                    "🎉 *Waxaa lagugu soo daray Nidaamka Deynjir!*\n\n"
-                    "Waxaan kaa caawinayaa inaad si fudud ula socoto daymaha iyo balamaha macaamiishaada. Aan ku bilowno hal macaamil oo keliya. \n\n"
-                    "*Ii soo qor magaca qofka iyo lacagta aad ku leedahay*"
+                GUIDED_SESSIONS[applicant_phone] = {
+                    "stage": "menu",
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+                }
+                send_whatsapp(
+                    applicant_phone,
+                    "🎉 *Waxaa lagugu soo daray Nidaamka Deynjir!*\\n\\n"
+                    "Waxaan kaa caawinayaa inaad si fudud ula socoto daymaha iyo lacagaha kuu soo xarooda."
                 )
-                if new_status == "approved"
-                else "❌ Waan ka xunnahay, codsigaaga waa la diiday."
-            )
+                send_deynjir_main_menu(applicant_phone)
+            else:
+                send_whatsapp(applicant_phone, "❌ Waan ka xunnahay, codsigaaga waa la diiday.")
+
             return {"status": new_status}
 
         except Exception as approval_err:
@@ -5383,12 +5433,9 @@ async def _whatsapp_webhook_process(request: Request):
                         return {"status": "first_debt_entry_invalid"}
                     first_debt.update({"customer_name": customer_name, "amount": round(amount_value, 2), "stage": "due_date"})
                     first_debt["expires_at"] = datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL
-                    default_due_label = datetime.strptime(
-                        default_debt_due_date(), "%Y-%m-%d"
-                    ).strftime("%d/%m/%Y")
                     send_whatsapp(sender_phone,
                         f"Goorma ayuu *{customer_name}* ballan qaaday inuu lacagta bixiyo?\n\n"
-                        f"Haddii uusan ballan lahayn, qor *MA HUBO* (waxaa loo dejinayaa {default_due_label}).")
+                        "Haddii uusan ballan lahayn, qor *MA HUBO*.")
                     return {"status": "first_debt_due_date_requested"}
 
                 if stage == "due_date":
@@ -5397,16 +5444,10 @@ async def _whatsapp_webhook_process(request: Request):
                         send_whatsapp(sender_phone,
                             "Ma fahmin taariikhda. Fadlan soo qor sida *13/11/2026*, *berri*, *Jimcaha*, ama *MA HUBO* haddii uusan ballan lahayn.")
                         return {"status": "first_debt_due_date_invalid"}
-                    first_debt["promised_date"] = (
-                        default_debt_due_date()
-                        if parsed_due == "none"
-                        else parsed_due.isoformat()
-                    )
+                    first_debt["promised_date"] = None if parsed_due == "none" else parsed_due.isoformat()
                     first_debt["stage"] = "confirm"
                     first_debt["expires_at"] = datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL
-                    due_label = datetime.strptime(
-                        first_debt["promised_date"], "%Y-%m-%d"
-                    ).strftime("%d/%m/%Y")
+                    due_label = "-" if not first_debt["promised_date"] else parsed_due.strftime("%d/%m/%Y")
                     send_whatsapp(sender_phone,
                         "Hubi xogta daynta:\n\n"
                         f"• Qofka: *{first_debt['customer_name']}*\n"
@@ -5467,8 +5508,6 @@ async def _whatsapp_webhook_process(request: Request):
                                 "Fadlan isticmaal habka caadiga ah ee ku darista deynta ama la xiriir maamulka.")
                             return {"status": "first_debt_multiple_active_records"}
                         matched_customer = active_matches[0] if active_matches else None
-                        if not first_debt.get("promised_date"):
-                            first_debt["promised_date"] = default_debt_due_date()
                         write_result = _financial_rpc("record_debt_addition", {
                             "p_customer_id": str(matched_customer["id"]) if matched_customer else None,
                             "p_business_user_id": str(business_user_id),
@@ -5530,7 +5569,7 @@ async def _whatsapp_webhook_process(request: Request):
             guided_expiry = guided_waiting.get("expires_at")
             if not guided_expiry or datetime.now(timezone.utc) > guided_expiry:
                 expired_menu_choice = (
-                    guided_waiting.get("stage") == "menu"
+                    guided_waiting.get("stage") in {"menu", "menu_other"}
                     and str(message_text or "").strip() in {"1", "2", "3", "4", "5", "6"}
                 )
                 GUIDED_SESSIONS.pop(sender_phone, None)
@@ -5569,7 +5608,7 @@ async def _whatsapp_webhook_process(request: Request):
             RENAME_SESSIONS.pop(sender_phone, None)
         direction_reply = parse_transaction_clarification(message_text)
         numeric_reply = str(message_text or "").strip()
-        guided_menu_choice = guided_waiting.get("stage") == "menu" and numeric_reply in {"1", "2", "3", "4", "5", "6"}
+        guided_menu_choice = guided_waiting.get("stage") in {"menu", "menu_other"} and numeric_reply in {"1", "2", "3", "4", "5", "6"}
         guided_amount_reply = guided_waiting.get("stage") in {"debt_amount", "payment_amount"} and _guided_amount(numeric_reply) is not None
         deposit_waiting = DEPOSIT_OFFER_SESSIONS.get(sender_phone) or {}
         correction_waiting = CORRECTION_SESSIONS.get(sender_phone) or {}
@@ -6816,7 +6855,7 @@ async def _whatsapp_webhook_process(request: Request):
             "stage": "menu",
             "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
         }
-        send_whatsapp(sender_phone, deynjir_main_menu())
+        send_deynjir_main_menu(sender_phone)
         return {"status": "main_menu_sent"}
 
     if guided_text in {"GUIDED_DEBT", "GUIDED_PAYMENT"}:
@@ -6846,34 +6885,47 @@ async def _whatsapp_webhook_process(request: Request):
             guided["stage"] = "debt_name"
             guided["transaction_type"] = "debt"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-            send_whatsapp(sender_phone, "Magaca macmiilka deynta lagu leeyahay?\n\nQor *JOOJI* si aad uga baxdo.")
+            send_whatsapp(sender_phone, "Ii soo qor magaca qofka iyo lacagta aad ku leedahay.\\n\\nTusaale: *Cali $33*\\nQor *JOOJI* si aad uga baxdo.")
             return {"status": "guided_debt_name_requested"}
         if choice == "2":
             guided["stage"] = "payment_name"
             guided["transaction_type"] = "payment"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-            send_whatsapp(sender_phone, "Magaca qofka lacagta bixiyey?\n\nQor *JOOJI* si aad uga baxdo.")
+            send_whatsapp(sender_phone, "Ii soo qor magaca qofka lacagta kuu soo celiyey iyo inta uu bixiyey.\\n\\nTusaale: *Cali $20*\\nQor *JOOJI* si aad uga baxdo.")
             return {"status": "guided_payment_name_requested"}
         if choice == "3":
+            guided["stage"] = "menu_other"
+            guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL
+            send_whatsapp(sender_phone, deynjir_other_services_menu())
+            return {"status": "other_services_menu_sent"}
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        guided = None
+        message_text = guided_text
+
+    if guided and guided.get("stage") == "menu_other":
+        choice = guided_text.strip()
+        if choice == "1":
             GUIDED_SESSIONS.pop(sender_phone, None)
             message_text = "LIISKA DAYNTA"
-        elif choice == "4":
+        elif choice == "2":
             guided["stage"] = "search_name"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
             send_whatsapp(sender_phone, "Qor magaca qofka aad raadinayso.")
             return {"status": "guided_search_name_requested"}
-        elif choice == "5":
+        elif choice == "3":
             GUIDED_SESSIONS.pop(sender_phone, None)
             message_text = "Balamaha Maanta"
-        elif choice == "6":
+        elif choice == "4":
             GUIDED_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, deynjir_help_message())
             return {"status": "help_sent"}
+        elif choice == "5":
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            message_text = "IMPORT"
+        elif choice == "6":
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            message_text = "LIISKA LACAG BIXINTA"
         else:
-            # A menu session must not swallow a real text command. For example,
-            # "Ballamaha maanta" is option 5 expressed in words, not an invalid
-            # numeric choice. Clear the menu state and let normal command parsing
-            # handle the user's actual message.
             GUIDED_SESSIONS.pop(sender_phone, None)
             guided = None
             message_text = guided_text
@@ -8731,14 +8783,7 @@ async def _whatsapp_webhook_process(request: Request):
                     continue
                 if not promised_date and days_until_due is not None:
                     promised_date = (today_eat() + timedelta(days=int(days_until_due))).isoformat()
-                # Every actual new debt addition gets a three-day default when
-                # the shopkeeper did not provide an explicit due date.
-                # This is applied only to ADD entries with an amount; phone-only
-                # customer updates and PAY transactions remain unaffected.
-                if action == "ADD" and amount is not None and not promised_date:
-                    promised_date = default_debt_due_date()
-                    entry["promised_date"] = promised_date
-                    print(f"📅 No due date supplied for new debt {name!r}; defaulting to {promised_date}")
+                # Keep promised_date as None when the user did not specify a due date.
                 
                 if new_phone and not amount:
                     phone_matches = find_debtor_matches(business_user_id, name)
