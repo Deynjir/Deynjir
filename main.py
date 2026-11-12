@@ -255,14 +255,14 @@ def deynjir_main_menu():
     return (
         "👋 *Soo Dhawoow Deynjir!*\n\n"
         "Halkan waxaad si fudud ugu diiwaangelin kartaa daymaha kaa baxa iyo kuwa kuusoo xarooda maalin kasta.\n\n "
-        "*Raac tallaabooyinkan:*\n"
-        "Deyn cusub Taabo 1️⃣\n"
-        "Lacag bixin Taabo 2️⃣\n"
-        "Liiska daynta Taabo 3️⃣\n"
-        "Raadi macmiil Taabo 4️⃣\n"
-        "Balanta maanta Taabo 5️⃣\n"
-        "Caawimaad Taabo 6️⃣\n\n"
-        "*Si aad daymo badan halmar uwada xarayso:* soo qor *IMPORT* si aad sawir, Excel ama qoraal ahaan ugu soo geliso.\n\n"
+        "*Raac tallaabooyinkan:*\n\n"
+        "Deyn cusub: Taabo 1️⃣\n"
+        "Lacag bixin: Taabo 2️⃣\n"
+        "Liiska daynta: Taabo 3️⃣\n"
+        "Raadi macmiil: Taabo 4️⃣\n"
+        "Balanta maanta: Taabo 5️⃣\n"
+        "Caawimaad: Taabo 6️⃣\n\n"
+        "*Si aad daymo badan halmar u wada xarayso:* soo qor *IMPORT* si aad sawir, Excel ama qoraal ahaan ugu soo geliso.\n\n"
     )
 
 def deynjir_recovery_menu_message(intro=None):
@@ -274,12 +274,12 @@ def deynjir_recovery_menu_message(intro=None):
     lines.extend([
         "🤝 *Si aad u fahanto habka uu nidaamkani u shaqeeyo.*\n\n",
         "*Raac tallaabooyinkan:*\n"
-        "Deyn cusub Taabo 1️⃣\n"
-        "Lacag bixin Taabo 2️⃣\n"
-        "Liiska daynta Taabo 3️⃣\n"
-        "Raadi macmiil Taabo 4️⃣\n"
-        "Balanta maanta Taabo 5️⃣\n"
-        "Caawimaad Taabo 6️⃣\n\n"
+        "Deyn cusub: Taabo 1️⃣\n"
+        "Lacag bixin:Taabo 2️⃣\n"
+        "Liiska daynta: Taabo 3️⃣\n"
+        "Raadi macmiil: Taabo 4️⃣\n"
+        "Balanta maanta: Taabo 5️⃣\n"
+        "Caawimaad: Taabo 6️⃣\n\n"
         "",
         "✍️ *Dooro 1-6.*",
     ])
@@ -10345,28 +10345,20 @@ async def daily_digest(request: Request):
 
             # Include every overdue and due-today customer. No 40-item cap and
             # no "more customers" omission notice: this is the complete reminder.
-            message_lines = ["☀️ *Xasuusinta Subaxnimo* ☀️", ""]
-            if name:
-                message_lines.append(f"👤 *{name}*")
-                message_lines.append("")
-            message_lines.append(f"📅 Taariikh: {today_date.strftime('%d-%m-%Y')}")
-            message_lines.append("")
+            message_lines = ["☀️ *Xusuusinta Subaxnimo* ☀️", ""]
             if overdue_items:
                 message_lines.extend([
                     f"⚠️ *DEYMAHA BALAN DHAAFKA AH ({len(overdue_items)})*",
                     *overdue_items,
-                    f"Wadarta balan-dhaafka: ${overdue_total:,.2f}",
                     "",
                 ])
             if today_items:
                 message_lines.extend([
                     f"🔴 *BALANTA MAANTA ({len(today_items)})*",
                     *today_items,
-                    f"Wadarta maanta: ${today_total:,.2f}",
                 ])
             message_lines.extend([
                 "",
-                f"👥 Wadarta macaamiisha la xasuusinayo: {len(all_items)}",
                 f"💰 Wadarta guud: ${overdue_total + today_total:,.2f}",
             ])
 
