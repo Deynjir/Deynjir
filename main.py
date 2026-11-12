@@ -5769,7 +5769,7 @@ async def _whatsapp_webhook_process(request: Request):
                     }
                     send_whatsapp(
                         sender_phone,
-                        "Qor magaca macmiilka aad raadinayso.\\n\\n"
+                        "Qor magaca macmiilka aad raadinayso.\n\n"
                         "Qor *JOOJI* si aad uga baxdo."
                     )
                     return {"status": "guided_search_name_requested"}
@@ -5794,7 +5794,7 @@ async def _whatsapp_webhook_process(request: Request):
                 else:
                     send_whatsapp(
                         sender_phone,
-                        "Fadlan dooro lambar u dhexeeya 1 iyo 6.\\n\\n"
+                        "Fadlan dooro lambar u dhexeeya 1 iyo 6.\n\n"
                         + deynjir_other_services_menu()
                     )
                     return {"status": "other_services_invalid_choice"}
@@ -5855,7 +5855,7 @@ async def _whatsapp_webhook_process(request: Request):
                         f"Lacagta: *${float(preview.get('amount') or 0):.2f}*\n\n"
                         "*Ma rabtaa inaad ka noqoto macaamilkan?*\n\n"
                         "1️⃣ HAA — Ka noqo (UNDO)\n"
-                        "2️⃣ MAYA — Waa sax, xaree oo sii hay\n\n"
+                        "2️⃣ MAYA — Waa sax, xaree\n\n"
                         "Waxba lama beddelayo ilaa aad xaqiijiso.")
                     return {"status": "undo_confirmation_requested"}
             except Exception as preview_error:
@@ -5912,7 +5912,7 @@ async def _whatsapp_webhook_process(request: Request):
                 GUIDED_SESSIONS.pop(sender_phone, None)
             no_customer_reply = (
                 "Dhib ma leh. Hadda waxba ha gelin. Marka macmiil jiro, "
-                "ii sheeg magaciisa iyo lacagta. Waxba lama diiwaangelin."
+                "ii sheeg magaciisa iyo lacagta."
             )
             remember_conversation_outcome(sender_phone, message_text, no_customer_reply)
             send_whatsapp(sender_phone, no_customer_reply)
