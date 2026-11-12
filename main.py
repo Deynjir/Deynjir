@@ -251,35 +251,35 @@ def _save_persisted_workflow_sessions(sender_phone):
 
 
 def deynjir_main_menu():
-    """Text fallback for the three most-used actions."""
+    """Text fallback for the three main WhatsApp actions."""
     return (
-        "👋 *Ku soo dhawoow Deynjir!*\\n\\n"
-        "Maxaad rabtaa inaad qabato?\\n\\n"
-        "1️⃣ Deyn cusub\\n"
-        "2️⃣ Dayn soo xarootay\\n"
-        "3️⃣ Adeeg kale\\n\\n"
+        "👋 *Ku soo dhawoow Deynjir!*\n\n"
+        "Maxaad rabtaa inaad qabato?\n\n"
+        "1️⃣ Deyn cusub\n"
+        "2️⃣ Dayn soo xarootay\n"
+        "3️⃣ Adeeg kale\n\n"
         "Dooro badhanka hoose ama soo dir 1, 2 ama 3."
     )
 
 
 def deynjir_other_services_menu():
-    """Long, text-based menu for secondary and supporting services."""
+    """Text menu shown only after the user chooses Adeeg kale."""
     return (
-        "📋 *ADEEGYADA KALE*\\n\\n"
-        "Dooro adeegga aad rabto:\\n\\n"
-        "1️⃣ Liiska daynta\\n"
-        "2️⃣ Raadi macmiil\\n"
-        "3️⃣ Ballamaha maanta\\n"
-        "4️⃣ Caawimaad\\n"
-        "5️⃣ Soo geli daymo hore (IMPORT)\\n"
-        "6️⃣ Liiska lacag-bixinta\\n\\n"
+        "📋 *ADEEGYADA KALE*\n\n"
+        "Dooro adeegga aad rabto:\n\n"
+        "1️⃣ Liiska daynta\n"
+        "2️⃣ Raadi macmiil\n"
+        "3️⃣ Ballamaha maanta\n"
+        "4️⃣ Caawimaad\n"
+        "5️⃣ Soo geli daymo hore (IMPORT)\n"
+        "6️⃣ Liiska lacag-bixinta\n\n"
         "Soo dir lambarka adeegga (1–6)."
     )
 
 
 def send_deynjir_main_menu(to_phone):
-    """Try Green-API reply buttons; fall back to the numbered text menu."""
-    clean_phone = str(to_phone).lstrip("+").split("@")[0].strip()
+    """Send exactly three WhatsApp reply buttons; use text if API sending fails."""
+    clean_phone = str(to_phone).replace("+", "").split("@")[0].strip()
     if GREEN_API_TOKEN:
         url = f"{GREEN_API_BASE}/waInstance{INSTANCE_ID}/sendInteractiveButtonsReply/{GREEN_API_TOKEN}"
         payload = {
@@ -297,33 +297,19 @@ def send_deynjir_main_menu(to_phone):
             response = requests.post(url, json=payload, timeout=10)
             print(f"📡 Green-API interactive menu: {response.status_code} - {response.text}")
             if response.ok and response.json().get("idMessage"):
-                schedule_pending_reply_reminder(clean_phone, "Maxaad rabtaa inaad qabato?")
+                try:
+                    schedule_pending_reply_reminder(clean_phone, "Maxaad rabtaa inaad qabato?")
+                except Exception as reminder_error:
+                    print(f"⚠️ Menu reminder scheduling failed: {reminder_error}")
                 return True
         except Exception as exc:
-            print(f"⚠️ Interactive menu unavailable; using text fallback: {exc}")
+            print(f"⚠️ Interactive menu unavailable; using text fallback: {type(exc).__name__}: {exc}")
     return send_whatsapp(to_phone, deynjir_main_menu())
 
-
 def deynjir_recovery_menu_message(intro=None):
-    """Short recovery menu used when the bot is confused or an operation fails."""
-    lines = []
-    if intro:
-        lines.append(str(intro).strip())
-        lines.append("")
-    lines.extend([
-        "🤝 *Si aad u fahanto habka uu nidaamkani u shaqeeyo.*\n\n",
-        "*Raac tallaabooyinkan:*\n"
-        "Deyn cusub: Taabo 1️⃣\n"
-        "Lacag bixin:Taabo 2️⃣\n"
-        "Liiska daynta: Taabo 3️⃣\n"
-        "Raadi macmiil: Taabo 4️⃣\n"
-        "Balanta maanta: Taabo 5️⃣\n"
-        "Caawimaad: Taabo 6️⃣\n\n"
-        "",
-        "✍️ *Dooro 1-6.*",
-    ])
-    return "\n".join(lines)
-
+    """Recovery prompt aligned with the same three-choice menu routing."""
+    prefix = (str(intro).strip() + "\n\n") if intro else ""
+    return prefix + deynjir_main_menu()
 
 def deynjir_unrecognized_message():
     """One concise clarification; never display a menu or create hidden menu state."""
@@ -4976,12 +4962,15 @@ async def _whatsapp_webhook_process(request: Request):
                 message_data.get("interactiveButtonReply")
                 or message_data.get("interactiveButtonsResponse")
                 or message_data.get("templateButtonReplyMessage")
+                or message_data.get("interactiveButtonReplyMessage")
                 or {}
             )
             message_text = str(
                 reply_data.get("selectedId")
-                or reply_data.get("selectedDisplayText")
+                or reply_data.get("selectedButtonId")
                 or reply_data.get("buttonId")
+                or reply_data.get("selectedDisplayText")
+                or reply_data.get("selectedButtonText")
                 or reply_data.get("buttonText")
                 or ""
             )
@@ -5332,19 +5321,16 @@ async def _whatsapp_webhook_process(request: Request):
                     "stage": "first_successful_action",
                     "created_at": datetime.now(timezone.utc),
                 }
-                GUIDED_SESSIONS[applicant_phone] = {
-                    "stage": "menu",
-                    "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
-                }
-                send_whatsapp(
-                    applicant_phone,
-                    "🎉 *Waxaa lagugu soo daray Nidaamka Deynjir!*\\n\\n"
-                    "Waxaan kaa caawinayaa inaad si fudud ula socoto daymaha iyo lacagaha kuu soo xarooda."
+            send_whatsapp(
+                applicant_phone,
+                (
+                    "🎉 *Waxaa lagugu soo daray Nidaamka Deynjir!*\n\n"
+                    "Waxaan kaa caawinayaa inaad si fudud ula socoto daymaha iyo balamaha macaamiishaada. Aan ku bilowno hal macaamil oo keliya. \n\n"
+                    "*Ii soo qor magaca qofka iyo lacagta aad ku leedahay*"
                 )
-                send_deynjir_main_menu(applicant_phone)
-            else:
-                send_whatsapp(applicant_phone, "❌ Waan ka xunnahay, codsigaaga waa la diiday.")
-
+                if new_status == "approved"
+                else "❌ Waan ka xunnahay, codsigaaga waa la diiday."
+            )
             return {"status": new_status}
 
         except Exception as approval_err:
@@ -5569,7 +5555,7 @@ async def _whatsapp_webhook_process(request: Request):
             guided_expiry = guided_waiting.get("expires_at")
             if not guided_expiry or datetime.now(timezone.utc) > guided_expiry:
                 expired_menu_choice = (
-                    guided_waiting.get("stage") in {"menu", "menu_other"}
+                    guided_waiting.get("stage") == "menu"
                     and str(message_text or "").strip() in {"1", "2", "3", "4", "5", "6"}
                 )
                 GUIDED_SESSIONS.pop(sender_phone, None)
@@ -5608,7 +5594,7 @@ async def _whatsapp_webhook_process(request: Request):
             RENAME_SESSIONS.pop(sender_phone, None)
         direction_reply = parse_transaction_clarification(message_text)
         numeric_reply = str(message_text or "").strip()
-        guided_menu_choice = guided_waiting.get("stage") in {"menu", "menu_other"} and numeric_reply in {"1", "2", "3", "4", "5", "6"}
+        guided_menu_choice = guided_waiting.get("stage") == "menu" and numeric_reply in {"1", "2", "3", "4", "5", "6"}
         guided_amount_reply = guided_waiting.get("stage") in {"debt_amount", "payment_amount"} and _guided_amount(numeric_reply) is not None
         deposit_waiting = DEPOSIT_OFFER_SESSIONS.get(sender_phone) or {}
         correction_waiting = CORRECTION_SESSIONS.get(sender_phone) or {}
@@ -6885,22 +6871,39 @@ async def _whatsapp_webhook_process(request: Request):
             guided["stage"] = "debt_name"
             guided["transaction_type"] = "debt"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-            send_whatsapp(sender_phone, "Ii soo qor magaca qofka iyo lacagta aad ku leedahay.\\n\\nTusaale: *Cali $33*\\nQor *JOOJI* si aad uga baxdo.")
+            send_whatsapp(sender_phone, "Magaca macmiilka deynta lagu leeyahay?\n\nQor *JOOJI* si aad uga baxdo.")
             return {"status": "guided_debt_name_requested"}
         if choice == "2":
             guided["stage"] = "payment_name"
             guided["transaction_type"] = "payment"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-            send_whatsapp(sender_phone, "Ii soo qor magaca qofka lacagta kuu soo celiyey iyo inta uu bixiyey.\\n\\nTusaale: *Cali $20*\\nQor *JOOJI* si aad uga baxdo.")
+            send_whatsapp(sender_phone, "Magaca qofka lacagta bixiyey?\n\nQor *JOOJI* si aad uga baxdo.")
             return {"status": "guided_payment_name_requested"}
         if choice == "3":
             guided["stage"] = "menu_other"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL
             send_whatsapp(sender_phone, deynjir_other_services_menu())
             return {"status": "other_services_menu_sent"}
-        GUIDED_SESSIONS.pop(sender_phone, None)
-        guided = None
-        message_text = guided_text
+        elif choice == "4":
+            guided["stage"] = "search_name"
+            guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+            send_whatsapp(sender_phone, "Qor magaca qofka aad raadinayso.")
+            return {"status": "guided_search_name_requested"}
+        elif choice == "5":
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            message_text = "Balamaha Maanta"
+        elif choice == "6":
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            send_whatsapp(sender_phone, deynjir_help_message())
+            return {"status": "help_sent"}
+        else:
+            # A menu session must not swallow a real text command. For example,
+            # "Ballamaha maanta" is option 5 expressed in words, not an invalid
+            # numeric choice. Clear the menu state and let normal command parsing
+            # handle the user's actual message.
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            guided = None
+            message_text = guided_text
 
     if guided and guided.get("stage") == "menu_other":
         choice = guided_text.strip()
@@ -6926,9 +6929,8 @@ async def _whatsapp_webhook_process(request: Request):
             GUIDED_SESSIONS.pop(sender_phone, None)
             message_text = "LIISKA LACAG BIXINTA"
         else:
-            GUIDED_SESSIONS.pop(sender_phone, None)
-            guided = None
-            message_text = guided_text
+            send_whatsapp(sender_phone, "Fadlan dooro lambar u dhexeeya 1 iyo 6.\n\n" + deynjir_other_services_menu())
+            return {"status": "other_services_invalid_choice"}
 
     if guided and guided.get("stage") in {"debt_name", "payment_name"}:
         if is_simple_acknowledgement(guided_text):
@@ -7147,7 +7149,7 @@ async def _whatsapp_webhook_process(request: Request):
             "stage": "menu",
             "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
         }
-        send_whatsapp(sender_phone, "Waan kuu fududayn karaa isticmaalka Nidaamkan.\n\n" + deynjir_main_menu())
+        send_deynjir_main_menu(sender_phone)
         return {"status": "friendly_guidance_sent"}
 
     # Shop-wide payment history and date-range Excel/PDF exports.
