@@ -91,6 +91,8 @@ RENAME_SESSIONS = {}
 # Amount edits are staged and require explicit confirmation before changing a balance.
 AMOUNT_EDIT_SESSIONS = {}
 REMINDER_SESSION_TTL = timedelta(minutes=15)
+LAST_REMINDER_COMPLETED = {}
+LAST_REMINDER_COMPLETED_TTL = timedelta(minutes=5)
 # Admin-assisted imports are staged for preview and explicit confirmation.
 IMPORT_SESSIONS = {}
 PAYMENT_EXPORT_SESSIONS = {}
@@ -362,19 +364,16 @@ def send_deynjir_choice_buttons(to_phone, body, buttons, fallback_text):
 
 
 def send_deynjir_main_menu(to_phone):
-    """Always show numbered menu text, then offer the same three reply buttons."""
+    """Send the main menu once, with visible numbered choices and reply buttons."""
     clean_phone = str(to_phone).replace("+", "").split("@")[0].strip()
-    # Some WhatsApp clients display the interactive choices but hide or collapse
-    # the numbered body. Send the numbered menu as a normal text message first,
-    # so the 1/2/3 choices are always visible and usable as a fallback.
-    text_result = send_whatsapp(to_phone, deynjir_main_menu())
+    body = deynjir_main_menu()
     if GREEN_API_TOKEN:
         url = f"{GREEN_API_BASE}/waInstance{INSTANCE_ID}/sendInteractiveButtonsReply/{GREEN_API_TOKEN}"
         payload = {
             "chatId": f"{clean_phone}@c.us",
             "header": "Deynjir",
-            "body": "Fadlan dooro adeegga aad rabto:",
-            "footer": "Waxaad sidoo kale ku jawaabi kartaa 1, 2 ama 3 fariinta kore.",
+            "body": body,
+            "footer": "Dooro badhan ama ku jawaab 1, 2 ama 3.",
             "buttons": [
                 {"buttonId": "1", "buttonText": "Deyn Baxday"},
                 {"buttonId": "2", "buttonText": "Deyn soo xarootay"},
@@ -391,8 +390,9 @@ def send_deynjir_main_menu(to_phone):
                     print(f"⚠️ Menu reminder scheduling failed: {reminder_error}")
                 return True
         except Exception as exc:
-            print(f"⚠️ Interactive menu unavailable; numbered text menu was sent: {type(exc).__name__}: {exc}")
-    return text_result
+            print(f"⚠️ Interactive menu unavailable; sending one text fallback: {type(exc).__name__}: {exc}")
+    return send_whatsapp(to_phone, body)
+
 
 def deynjir_recovery_menu_message(intro=None):
     """Recovery prompt aligned with the same three-choice menu routing."""
@@ -566,6 +566,8 @@ def normalize_easy_command(value):
     aliases = {
         "inbort": "IMPORT", "inport": "IMPORT", "importi": "IMPORT",
         "menu": "MENU", "manu": "MENU", "menyu": "MENU", "menue": "MENU",
+        "menu ayaan rabaa": "MENU", "menu auaan rabaa": "MENU",
+        "menu aan rabaa": "MENU", "menu ayaan rabaa fadlan": "MENU",
         "caawi": "HELP", "caawimaad": "HELP",
         "help me": "HELP",
         "lacag bixn": "GUIDED_PAYMENT",
@@ -7455,19 +7457,14 @@ async def _whatsapp_webhook_process(request: Request):
 
     # First-time users and confused shopkeepers receive one short explanation.
     if is_somali_confusion_request(guided_text):
-        if guided and guided.get("stage") == "history_name":
-            fallback_reply = (
-                "Xisaabta macmiilku waxay muujinaysaa dayntiisa iyo lacag-bixintiisa. "
-                "Ii qor magaca macmiilka si aan kuu tuso. Tusaale: *Cali Xasan*."
-            )
-        else:
-            GUIDED_SESSIONS.pop(sender_phone, None)
-            fallback_reply = (
-                "Dhib ma leh, waan ku hagi doonaa. 😊 Tusaale ahaan, qor: Cali $20 ayuu deyn qaatay."
-            )
-        reply = generate_deynjir_conversation_reply(guided_text, fallback_reply, sender_phone)
-        send_whatsapp(sender_phone, reply or fallback_reply)
-        return {"status": "somali_usage_help_sent"}
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
+        GUIDED_SESSIONS[sender_phone] = {
+            "stage": "menu",
+            "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+        }
+        send_deynjir_main_menu(sender_phone)
+        return {"status": "confusion_routed_to_main_menu"}
 
     if is_deynjir_general_question(guided_text):
         fallback_reply = (
@@ -7522,8 +7519,29 @@ async def _whatsapp_webhook_process(request: Request):
         send_whatsapp(sender_phone, deynjir_help_message())
         return {"status": "help_sent"}
 
+    recent_reminder_completion = LAST_REMINDER_COMPLETED.get(sender_phone) or {}
+    reminder_just_completed = (
+        recent_reminder_completion.get("business_user_id") == str(business_user_id)
+        and isinstance(recent_reminder_completion.get("completed_at"), datetime)
+        and datetime.now(timezone.utc) - recent_reminder_completion["completed_at"] <= LAST_REMINDER_COMPLETED_TTL
+    )
+    if reminder_just_completed and normalize_customer_name(str(guided_text or "")).strip(" .!?؟").casefold() in {
+        "ok", "okay", "haye", "waa hagaag", "sax"
+    }:
+        LAST_REMINDER_COMPLETED.pop(sender_phone, None)
+        GUIDED_SESSIONS[sender_phone] = {
+            "stage": "menu",
+            "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+        }
+        send_deynjir_main_menu(sender_phone)
+        return {"status": "reminder_acknowledgement_returned_to_menu"}
+
     menu_words = {"menu", "start", "bilow"}
-    if guided_text.casefold() in menu_words:
+    menu_request_text = normalize_customer_name(str(guided_text or "")).strip(" .!?؟").casefold()
+    if guided_text.casefold() in menu_words or menu_request_text in {
+        "menu ayaan rabaa", "menu auaan rabaa", "menu aan rabaa",
+        "menu ayaan rabaa fadlan", "waxaan rabaa menu", "menu i sii",
+    }:
         CONVERSATION_SESSIONS.pop(sender_phone, None)
         # MENU always starts a fresh menu context, even when it interrupts an old workflow.
         GUIDED_SESSIONS.pop(sender_phone, None)
@@ -7781,7 +7799,7 @@ async def _whatsapp_webhook_process(request: Request):
             return {"status": "guided_customer_name_required"}
         if transaction_type not in {"debt", "payment"}:
             GUIDED_SESSIONS.pop(sender_phone, None)
-            send_whatsapp(sender_phone, deynjir_unrecognized_message())
+            send_deynjir_main_menu(sender_phone)
             return {"status": "guided_session_invalid"}
         GUIDED_SESSIONS.pop(sender_phone, None)
         saved_description = str(guided.get("description") or "").strip()
@@ -8676,6 +8694,10 @@ async def _whatsapp_webhook_process(request: Request):
                 f"📣 Reminder batch complete: sent={sent_count}, "
                 f"skipped={skipped_count}, failed={failed_count}"
             )
+            LAST_REMINDER_COMPLETED[sender_phone] = {
+                "business_user_id": str(business_user_id),
+                "completed_at": datetime.now(timezone.utc),
+            }
 
             return {
                 "status": "reminder_batch_complete",
@@ -9126,7 +9148,7 @@ async def _whatsapp_webhook_process(request: Request):
                         "Fadlan fariinta mar kale isku day."
                     )
                     return {"status": "gemini_rate_limited_clarification"}
-                send_whatsapp(sender_phone, deynjir_unrecognized_message())
+                send_deynjir_main_menu(sender_phone)
                 return {"status": "friendly_fallback_sent"}
 
     # Normalize action labels once, including saved clarification entries, so
@@ -9154,7 +9176,7 @@ async def _whatsapp_webhook_process(request: Request):
         ]
         if not usable_entries:
             print(f"⚠️ No usable intent extracted; message={message_text!r}; entries={entries!r}")
-            send_whatsapp(sender_phone, deynjir_unrecognized_message())
+            send_deynjir_main_menu(sender_phone)
             return {"status": "unrecognized_message"}
         entries = usable_entries
         for parsed_item in entries:
@@ -9168,7 +9190,7 @@ async def _whatsapp_webhook_process(request: Request):
             and not is_explicit_appointment_list_request(message_text)
         ):
             print(f"⚠️ Rejected LIST intent without an explicit list command: {message_text!r}")
-            send_whatsapp(sender_phone, deynjir_unrecognized_message())
+            send_deynjir_main_menu(sender_phone)
             return {"status": "unrecognized_message"}
 
         # Treat literal null-like names exactly like missing names.
@@ -9198,7 +9220,7 @@ async def _whatsapp_webhook_process(request: Request):
                     f"⚠️ Rejected empty SEARCH intent for unrecognized text: "
                     f"{message_text!r}"
                 )
-                send_whatsapp(sender_phone, deynjir_unrecognized_message())
+                send_deynjir_main_menu(sender_phone)
                 return {"status": "unrecognized_message"}
 
     # If the user answered the pending question, apply that answer to every
@@ -9653,7 +9675,7 @@ async def _whatsapp_webhook_process(request: Request):
                     str(message_text or ""), flags=re.I
                 ))
                 if clear_direction is None and not explicit_transaction_command:
-                    send_whatsapp(sender_phone, deynjir_unrecognized_message())
+                    send_deynjir_main_menu(sender_phone)
                     return {"status": "unrecognized_message"}
             send_whatsapp(sender_phone, "Waa qofkee? Fadlan magaca macmiilka ii sheeg.")
             continue
@@ -10555,7 +10577,7 @@ async def _whatsapp_webhook_process(request: Request):
                             f"⚠️ Bare-word SEARCH did not match a customer; treating as unrecognized text: "
                             f"{message_text!r}"
                         )
-                        send_whatsapp(sender_phone, deynjir_unrecognized_message())
+                        send_deynjir_main_menu(sender_phone)
                     continue
 
                 distinct_search_names = {
