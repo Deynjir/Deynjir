@@ -1378,11 +1378,11 @@ def send_top_outstanding_debtors(sender_phone, business_user_id, limit=1):
     if not ranked:
         send_whatsapp(sender_phone, "✅ Hadda ma jiraan macaamiil leh deyn furan oo la diiwaangeliyey.")
         return {"status": "no_outstanding_debtors"}
-    lines = ["🏆 *Macmiilka deynta ugu badan kugu leh*", ""]
+    lines = ["🏆 *Macmiilka ugu deynta badan*", ""]
     for index, (key, amount) in enumerate(ranked[:limit], 1):
         lines.append(f"{index}. {display_names[key]} — *${amount:,.2f}*")
     if len(ranked) > 1:
-        lines.extend(["", "Haddii aad rabto, waxaan kuu soo bandhigi karaa macaamiisha kale ee deynta ugu badan leh."])
+        lines.extend(["", "Haddii aad rabto, waxaan kuu soo bandhigi karaa macaamiisha kale ee ugu deynta badan."])
     send_whatsapp(sender_phone, "\n".join(lines))
     return {"status": "top_outstanding_debtors_sent", "count": len(ranked)}
 
@@ -8481,7 +8481,7 @@ async def _whatsapp_webhook_process(request: Request):
             if not eligible:
                 send_whatsapp(
                     sender_phone,
-                    "ℹ️ Macaamiisha deynta kugu leh midkoodna ma laha lambar WhatsApp oo sax ah. Fadlan hubi lambarada telefoonka."
+                    "ℹ️ Macaamiishaada midkoodna uma aadan diwaangein number ama ma laha WhatsApp. Fadlan hubi lambarada."
                 )
                 return {"status": "no_reminder_eligible_customers"}
 
@@ -8753,7 +8753,7 @@ async def _whatsapp_webhook_process(request: Request):
             return send_top_outstanding_debtors(sender_phone, business_user_id, limit=1)
         except Exception as ranking_error:
             print(f"❌ Outstanding-debtor ranking failed: {type(ranking_error).__name__}: {ranking_error}")
-            send_whatsapp(sender_phone, "Waan fahmay inaad rabto macaamiisha deynta ugu badan kugu leh, balse xogta hadda lama soo saari karin. Fadlan mar kale isku day.")
+            send_whatsapp(sender_phone, "Waan fahmay inaad rabto macaamiisha deynta ugu badan aad ku leedahay, balse xogta hadda lama soo saari karo. Fadlan mar kale isku day.")
             return {"status": "top_outstanding_debtors_error"}
 
     if is_natural_today_payment_question(message_text):
