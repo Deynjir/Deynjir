@@ -344,7 +344,13 @@ def send_deynjir_main_menu(to_phone):
         payload = {
             "chatId": f"{clean_phone}@c.us",
             "header": "Deynjir",
-            "body": "Maxaad rabtaa inaad qabato?",
+            "body": (
+                "Maxaad rabtaa inaad Xarayso?\n\n"
+                "1️⃣ Deyn Baxday\n"
+                "2️⃣ Deyn soo xarootay\n"
+                "3️⃣ Adeeg kale\n\n"
+                "Dooro badhamada hoose ama soo dir 1, 2 ama 3."
+            ),
             "footer": "Dooro mid ka mid ah adeegyada",
             "buttons": [
                 {"buttonId": "1", "buttonText": "Deyn Baxday"},
@@ -2408,6 +2414,79 @@ def parse_contextual_due_date_update(message_text, recent_customer_name):
         "days_until_due": None,
         "description": None,
         "_contextual_due_date_update": True,
+    }
+
+
+def parse_single_due_date_update(message_text):
+    """Parse one existing customer name followed by a due date, e.g. NAME NOV 16."""
+    raw = " ".join(str(message_text or "").strip().split())
+    if not raw or re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", raw, re.I):
+        return None
+    month_pattern = (
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?"
+    )
+    date_re = re.compile(
+        rf"(?P<date>\d{{4}}-\d{{1,2}}-\d{{1,2}}|"
+        rf"\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}}|"
+        rf"(?:{month_pattern})\s+\d{{1,2}}(?:,?\s+\d{{4}})?|"
+        rf"\d{{1,2}}\s+(?:{month_pattern})(?:\s+\d{{4}})?)\s*[.!؟]?\s*$",
+        re.I,
+    )
+    match = date_re.search(raw)
+    if not match:
+        return None
+    name = raw[:match.start()].strip(" \t\r\n,;:-")
+    name = re.sub(r"^(?:ballanta|balanta|ballan|balan|update|edit|beddel|cusboonaysii)\s+", "", name, flags=re.I).strip()
+    if not name or len(name) > 120 or not re.search(r"[A-Za-z\u0080-\uffff]", name):
+        return None
+    date_text = " ".join(match.group("date").replace(",", " ").split())
+    month_numbers = {
+        "jan": 1, "january": 1, "feb": 2, "february": 2,
+        "mar": 3, "march": 3, "apr": 4, "april": 4,
+        "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+        "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10, "nov": 11, "november": 11,
+        "dec": 12, "december": 12,
+    }
+    try:
+        if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", date_text):
+            parsed = datetime.strptime(date_text, "%Y-%m-%d").date()
+        elif re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", date_text):
+            parsed = datetime.strptime(date_text.replace("-", "/"), "%d/%m/%Y").date()
+        else:
+            parts = date_text.split()
+            year = None
+            if parts[-1].isdigit() and len(parts[-1]) == 4:
+                year = int(parts.pop())
+            if len(parts) != 2:
+                return None
+            if parts[0].isalpha():
+                month = month_numbers.get(parts[0].casefold())
+                day = int(parts[1])
+            else:
+                day = int(parts[0])
+                month = month_numbers.get(parts[1].casefold())
+            if not month or not 1 <= day <= 31:
+                return None
+            today = today_eat()
+            year = year or today.year
+            parsed = datetime(year, month, day).date()
+            if parsed < today and not (len(date_text.split()) == 3):
+                parsed = datetime(year + 1, month, day).date()
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return {
+        "action": "EDIT",
+        "customer_name": name,
+        "amount": None,
+        "new_amount": None,
+        "promised_date": parsed.isoformat(),
+        "new_date": parsed.isoformat(),
+        "days_until_due": None,
+        "description": None,
+        "_single_due_date_update": True,
     }
 
 
@@ -7721,6 +7800,9 @@ async def _whatsapp_webhook_process(request: Request):
             return {"status": "customer_match_name_correction_requested"}
         if re.fullmatch(r"(?:jooji|cancel|baaji|stop)", answer, re.I):
             CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+            if (customer_match_state.get("entry") or {}).get("_single_due_date_update") or (customer_match_state.get("entry") or {}).get("_batch_due_date_update"):
+                send_deynjir_main_menu(sender_phone)
+                return {"status": "due_date_customer_match_cancelled"}
             send_whatsapp(sender_phone, "Waa la joojiyey. Waxba lama diiwaangelin.")
             return {"status": "customer_match_cancelled"}
 
@@ -8411,6 +8493,7 @@ async def _whatsapp_webhook_process(request: Request):
     recent_selected_customer = get_recent_selected_customer(sender_phone, business_user_id)
     contextual_payment_entry = parse_contextual_somali_payment(message_text, recent_selected_customer)
     batch_due_date_entries = parse_due_date_batch(message_text)
+    single_due_date_entry = parse_single_due_date_update(message_text) if not batch_due_date_entries else None
     contextual_due_date_entry = parse_contextual_due_date_update(message_text, recent_selected_customer)
     if recent_selected_customer:
         dynamic_system_prompt += (
@@ -8464,6 +8547,9 @@ async def _whatsapp_webhook_process(request: Request):
     elif batch_due_date_entries:
         entries = batch_due_date_entries
         print(f"📅 Deterministic multi-customer due-date batch parsed: {len(entries)} entries")
+    elif single_due_date_entry:
+        entries = [single_due_date_entry]
+        print(f"📅 Deterministic single-customer due-date update parsed: {single_due_date_entry['customer_name']!r} -> {single_due_date_entry['new_date']}")
     elif contextual_due_date_entry:
         entries = [contextual_due_date_entry]
         print(
@@ -8724,7 +8810,7 @@ async def _whatsapp_webhook_process(request: Request):
                 return {"status": "pending_clarification_save_error"}
             clarification_prompt = (
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
-                "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
+                "Fadlan cadee waxa aad rabto inaad xarayso."
             )
             send_deynjir_choice_buttons(
                 sender_phone, clarification_prompt,
@@ -9810,7 +9896,20 @@ async def _whatsapp_webhook_process(request: Request):
                     # Do not select by due date if fuzzy matching returned different people.
                     distinct_names = {normalize_customer_name(row.get("name")) for row in matches}
                     if len(distinct_names) > 1:
-                        ask_for_full_name(sender_phone, matches, "EDIT")
+                        if entry.get("_single_due_date_update") or entry.get("_batch_due_date_update"):
+                            unique_rows = []
+                            seen_names = set()
+                            for candidate in matches:
+                                normalized_candidate = normalize_customer_name(candidate.get("name"))
+                                if normalized_candidate and normalized_candidate not in seen_names:
+                                    seen_names.add(normalized_candidate)
+                                    unique_rows.append(candidate)
+                            start_customer_match_session(
+                                sender_phone, business_user_id, entry, message_text,
+                                unique_rows, "choose", allow_new=False,
+                            )
+                        else:
+                            ask_for_full_name(sender_phone, matches, "EDIT")
                         continue
                     # Prefer the unique unpaid debt without a due date. Never create
                     # a new debt for a date-only message or guess between records.
@@ -10381,61 +10480,51 @@ async def _whatsapp_webhook_process(request: Request):
                     )
                     continue
 
-                csv_buffer = StringIO()
-
-                writer = csv.writer(csv_buffer)
-
-                writer.writerow([
-                    "Name",
-                    "Current Balance",
-                    "Due Date",
-                    "Phone",
-                    "Status",
-                    "Created At"
-                ])
-
+                export_rows = []
                 for debt in debts_to_export:
-                    balance = max(
-                        float(debt.get("amount") or 0),
-                        0.0
-                    )
+                    balance = max(float(debt.get("amount") or 0), 0.0)
+                    raw_due = debt.get("promised_date") or ""
+                    try:
+                        due_display = datetime.strptime(str(raw_due), "%Y-%m-%d").strftime("%d/%m/%Y") if raw_due else ""
+                    except ValueError:
+                        due_display = str(raw_due)
+                    export_rows.append({
+                        "Magaca": debt.get("name") or "",
+                        "Lacagta ($)": round(balance, 2),
+                        "Ballanta": due_display,
+                        "Telefoonka": debt.get("phone_number") or "",
+                    })
 
-                    status = (
-                        "PAID"
-                        if debt.get("is_paid") is True
-                        or balance <= 0
-                        else "UNPAID"
-                    )
-
-                    writer.writerow([
-                        debt.get("name", ""),
-                        f"{balance:.2f}",
-                        debt.get("promised_date") or "",
-                        debt.get("phone_number") or "",
-                        status,
-                        debt.get("created_at") or ""
-                    ])
-
-                csv_content = (
-                    csv_buffer
-                    .getvalue()
-                    .encode("utf-8-sig")
+                export_frame = pd.DataFrame(
+                    export_rows,
+                    columns=["Magaca", "Lacagta ($)", "Ballanta", "Telefoonka"],
                 )
+                excel_buffer = BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    export_frame.to_excel(writer, index=False, sheet_name="Liiska daynta")
+                    sheet = writer.sheets["Liiska daynta"]
+                    sheet.freeze_panes = "A2"
+                    sheet.auto_filter.ref = sheet.dimensions
+                    for column, width in {"A": 32, "B": 16, "C": 18, "D": 22}.items():
+                        sheet.column_dimensions[column].width = width
+                    for cell in sheet["B"][1:]:
+                        cell.number_format = '#,##0.00'
 
+                excel_content = excel_buffer.getvalue()
                 sent = send_whatsapp_file(
                     sender_phone,
-                    f"daynjir_debts_{today_eat().isoformat()}.csv",
-                    csv_content,
-                    "text/csv",
-                    f"📥 Deymaha la dhoofiyay: "
-                    f"{len(debts_to_export)} diiwaan"
+                    f"deynjir_liiska_daynta_{today_eat().isoformat()}.xlsx",
+                    excel_content,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    f"📥 Liiska daynta Excel: {len(debts_to_export)} diiwaan",
                 )
 
                 if not sent:
                     send_whatsapp(
                         sender_phone,
-                        "❌ Faylka CSV lama dirin."
+                        "❌ Faylka Excel lama dirin."
                     )
+
 
             except Exception as e:
                 print(
@@ -10444,7 +10533,7 @@ async def _whatsapp_webhook_process(request: Request):
 
                 send_whatsapp(
                     sender_phone,
-                    "❌ Dhoofinta CSV way fashilantay. "
+                    "❌ Dhoofinta Excel way fashilantay. "
                     "Hubi server logs-ka."
                 )
 
