@@ -254,58 +254,59 @@ def deynjir_main_menu():
     """Text fallback for the three main WhatsApp actions."""
     return (
         "👋 *Ku soo dhawoow Deynjir!*\n\n"
-        "Maxaad rabtaa inaad qabato?\n\n"
-        "1️⃣ Deyn cusub\n"
-        "2️⃣ Dayn soo xarootay\n"
+        "Maxaad rabtaa inaad Xarayso\n\n"
+        "1️⃣ Deyn Baxday\n"
+        "2️⃣ Deyn soo xarootay\n"
         "3️⃣ Adeeg kale\n\n"
-        "Dooro badhanka hoose ama soo dir 1, 2 ama 3."
+        "Dooro badhamada hoose ama soo dir 1, 2 ama 3."
     )
 
 
 def deynjir_other_services_menu():
-    """Text menu shown only after the user chooses Adeeg kale."""
+    """Text fallback for services page 1; numbering matches the active router."""
     return (
-        "📋 *ADEEGYADA KALE*\n\n"
+        "📋 *ADEEGYADA KALE (1/3)*\n\n"
         "Dooro adeegga aad rabto:\n\n"
         "1️⃣ Liiska daynta\n"
         "2️⃣ Raadi macmiil\n"
-        "3️⃣ Ballamaha maanta\n"
-        "4️⃣ Caawimaad\n"
-        "5️⃣ Soo geli daymo hore (IMPORT)\n"
-        "6️⃣ Liiska lacag-bixinta\n\n"
-        "Soo dir lambarka adeegga (1–6)."
+        "3️⃣ Adeegyada xiga\n\n"
+        "Soo dir 1, 2 ama 3."
     )
 
 
 def send_deynjir_other_services_menu(to_phone, page=1):
-    """Send the six services across three WhatsApp-compatible button pages."""
+    """Send the requested three-page services menu using up to three reply buttons."""
     pages = {
         1: (
             "📋 ADEEGYADA KALE (1/3)\n\nDooro adeegga:",
             [("OTHER_DEBT_LIST", "Liiska daynta"),
              ("OTHER_SEARCH", "Raadi macmiil"),
-             ("OTHER_NEXT", "Adeegyada xiga")],
+             ("OTHER_NEXT_1", "Adeegyada xiga")],
             "1️⃣ Liiska daynta\n2️⃣ Raadi macmiil\n3️⃣ Adeegyada xiga"
         ),
         2: (
             "📋 ADEEGYADA KALE (2/3)\n\nDooro adeegga:",
             [("OTHER_APPOINTMENTS", "Ballamaha maanta"),
-             ("OTHER_HELP", "Caawimaad"),
-             ("OTHER_NEXT", "Adeegyada xiga")],
-            "3️⃣ Ballamaha maanta\n4️⃣ Caawimaad\n5️⃣ Adeegyada xiga"
+             ("OTHER_PAYMENTS", "Liiska lacag-bixinta"),
+             ("OTHER_NEXT_2", "Bogga xiga")],
+            "4️⃣ Ballamaha maanta\n5️⃣ Liiska lacag-bixinta\n6️⃣ Bogga xiga"
         ),
         3: (
             "📋 ADEEGYADA KALE (3/3)\n\nDooro adeegga:",
-            [("OTHER_IMPORT", "Soo geli daymo hore"),
-             ("OTHER_PAYMENTS", "Liiska lacag-bixinta"),
-             ("OTHER_BACK", "Ku noqo adeegyada hore")],
-            "5️⃣ Soo geli daymo hore (IMPORT)\n6️⃣ Liiska lacag-bixinta\n7️⃣ Ku noqo"
+            [("OTHER_IMPORT", "IMPORT — Deymo hore"),
+             ("OTHER_HELP", "Caawimaad"),
+             ("OTHER_BACK", "Dib u noqo")],
+            "7️⃣ IMPORT — Deymo hore\n8️⃣ Caawimaad\n9️⃣ Dib u noqo"
         ),
     }
     body, buttons, fallback_lines = pages.get(page, pages[1])
+    # Include numbered choices in the interactive message itself as well as
+    # the API-failure fallback. This covers clients that accept the API request
+    # but fail to display its reply buttons.
+    visible_body = body + "\n\n" + fallback_lines + "\n\nSoo dir lambarka adeegga."
     return send_deynjir_choice_buttons(
-        to_phone, body, buttons,
-        fallback_lines + "\n\nSoo dir lambarka adeegga."
+        to_phone, visible_body, buttons,
+        visible_body
     )
 
 
@@ -318,7 +319,7 @@ def send_deynjir_choice_buttons(to_phone, body, buttons, fallback_text):
             "chatId": f"{clean_phone}@c.us",
             "header": "Deynjir",
             "body": body,
-            "footer": "Dooro badhanka hoose",
+            "footer": "Dooro badhamada hoose",
             "buttons": [
                 {"buttonId": str(button_id), "buttonText": str(button_text)}
                 for button_id, button_text in buttons
@@ -346,7 +347,7 @@ def send_deynjir_main_menu(to_phone):
             "body": "Maxaad rabtaa inaad qabato?",
             "footer": "Dooro mid ka mid ah adeegyada",
             "buttons": [
-                {"buttonId": "1", "buttonText": "Deyn cusub"},
+                {"buttonId": "1", "buttonText": "Deyn Baxday"},
                 {"buttonId": "2", "buttonText": "Dayn soo xarootay"},
                 {"buttonId": "3", "buttonText": "Adeeg kale"},
             ],
@@ -356,7 +357,7 @@ def send_deynjir_main_menu(to_phone):
             print(f"📡 Green-API interactive menu: {response.status_code} - {response.text}")
             if response.ok and response.json().get("idMessage"):
                 try:
-                    schedule_pending_reply_reminder(clean_phone, "Maxaad rabtaa inaad qabato?")
+                    schedule_pending_reply_reminder(clean_phone, "Maxaad rabtaa inaad xarayso?")
                 except Exception as reminder_error:
                     print(f"⚠️ Menu reminder scheduling failed: {reminder_error}")
                 return True
@@ -2408,6 +2409,98 @@ def parse_contextual_due_date_update(message_text, recent_customer_name):
         "description": None,
         "_contextual_due_date_update": True,
     }
+
+
+def parse_due_date_batch(message_text):
+    """Parse 2+ explicit customer/date pairs without relying on Gemini.
+
+    Numeric dates are DD/MM/YYYY. Month-name dates may omit the year; in that
+    case the next upcoming occurrence is selected. Returns None unless at
+    least two complete name/date pairs are present.
+    """
+    raw = str(message_text or "").strip()
+    if not raw or re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", raw, re.I):
+        return None
+    month_pattern = (
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?"
+    )
+    date_pattern = re.compile(
+        rf"(?<!\w)(?P<date>"
+        rf"\d{{4}}-\d{{1,2}}-\d{{1,2}}|"
+        rf"\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}}|"
+        rf"(?:{month_pattern})\s+\d{{1,2}}(?:,?\s+\d{{4}})?|"
+        rf"\d{{1,2}}\s+(?:{month_pattern})(?:\s+\d{{4}})?"
+        rf")(?!\w)",
+        re.I,
+    )
+    month_numbers = {
+        "jan": 1, "january": 1, "feb": 2, "february": 2,
+        "mar": 3, "march": 3, "apr": 4, "april": 4,
+        "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+        "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10, "nov": 11, "november": 11,
+        "dec": 12, "december": 12,
+    }
+
+    def parse_one_date(value):
+        value = " ".join(str(value).replace(",", " ").split())
+        if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", value):
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", value):
+            return datetime.strptime(value.replace("-", "/"), "%d/%m/%Y").date()
+        parts = value.split()
+        year = None
+        if parts and parts[-1].isdigit() and len(parts[-1]) == 4:
+            year = int(parts.pop())
+        if len(parts) != 2:
+            return None
+        if parts[0].isalpha():
+            month = month_numbers.get(parts[0].casefold())
+            day = int(parts[1])
+        else:
+            day = int(parts[0])
+            month = month_numbers.get(parts[1].casefold())
+        if not month or not 1 <= day <= 31:
+            return None
+        today = today_eat()
+        year = year or today.year
+        parsed = datetime(year, month, day).date()
+        if not parts or year != today.year or parsed >= today:
+            return parsed
+        return datetime(year + 1, month, day).date()
+
+    matches = list(date_pattern.finditer(raw))
+    if len(matches) < 2:
+        return None
+    entries = []
+    cursor = 0
+    for match in matches:
+        name = raw[cursor:match.start()].strip(" \t\r\n,;:-")
+        name = re.sub(r"^(?:ballanta|balanta|ballan|balan|update|edit)\s+", "", name, flags=re.I).strip()
+        try:
+            parsed_date = parse_one_date(match.group("date"))
+        except (ValueError, TypeError, OverflowError):
+            return None
+        if not name or len(name) > 120 or not re.search(r"[A-Za-z\u0080-\uffff]", name) or parsed_date is None:
+            return None
+        entries.append({
+            "action": "EDIT",
+            "customer_name": name,
+            "amount": None,
+            "new_amount": None,
+            "promised_date": parsed_date.isoformat(),
+            "new_date": parsed_date.isoformat(),
+            "days_until_due": None,
+            "description": None,
+            "_batch_due_date_update": True,
+        })
+        cursor = match.end()
+    # Only accept the entire message as a sequence of name/date pairs.
+    if len(entries) < 2 or raw[cursor:].strip(" \t\r\n,;.!?"):
+        return None
+    return entries
 
 
 def is_explicit_due_date_change(message_text):
@@ -4916,10 +5009,10 @@ async def _whatsapp_webhook_process(request: Request):
             IMPORT_SESSIONS.pop(sender_phone, None)
             import_state = None
         if import_state is None:
-            send_whatsapp(sender_phone, "Waan arkay faylkaaga. Si aan u akhriyo, marka hore qor *IMPORT*, kadib dooro *DEYN* ama *LACAG BIXIN*, markaa soo dir faylka. Hada Waxba lama kaydin.")
+            send_whatsapp(sender_phone, "Waan arkay faylkaaga. Si aan u akhriyo, marka hore dooro *IMPORT*, kadib dooro *DEYN*, markaa soo dir faylka. Hada Waxba lama kaydin.")
             return {"status": "import_session_required"}
-        if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
-            send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
+        if IMPORT_SESSIONS[sender_phone].get("mode") != "debt":
+            send_whatsapp(sender_phone, "Marka hore dooro *DEYN* ama *JOOJI*.")
             return {"status": "import_mode_required"}
         try:
             doc = message_data.get("fileMessageData", {})
@@ -4970,10 +5063,10 @@ async def _whatsapp_webhook_process(request: Request):
             IMPORT_SESSIONS.pop(sender_phone, None)
             import_state = None
         if import_state is None:
-            send_whatsapp(sender_phone, "Waan arkay sawirkaaga. Si aan u akhriyo, marka hore soo Qor *IMPORT*, kadib dooro *DEYN* ama *LACAG BIXIN*.")
+            send_whatsapp(sender_phone, "Waan arkay sawirkaaga. Si aan u akhriyo, marka hore dooro *IMPORT*, kadib dooro *DEYN*.")
             return {"status": "import_session_required"}
-        if IMPORT_SESSIONS[sender_phone].get("mode") not in {"debt", "payment"}:
-            send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
+        if IMPORT_SESSIONS[sender_phone].get("mode") != "debt":
+            send_whatsapp(sender_phone, "Marka hore dooro *DEYN* ama *JOOJI*.")
             return {"status": "import_mode_required"}
         try:
             image_data = message_data.get("imageMessageData") or message_data.get("fileMessageData", {})
@@ -5065,13 +5158,15 @@ async def _whatsapp_webhook_process(request: Request):
         "undo_no": "2", "maya, iska daa": "2", "maya iska daa": "2",
         "other_debt_list": "1", "liiska daynta": "1",
         "other_search": "2", "raadi macmiil": "2",
-        "other_appointments": "3", "ballamaha maanta": "3",
-        "other_help": "4", "caawimaad": "4",
-        "other_import": "5", "soo geli daymo hore": "5",
-        "other_payments": "6", "liiska lacag-bixinta": "6",
-        "other_next": "7", "adeegyada xiga": "7", "other_back": "8", "ku noqo adeegyada hore": "8",
+        "other_next_1": "3", "adeegyada xiga": "3",
+        "other_appointments": "4", "ballamaha maanta": "4",
+        "other_payments": "5", "liiska lacag-bixinta": "5",
+        "other_next_2": "6", "bogga xiga": "6",
+        "other_import": "7", "import — deymo hore": "7", "soo geli daymo hore": "7",
+        "other_help": "8", "caawimaad": "8",
+        "other_back": "9", "dib u noqo": "9",
         "import_mode_debt": "DEYN", "deyn": "DEYN",
-        "import_mode_payment": "LACAG BIXIN", "lacag-bixin": "LACAG BIXIN",
+        "import_mode_cancel": "CANCEL", "jooji": "CANCEL",
         "import_confirm_ok": "OK", "ok": "OK",
         "import_confirm_cancel": "CANCEL", "cancel": "CANCEL",
     }
@@ -5173,11 +5268,12 @@ async def _whatsapp_webhook_process(request: Request):
     ):
         if re.fullmatch(r"\s*(?:CANCEL|JOOJI|BAAJI)\s*", import_text, re.I) and sender_phone in IMPORT_SESSIONS:
             IMPORT_SESSIONS.pop(sender_phone, None)
-            activate_guided_menu(sender_phone)
-            send_whatsapp(
-                sender_phone,
-                deynjir_recovery_menu_message("✅ Import-ka waa la joojiyey. Waxba lama kaydin.")
-            )
+            GUIDED_SESSIONS[sender_phone] = {
+                "stage": "menu_other_page3",
+                "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+            }
+            send_whatsapp(sender_phone, "✅ Import-ka waa la joojiyey. Waxba lama kaydin.")
+            send_deynjir_other_services_menu(sender_phone, page=3)
             return {"status": "import_cancelled"}
         session_for_choice = IMPORT_SESSIONS.get(sender_phone)
         if session_for_choice and session_for_choice.get("stage") == "duplicate_choice":
@@ -5267,11 +5363,11 @@ async def _whatsapp_webhook_process(request: Request):
                     "entries": None, "mode": None, "request_id": secrets.token_urlsafe(24),
                     "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
                 }
-                mode_prompt = f"✅ Magaca: {own_shop.get('name') or sender_phone}.\n\nMaxaad rabtaa inaad soo xarayso?"
+                mode_prompt = f"✅ Magaca: {own_shop.get('name') or sender_phone}.\n\nSoo geli deymaha hore?\n\nDooro *DEYN* ama *JOOJI*."
                 send_deynjir_choice_buttons(
                     sender_phone, mode_prompt,
-                    [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_PAYMENT", "LACAG BIXIN")],
-                    mode_prompt + "\n\n*DEYN* — deymo cusub.\n*LACAG BIXIN* — Deyn soo xarootay.\n\nKadib ii soo dir qoraal, Excel/CSV ama sawir."
+                    [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_CANCEL", "JOOJI")],
+                    mode_prompt + "\n\nDooro *DEYN* si aad u sii waddo ama *JOOJI* si aad uga baxdo."
                 )
                 return {"status": "import_own_shop_selected"}
             except Exception as exc:
@@ -5299,11 +5395,11 @@ async def _whatsapp_webhook_process(request: Request):
                 IMPORT_SESSIONS[sender_phone] = {"business_user_id": shop["id"], "shop_phone": target_phone,
                     "shop_name": shop.get("name") or target_phone, "entries": None, "mode": None,
                     "request_id": secrets.token_urlsafe(24), "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL}
-                mode_prompt = f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\n\nMaxaad rabtaa inaad soo geliso?"
+                mode_prompt = f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\n\nSoo geli deymaha hore?\n\nDooro *DEYN* ama *JOOJI*."
                 send_deynjir_choice_buttons(
                     sender_phone, mode_prompt,
-                    [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_PAYMENT", "LACAG BIXIN")],
-                    mode_prompt + "\n\n*DEYN* — deymo cusub.\n*LACAG BIXIN* — lacagaha laga bixiyay deymaha jira.\n\nKadib ii soo dir qoraal, Excel/CSV ama sawir."
+                    [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_CANCEL", "JOOJI")],
+                    mode_prompt + "\n\nDooro *DEYN* si aad u sii waddo ama *JOOJI* si aad uga baxdo."
                 )
                 return {"status": "import_shop_selected"}
             except Exception as exc:
@@ -5323,14 +5419,15 @@ async def _whatsapp_webhook_process(request: Request):
                 active_import["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
                 send_whatsapp(sender_phone, "✅ Waxaad dooratay *DEYN*. Soo dir liiska deynta qoraal ahaan, Excel/CSV ama sawir ahaan.")
                 return {"status": "import_mode_debt_selected"}
-            if mode_choice in {"lacag bixin", "lacag bixinta", "payment", "payments", "bixin"}:
-                active_import["mode"] = "payment"
-                active_import["entries"] = None
-                active_import["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
-                send_whatsapp(sender_phone, "✅ Waxaad dooratay *LACAG BIXIN*. Soo dir magacyada macaamiisha iyo lacagta ay bixiyeen, qoraal ahaan, Excel/CSV ama sawir ahaan. Lacagtu waxay ka go'aysaa deynta hadda u furan.")
-                return {"status": "import_mode_payment_selected"}
-            if active_import.get("mode") not in {"debt", "payment"}:
-                send_whatsapp(sender_phone, "Marka hore dooro nooca import-ka: qor *DEYN* ama *LACAG BIXIN*.")
+            if mode_choice in {"cancel", "jooji", "baaji"}:
+                IMPORT_SESSIONS.pop(sender_phone, None)
+                activate_guided_menu(sender_phone)
+                GUIDED_SESSIONS[sender_phone]["stage"] = "menu_other_page3"
+                send_whatsapp(sender_phone, "✅ Import-ka waa la joojiyey. Waxba lama kaydin.")
+                send_deynjir_other_services_menu(sender_phone, page=3)
+                return {"status": "import_mode_cancelled"}
+            if active_import.get("mode") != "debt":
+                send_whatsapp(sender_phone, "Dooro *DEYN* si aad u soo geliso deymaha hore, ama *JOOJI* si aad uga baxdo.")
                 return {"status": "import_mode_required"}
             if re.fullmatch(r"\s*OK\s*", import_text, re.I):
                 pass
@@ -5856,82 +5953,38 @@ async def _whatsapp_webhook_process(request: Request):
                     send_deynjir_other_services_menu(sender_phone)
                     return {"status": "other_services_menu_sent"}
 
-            # OTHER SERVICES MENU: numbers are interpreted only in this stage.
+            # OTHER SERVICES MENU: page-specific choices; button IDs and typed numbers
+            # are normalized to the same values above.
             elif menu_stage == "menu_other":
-                if choice == "7":
+                if choice == "1":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    message_text = "LIISKA DAYNTA"
+                elif choice == "2":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "search_name",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
+                    send_whatsapp(sender_phone, "Qor magaca macmiilka aad raadinayso.\n\nQor *JOOJI* si aad uga baxdo.")
+                    return {"status": "guided_search_name_requested"}
+                elif choice == "3":
                     GUIDED_SESSIONS[sender_phone] = {
                         "stage": "menu_other_page2",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
                     }
                     send_deynjir_other_services_menu(sender_phone, page=2)
                     return {"status": "other_services_page_two_sent"}
-                if choice == "1":
-                    GUIDED_SESSIONS.pop(sender_phone, None)
-                    message_text = "LIISKA DAYNTA"
-
-                elif choice == "2":
-                    GUIDED_SESSIONS[sender_phone] = {
-                        "stage": "search_name",
-                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
-                    }
-                    send_whatsapp(
-                        sender_phone,
-                        "Qor magaca macmiilka aad raadinayso.\n\n"
-                        "Qor *JOOJI* si aad uga baxdo."
-                    )
-                    return {"status": "guided_search_name_requested"}
-
-                elif choice == "3":
-                    GUIDED_SESSIONS.pop(sender_phone, None)
-                    message_text = "Balamaha Maanta"
-
-                elif choice == "4":
-                    GUIDED_SESSIONS.pop(sender_phone, None)
-                    send_whatsapp(sender_phone, deynjir_help_message())
-                    return {"status": "help_sent"}
-
-                elif choice == "5":
-                    # Start import directly: the import router runs earlier in this webhook.
-                    GUIDED_SESSIONS.pop(sender_phone, None)
-                    shop_name = str((business_user or {}).get("name") or sender_phone)
-                    IMPORT_SESSIONS[sender_phone] = {
-                        "business_user_id": str(business_user_id),
-                        "shop_phone": sender_phone,
-                        "shop_name": shop_name,
-                        "entries": None,
-                        "mode": None,
-                        "request_id": secrets.token_urlsafe(24),
-                        "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
-                    }
-                    mode_prompt = f"✅ Magaca: {shop_name}.\n\nMaxaad rabtaa inaad soo xarayso?"
-                    send_deynjir_choice_buttons(
-                        sender_phone, mode_prompt,
-                        [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_PAYMENT", "LACAG BIXIN")],
-                        mode_prompt + "\n\n*DEYN* — deymo cusub.\n*LACAG BIXIN* — Deyn soo xarootay.\n\nKadib ii soo dir qoraal, Excel/CSV ama sawir."
-                    )
-                    return {"status": "menu_import_started"}
-
-                elif choice == "6":
-                    GUIDED_SESSIONS.pop(sender_phone, None)
-                    message_text = "LIISKA LACAG BIXINTA"
-
                 else:
-                    send_whatsapp(
-                        sender_phone,
-                        "Fadlan dooro lambar u dhexeeya 1 iyo 6.\n\n"
-                    )
                     send_deynjir_other_services_menu(sender_phone, page=1)
                     return {"status": "other_services_invalid_choice"}
 
             elif menu_stage == "menu_other_page2":
-                if choice == "3":
+                if choice == "4":
                     GUIDED_SESSIONS.pop(sender_phone, None)
                     message_text = "Balamaha Maanta"
-                elif choice == "4":
+                elif choice == "5":
                     GUIDED_SESSIONS.pop(sender_phone, None)
-                    send_whatsapp(sender_phone, deynjir_help_message())
-                    return {"status": "help_sent"}
-                elif choice == "7":
+                    message_text = "LIISKA LACAG BIXINTA"
+                elif choice == "6":
                     GUIDED_SESSIONS[sender_phone] = {
                         "stage": "menu_other_page3",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
@@ -5943,7 +5996,7 @@ async def _whatsapp_webhook_process(request: Request):
                     return {"status": "other_services_invalid_choice"}
 
             elif menu_stage == "menu_other_page3":
-                if choice == "5":
+                if choice == "7":
                     GUIDED_SESSIONS.pop(sender_phone, None)
                     shop_name = str((business_user or {}).get("name") or sender_phone)
                     IMPORT_SESSIONS[sender_phone] = {
@@ -5955,23 +6008,24 @@ async def _whatsapp_webhook_process(request: Request):
                         "request_id": secrets.token_urlsafe(24),
                         "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
                     }
-                    mode_prompt = f"✅ Magaca: {shop_name}.\n\nMaxaad rabtaa inaad soo xarayso?"
+                    mode_prompt = f"✅ Magaca: {shop_name}.\n\nMa rabtaa inaad soo geliso deymaha hore?\n\nDooro *DEYN* si aad u sii waddo ama *JOOJI* si aad uga baxdo."
                     send_deynjir_choice_buttons(
                         sender_phone, mode_prompt,
-                        [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_PAYMENT", "LACAG BIXIN")],
-                        mode_prompt + "\\n\\n*DEYN* — deymo cusub.\\n*LACAG BIXIN* — Deyn soo xarootay.\\n\\nKadib ii soo dir qoraal, Excel/CSV ama sawir."
+                        [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_CANCEL", "JOOJI")],
+                        mode_prompt + "\n\nDooro *DEYN* si aad u sii waddo ama *JOOJI* si aad uga baxdo."
                     )
                     return {"status": "menu_import_started"}
-                if choice == "6":
-                    GUIDED_SESSIONS.pop(sender_phone, None)
-                    message_text = "LIISKA LACAG BIXINTA"
                 elif choice == "8":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    send_whatsapp(sender_phone, deynjir_help_message())
+                    return {"status": "help_sent"}
+                elif choice == "9":
                     GUIDED_SESSIONS[sender_phone] = {
                         "stage": "menu",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
                     }
-                    send_deynjir_other_services_menu(sender_phone, page=1)
-                    return {"status": "other_services_page_one_sent"}
+                    send_deynjir_main_menu(sender_phone)
+                    return {"status": "main_menu_returned_from_other_services"}
                 else:
                     send_deynjir_other_services_menu(sender_phone, page=3)
                     return {"status": "other_services_invalid_choice"}
@@ -7184,7 +7238,7 @@ async def _whatsapp_webhook_process(request: Request):
             GUIDED_SESSIONS.pop(sender_phone, None)
             message_text = "LIISKA LACAG BIXINTA"
         else:
-            send_whatsapp(sender_phone, "Fadlan dooro lambar u dhexeeya 1 iyo 6.\n\n" + deynjir_other_services_menu())
+            send_whatsapp(sender_phone, "Fadlan dooro 1, 2 ama 3.\n\n" + deynjir_other_services_menu())
             return {"status": "other_services_invalid_choice"}
 
     if guided and guided.get("stage") in {"debt_name", "payment_name"}:
@@ -8356,6 +8410,7 @@ async def _whatsapp_webhook_process(request: Request):
     )
     recent_selected_customer = get_recent_selected_customer(sender_phone, business_user_id)
     contextual_payment_entry = parse_contextual_somali_payment(message_text, recent_selected_customer)
+    batch_due_date_entries = parse_due_date_batch(message_text)
     contextual_due_date_entry = parse_contextual_due_date_update(message_text, recent_selected_customer)
     if recent_selected_customer:
         dynamic_system_prompt += (
@@ -8406,6 +8461,9 @@ async def _whatsapp_webhook_process(request: Request):
         print(f"📱 Customer phone-only update parsed locally: {entries[0]['customer_name']!r}; skipping Gemini")
     elif forced_transaction_action:
         print(f"🔁 Using saved entries with confirmed action {forced_transaction_action}")
+    elif batch_due_date_entries:
+        entries = batch_due_date_entries
+        print(f"📅 Deterministic multi-customer due-date batch parsed: {len(entries)} entries")
     elif contextual_due_date_entry:
         entries = [contextual_due_date_entry]
         print(
@@ -8796,6 +8854,66 @@ async def _whatsapp_webhook_process(request: Request):
                     parsed_entry["new_date"] = parsed_entry.get("promised_date")
                 parsed_entry["action"] = "EDIT"
                 print(f"✏️ Explicit edit/ka dhig wording detected; replacing fields for {parsed_entry.get('customer_name')!r}")
+
+    if entries and all(isinstance(item, dict) and item.get("_batch_due_date_update") for item in entries):
+        updated_lines = []
+        failed_lines = []
+        for due_entry in entries:
+            customer_name = str(due_entry.get("customer_name") or "").strip()
+            due_date = str(due_entry.get("new_date") or due_entry.get("promised_date") or "").strip()
+            try:
+                parsed_due = datetime.strptime(due_date, "%Y-%m-%d").date()
+                matches = find_debtor_matches(business_user_id, customer_name)
+                distinct_names = {normalize_customer_name(row.get("name")) for row in matches}
+                active_rows = [
+                    row for row in matches
+                    if row.get("is_paid") is not True and float(row.get("amount") or 0) > 0
+                ]
+                if len(distinct_names) > 1:
+                    failed_lines.append(f"⚠️ {customer_name}: magac aan caddayn")
+                    continue
+                if not active_rows:
+                    failed_lines.append(f"❌ {customer_name}: deyn furan lama helin")
+                    continue
+                if len(active_rows) > 1:
+                    failed_lines.append(f"⚠️ {customer_name}: deymo badan ayaa jira; magaca/faahfaahinta kala saar")
+                    continue
+                debtor = active_rows[0]
+                result = (
+                    supabase.table("customers")
+                    .update({"promised_date": parsed_due.isoformat()})
+                    .eq("id", debtor["id"])
+                    .eq("business_user_id", str(business_user_id))
+                    .eq("is_archived", False)
+                    .select("id, name, promised_date")
+                    .execute()
+                )
+                if not result.data:
+                    failed_lines.append(f"❌ {customer_name}: lama cusboonaysiin")
+                    continue
+                saved = result.data[0]
+                saved_name = str(saved.get("name") or customer_name)
+                saved_date = datetime.strptime(str(saved.get("promised_date") or parsed_due.isoformat()), "%Y-%m-%d").strftime("%d/%m/%Y")
+                updated_lines.append(f"✅ {saved_name} — {saved_date}")
+            except Exception as batch_due_error:
+                print(f"❌ Batch due-date update failed for {customer_name!r}: {type(batch_due_error).__name__}: {batch_due_error}")
+                failed_lines.append(f"❌ {customer_name}: qalad ayaa dhacay")
+
+        reply_lines = ["📅 *Cusboonaysiinta ballamaha*", ""]
+        if updated_lines:
+            reply_lines.extend(updated_lines)
+        if failed_lines:
+            if updated_lines:
+                reply_lines.append("")
+            reply_lines.extend(["*Kuwa aan la cusboonaysiin:*", *failed_lines])
+        if not updated_lines and not failed_lines:
+            reply_lines.append("Waxba lama beddelin.")
+        send_whatsapp(sender_phone, "\n".join(reply_lines))
+        return {
+            "status": "batch_due_dates_processed",
+            "updated": len(updated_lines),
+            "failed": len(failed_lines),
+        }
 
     successful_inserts = []
     failed_inserts = []
