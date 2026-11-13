@@ -1743,7 +1743,18 @@ def send_whatsapp_file(to_phone: str, filename: str, content: bytes, mime_type: 
         )
         print(f"📎 Green-API file upload: {response.status_code} - {response.text[:500]}")
         response.raise_for_status()
-        return True
+        try:
+            body = response.json()
+        except (ValueError, json.JSONDecodeError):
+            print(f"⚠️ Green-API file upload returned non-JSON success response for {filename}")
+            return False
+        sent_ok = (
+            isinstance(body, dict)
+            and (bool(body.get("idMessage")) or str(body.get("status") or "").casefold() == "success")
+        )
+        if not sent_ok:
+            print(f"⚠️ Green-API did not confirm file delivery for {filename}: {body!r}")
+        return sent_ok
     except Exception as exc:
         print(f"❌ Could not send WhatsApp file {filename}: {type(exc).__name__}: {exc}")
         return False
@@ -3363,7 +3374,7 @@ def parse_transaction_batch_text(message_text):
     # part of the first customer's name. This is deterministic and Gemini-free.
     inline_mode = None
     inline_header = re.match(
-        r"^(?:deyn|dayn)(?:\s+(?:cusub|cusubta))?\s*[:.,-]?\s+",
+        r"^(?:deyn|dayn|dayin|deyin)(?:\s+(?:cusub|cusubta))?\s*[:.,-]?\s+",
         raw, re.I,
     )
     if inline_header:
@@ -3380,7 +3391,7 @@ def parse_transaction_batch_text(message_text):
     if not raw:
         return None
 
-    add_header = re.compile(r"^(?:deyn|dayn)(?:\s+(?:cusub|cusubta))?$|^(?:add|new\s+debt)$", re.I)
+    add_header = re.compile(r"^(?:deyn|dayn|dayin|deyin)(?:\s+(?:cusub|cusubta))?$|^(?:add|new\s+debt)$", re.I)
     pay_header = re.compile(r"^(?:lacag\s*bixin(?:ta)?|bixin|payment(?:s)?)$", re.I)
     date_pattern = r"(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"
     due_re = re.compile(
@@ -3464,9 +3475,9 @@ def parse_transaction_batch_text(message_text):
         if row_action:
             row_actions.add(row_action)
         effective_mode = row_action or mode
-        if effective_mode not in {"debt", "payment"}:
+        if effective_mode not in {"debt", "payment", None, "clarification"}:
             return None
-        if mode and row_action and row_action != mode:
+        if mode and mode != "clarification" and row_action and row_action != mode:
             return None
 
         due_match = due_re.search(row)
@@ -3477,7 +3488,9 @@ def parse_transaction_batch_text(message_text):
             row_without_date = due_re.sub(" ", row, count=1)
 
         amount_matches = list(currency_re.finditer(row_without_date))
-        if not amount_matches and (mode or row_action):
+        if not amount_matches:
+            # Plain amounts are allowed for a provisional batch too; if no
+            # direction is present, the caller asks ADD/PAY before any write.
             amount_matches = list(plain_amount_re.finditer(row_without_date))
         if len(amount_matches) != 1:
             return None
@@ -3512,10 +3525,10 @@ def parse_transaction_batch_text(message_text):
     if len(row_actions) > 1:
         return None
     if mode is None:
-        if len(row_actions) != 1:
+        if len(row_actions) > 1:
             return None
-        mode = next(iter(row_actions))
-    if row_actions and next(iter(row_actions)) != mode:
+        mode = next(iter(row_actions)) if row_actions else "clarification"
+    if row_actions and mode not in {"clarification", next(iter(row_actions))}:
         return None
     if len(parsed_rows) < 2 or len(parsed_rows) > 50:
         return None
@@ -5674,11 +5687,37 @@ async def _whatsapp_webhook_process(request: Request):
 
         business_user_id = business_user["id"]
 
+        # Database-backed transaction clarification has priority over every
+        # in-memory workflow. A short reply such as "1" must answer ADD/PAY,
+        # never an old correction, undo, or first-debt onboarding prompt.
+        pending_transaction_clarification_active = False
+        try:
+            pending_check = (
+                supabase.table("pending_transaction_clarifications")
+                .select("sender_phone")
+                .eq("sender_phone", sender_phone)
+                .eq("business_user_id", business_user_id)
+                .limit(1)
+                .execute()
+            )
+            pending_transaction_clarification_active = bool(pending_check.data)
+        except Exception as pending_check_error:
+            pending_transaction_clarification_active = True
+            print(f"⚠️ Pending clarification priority check failed: {pending_check_error}")
+        if pending_transaction_clarification_active:
+            # These are competing prompts for the same sender. Drop only their
+            # temporary session state; no committed financial records are touched.
+            CORRECTION_SESSIONS.pop(sender_phone, None)
+            UNDO_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+            DEPOSIT_OFFER_SESSIONS.pop(sender_phone, None)
+            FIRST_DEBT_SESSIONS.pop(sender_phone, None)
+            GUIDED_SESSIONS.pop(sender_phone, None)
+
         # Admin-triggered first-debt onboarding. This flow is deterministic and
         # deliberately runs before conversational AI, Gemini parsing, and the
         # general guided transaction system.
         first_debt = FIRST_DEBT_SESSIONS.get(sender_phone)
-        if first_debt and first_debt.get("business_user_id") == str(business_user_id):
+        if first_debt and first_debt.get("business_user_id") == str(business_user_id) and not pending_transaction_clarification_active:
             expiry = first_debt.get("expires_at")
             if not expiry or datetime.now(timezone.utc) > expiry:
                 FIRST_DEBT_SESSIONS.pop(sender_phone, None)
@@ -5862,8 +5901,9 @@ async def _whatsapp_webhook_process(request: Request):
             guided_expiry = guided_waiting.get("expires_at")
             if not guided_expiry or datetime.now(timezone.utc) > guided_expiry:
                 expired_menu_choice = (
-                    guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
-                    and str(message_text or "").strip() in {"1", "2", "3", "4", "5", "6"}
+                    not pending_transaction_clarification_active
+                    and guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
+                    and str(message_text or "").strip() in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
                 )
                 GUIDED_SESSIONS.pop(sender_phone, None)
                 guided_waiting = {}
@@ -5900,10 +5940,15 @@ async def _whatsapp_webhook_process(request: Request):
         direction_reply = parse_transaction_clarification(message_text)
         numeric_reply = str(message_text or "").strip()
         guided_menu_choice = (
-            guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
-            and numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8"}
+            not pending_transaction_clarification_active
+            and guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
+            and numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
         )
-        guided_amount_reply = guided_waiting.get("stage") in {"debt_amount", "payment_amount"} and _guided_amount(numeric_reply) is not None
+        guided_amount_reply = (
+            not pending_transaction_clarification_active
+            and guided_waiting.get("stage") in {"debt_amount", "payment_amount"}
+            and _guided_amount(numeric_reply) is not None
+        )
         deposit_waiting = DEPOSIT_OFFER_SESSIONS.get(sender_phone) or {}
         correction_waiting = CORRECTION_SESSIONS.get(sender_phone) or {}
         financial_confirmation_reply = (
@@ -5943,7 +5988,7 @@ async def _whatsapp_webhook_process(request: Request):
 
         # Resolve an already-open UNDO confirmation before interpreting this reply
         # as a new command. Only explicit 1/HAA or 2/MAYA responses are accepted.
-        if undo_waiting_for_this_shop and pending_undo and not pending_new_request:
+        if undo_waiting_for_this_shop and pending_undo and not pending_new_request and not pending_transaction_clarification_active:
             if datetime.now(timezone.utc) > pending_undo.get("expires_at", datetime.min.replace(tzinfo=timezone.utc)):
                 UNDO_CONFIRMATION_SESSIONS.pop(sender_phone, None)
                 send_whatsapp(sender_phone, "Waqtigii xaqiijinta ka-noqoshadu wuu dhammaaday. Waxba lama beddelin. Haddii loo baahdo, codsiga mar kale dir.")
@@ -6024,7 +6069,7 @@ async def _whatsapp_webhook_process(request: Request):
                     }
                     send_whatsapp(
                         sender_phone,
-                        "Magaca macmiilka deynta lagu leeyahay?\\n\\n"
+                        "Magaca macmiilka deynta lagu leeyahay?\n\n"
                         "Qor *JOOJI* si aad uga baxdo."
                     )
                     return {"status": "guided_debt_name_requested"}
@@ -6037,7 +6082,7 @@ async def _whatsapp_webhook_process(request: Request):
                     }
                     send_whatsapp(
                         sender_phone,
-                        "Magaca qofka lacagta bixiyey?\\n\\n"
+                        "Magaca qofka lacagta bixiyey?\n\n"
                         "Qor *JOOJI* si aad uga baxdo."
                     )
                     return {"status": "guided_payment_name_requested"}
@@ -6907,7 +6952,7 @@ async def _whatsapp_webhook_process(request: Request):
 
     # Resolve a pending amount correction; the SQL RPC reverses and replaces the ledger event atomically.
     correction = CORRECTION_SESSIONS.get(sender_phone)
-    if correction:
+    if correction and not pending_transaction_clarification_active:
         if correction.get("business_user_id") != str(business_user_id):
             CORRECTION_SESSIONS.pop(sender_phone, None)
         elif pending_new_request:
@@ -6958,7 +7003,8 @@ async def _whatsapp_webhook_process(request: Request):
     # A bare amount shortly after a committed ADD/PAY may be a correction. Ask first.
     amount_match = re.fullmatch(r"\s*(?:sax\s+)?\$?\s*(\d+(?:[.,]\d{1,2})?)\s*", str(message_text or ""), re.I)
     recent = LAST_TRANSACTION_CONTEXT.get(sender_phone) or {}
-    if (amount_match and not _has_active_in_memory_workflow(sender_phone)
+    if (amount_match and not pending_transaction_clarification_active
+            and not _has_active_in_memory_workflow(sender_phone)
             and str(recent.get("business_user_id") or "") == str(business_user_id)
             and isinstance(recent.get("created_at"), datetime)
             and datetime.now(timezone.utc) - recent["created_at"] <= CORRECTION_SESSION_TTL):
@@ -8021,7 +8067,7 @@ async def _whatsapp_webhook_process(request: Request):
         send_whatsapp(sender_phone, "❌ Ma hubin karo fariintii sugaysay. Fadlan mar kale isku day.")
         return {"status": "pending_clarification_lookup_error"}
 
-    if pending_clarification and not is_clear_new_supported_request(message_text, include_transactions=True):
+    if pending_clarification:
         clarification_action = parse_transaction_clarification(message_text)
         if clarification_action == "CANCEL":
             try:
@@ -8074,6 +8120,18 @@ async def _whatsapp_webhook_process(request: Request):
                 send_whatsapp(sender_phone, "❌ Fariintii hore dib looma soo celin karo. Fadlan mar kale dir.")
                 return {"status": "pending_clarification_restore_error"}
         else:
+            # A new supported request supersedes the stale clarification.
+            # In particular, read-only commands such as LIISKA DAYNTA must
+            # proceed normally rather than being trapped in the old prompt.
+            if is_clear_new_supported_request(message_text, include_transactions=True):
+                try:
+                    supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).eq("business_user_id", business_user_id).execute()
+                except Exception as pending_err:
+                    print(f"❌ Could not replace pending clarification with a new request: {pending_err}")
+                    send_whatsapp(sender_phone, "❌ Fariintii sugaysay lama nadiifin. Waxba lama beddelin; fadlan mar kale dir fariinta.")
+                    return {"status": "pending_clarification_replace_error"}
+                pending_clarification = None
+                print(f"🔀 New supported request superseded pending transaction clarification: {message_text!r}")
             # A new, fully specified transaction supersedes the stale pending
             # clarification. Never replay the previous customer's transaction.
             fresh_entries = local_fallback_parse(message_text)
@@ -8094,7 +8152,7 @@ async def _whatsapp_webhook_process(request: Request):
                 pending_new_transaction_entries = fresh_financial_entries
                 pending_clarification = None
                 print(f"🔄 New explicit transaction superseded stale clarification: {fresh_financial_entries!r}")
-            else:
+            elif pending_clarification is not None:
                 clarification_prompt = "Deyn cusub baa mise lacag-bixin?"
                 send_deynjir_choice_buttons(
                     sender_phone, clarification_prompt,
@@ -8511,6 +8569,33 @@ async def _whatsapp_webhook_process(request: Request):
     if direct_batch:
         batch_mode, batch_rows = direct_batch
         try:
+            if batch_mode == "clarification":
+                clarification_entries = [{
+                    "action": "ADD",
+                    "customer_name": row.get("name"),
+                    "amount": row.get("amount"),
+                    "promised_date": row.get("promised_date"),
+                    "phone_number": row.get("phone_number"),
+                    "description": row.get("description"),
+                    "payment_type": "PARTIAL",
+                } for row in batch_rows]
+                supabase.table("pending_transaction_clarifications").upsert({
+                    "sender_phone": sender_phone,
+                    "business_user_id": business_user_id,
+                    "original_message": str(message_text),
+                    "parsed_entries": clarification_entries,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }, on_conflict="sender_phone").execute()
+                clarification_prompt = (
+                    f"Waxaan helay *{len(clarification_entries)} macaamiil* iyo lacagahooda.\n\n"
+                    "Ma deyn cusub baa mise lacag-bixin? Waxba lama diiwaangelin ilaa aad doorato."
+                )
+                send_deynjir_choice_buttons(
+                    sender_phone, clarification_prompt,
+                    [("TX_ADD", "Deyn cusub"), ("TX_PAY", "Lacag-bixin"), ("TX_CANCEL", "Jooji")],
+                    clarification_prompt + "\n\n*DEYN CUSUB* — 1\n*LACAG BIXIN* — 2\n*JOOJI* — 3"
+                )
+                return {"status": "awaiting_batch_transaction_clarification", "count": len(clarification_entries)}
             validated_batch = _validate_import_entries(batch_rows)
             IMPORT_SESSIONS[sender_phone] = {
                 "business_user_id": str(business_user_id),
@@ -8643,6 +8728,15 @@ async def _whatsapp_webhook_process(request: Request):
             "📅 Local appointment-list command recognized: "
             f"{message_text!r} -> {local_appointment_entry['filter_date']}"
         )
+    elif fuzzy_list_requested:
+        entries = [{
+            "action": "LIST",
+            "customer_name": None,
+            "amount": None,
+            "filter_date": None,
+            "filter_type": None,
+        }]
+        print(f"⚡ Debt-list command recognized locally before transaction parsing: {message_text!r}; skipping Gemini")
     elif (direct_somali_entries := local_fallback_parse(message_text)) and any(
         isinstance(item, dict)
         and str(item.get("action") or "").upper() in {"ADD", "PAY"}
@@ -8655,15 +8749,6 @@ async def _whatsapp_webhook_process(request: Request):
     elif (structured_entries := parse_structured_somali_transaction(message_text)):
         entries = structured_entries
         print(f"⚡ Structured Somali transaction parsed locally: {entries}")
-    elif fuzzy_list_requested:
-        entries = [{
-            "action": "LIST",
-            "customer_name": None,
-            "amount": None,
-            "filter_date": None,
-            "filter_type": None,
-        }]
-        print(f"⚡ Fuzzy debt-list command recognized locally: {message_text!r}; skipping Gemini")
     elif multiline_transaction:
         entries = multiline_transaction
         print(
@@ -10537,16 +10622,18 @@ async def _whatsapp_webhook_process(request: Request):
 
         elif action == "EXPORT":
             try:
-                all_debts_result = (
-                    supabase.table("customers")
-                    .select("*")
-                    .eq("business_user_id", business_user_id)
-                    .eq("is_archived", False)
-                    .order("promised_date", desc=False)
-                    .execute()
-                )
+                def build_debt_export_query():
+                    return (
+                        supabase.table("customers")
+                        .select("*")
+                        .eq("business_user_id", business_user_id)
+                        .eq("is_archived", False)
+                        .eq("is_paid", False)
+                        .order("promised_date", desc=False)
+                        .order("id", desc=False)
+                    )
 
-                debts_to_export = all_debts_result.data or []
+                debts_to_export = fetch_all_supabase_rows(build_debt_export_query)
 
                 if not debts_to_export:
                     send_whatsapp(
