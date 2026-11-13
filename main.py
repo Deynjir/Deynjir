@@ -564,7 +564,7 @@ def normalize_easy_command(value):
 
 def _guided_amount(text):
     raw = str(text or "").strip().replace(",", ".")
-    match = re.fullmatch(r"(?:\$\s*)?(\d+(?:\.\d{1,2})?)(?:\s*(?:usd|dollar|dollars))?", raw, re.I)
+    match = re.fullmatch(r"(?:\$\s*)?(\d+(?:\.\d{1,2})?)(?:\s*&)?(?:\s*(?:usd|dollar|dollars|dolar|dola(?:r|ro)))?", raw, re.I)
     if not match:
         return None
     try:
@@ -2284,7 +2284,7 @@ def is_name_confirmation_interrupt_command(message_text):
     if parse_transaction_clarification(raw) in {"ADD", "PAY", "CANCEL"}:
         return True
     # A message with an amount is a new transaction, not a name-only correction.
-    if re.search(r"(?:\$\s*\d|\b\d+(?:[.,]\d{1,2})?\s*(?:usd|dollar|dollars)\b|(?<!\w)\d+(?:[.,]\d{1,2})?(?!\w))", raw, re.I):
+    if re.search(r"(?:\$\s*\d|\b\d+(?:[.,]\d{1,2})?\s*(?:usd|dollar|dollars|dolar|dola(?:r|ro))\b|(?<!\w)\d+(?:[.,]\d{1,2})?(?!\w))", raw, re.I):
         return True
     return False
 
@@ -2300,7 +2300,7 @@ def parse_customer_phone_update(message_text):
     if not raw:
         return None
     low = raw.casefold()
-    if re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", low):
+    if re.search(r"[$]|\b(?:usd|dollars?|dollar|dolar|dola(?:r|ro))\b", low):
         return None
     if classify_transaction_direction(raw) in {"ADD", "PAY"}:
         return None
@@ -2435,7 +2435,7 @@ def parse_contextual_due_date_update(message_text, recent_customer_name):
 def parse_single_due_date_update(message_text):
     """Parse one existing customer name followed by a due date, e.g. NAME NOV 16."""
     raw = " ".join(str(message_text or "").strip().split())
-    if not raw or re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", raw, re.I):
+    if not raw or re.search(r"[$]|\b(?:usd|dollars?|dollar|dolar|dola(?:r|ro))\b", raw, re.I):
         return None
     month_pattern = (
         r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
@@ -2513,7 +2513,7 @@ def parse_due_date_batch(message_text):
     least two complete name/date pairs are present.
     """
     raw = str(message_text or "").strip()
-    if not raw or re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", raw, re.I):
+    if not raw or re.search(r"[$]|\b(?:usd|dollars?|dollar|dolar|dola(?:r|ro))\b", raw, re.I):
         return None
     month_pattern = (
         r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
@@ -3018,7 +3018,7 @@ def message_has_explicit_amount_for_name(message_text, customer_name):
         cleaned = re.sub(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{month_pattern})\b", " DATE ", cleaned, flags=re.I)
 
         # Explicit currency formats are unambiguous.
-        if re.search(r"(?:\$\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*\$|\b(?:usd|dollars?|dollar)\b)", cleaned, flags=re.I):
+        if re.search(r"(?:\$\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*\$|\b(?:usd|dollars?|dollar|dolar|dola(?:r|ro))\b)", cleaned, flags=re.I):
             return True
 
         # Common Somali/English transaction wording is also amount evidence.
@@ -3206,7 +3206,7 @@ def parse_structured_somali_transaction(message_text):
         amount_text = amount_match.group(1).strip() if amount_match else line
         # Also accept a standalone amount line with an explicit currency marker,
         # e.g. "123 $" or "$123"; never mistake a long phone number for money.
-        has_currency_marker = bool(re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", amount_text, re.I))
+        has_currency_marker = bool(re.search(r"[$]|\b(?:usd|dollars?|dollar|dolar|dola(?:r|ro))\b", amount_text, re.I))
         if amount_match or (action == "ADD" and has_currency_marker):
             number_match = re.search(r"(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-])", amount_text)
             if number_match:
@@ -3217,7 +3217,7 @@ def parse_structured_somali_transaction(message_text):
                 if math.isfinite(parsed_amount) and parsed_amount > 0:
                     amount = parsed_amount
                     tail = (amount_text[:number_match.start()] + " " + amount_text[number_match.end():]).strip()
-                    tail = re.sub(r"(?i)\b(?:usd|dollars?|dollar)\b|[$]", " ", tail)
+                    tail = re.sub(r"(?i)\b(?:usd|dollars?|dollar|dolar|dola(?:r|ro))\b|[$]", " ", tail)
                     tail = " ".join(tail.split()).strip(" .,:;-\t")
                     if tail:
                         description = tail
@@ -3251,7 +3251,7 @@ def parse_structured_somali_transaction(message_text):
                     continue
                 if re.fullmatch(r"\s*\+?[\d\s().-]+\s*", source_line):
                     continue
-                if re.search(r"[$]|\b(?:usd|dollars?|dollar)\b", source_line, re.I):
+                if re.search(r"[$]|\b(?:usd|dollars?|dollar|dolar|dola(?:r|ro))\b", source_line, re.I):
                     continue
                 normalized_line = normalize_customer_name(source_line)
                 if re.search(r"\b(?:amaah|deyn|dayn)\b", normalized_line, re.I):
@@ -3508,9 +3508,10 @@ def parse_transaction_batch_text(message_text):
             r"(?i)\b(?:deyn(?:ta)?|dayn|cusub|lacag|bixin(?:ta)?|bixiyay|bixiyey|bixisay|"
             r"bixiyeen|ayuu|buu|bay|baan|wuxuu|wuu|ayaa|ayay|waxay|way|iga|qaatay|"
             r"qaadatay|qaatey|qaato|soo|celiyay|celiyey|keenay|keentay|amaah|"
-            r"usd|dollars?|dollar)\b", " ", name)
+            r"usd|dollars?|dollar|dolar|dola(?:r|ro))\b", " ", name)
         name = re.sub(r"[$]", " ", name)
-        name = " ".join(name.split()).strip(" .,:;-")
+        name = re.sub(r"\s*&\s*", " ", name)
+        name = " ".join(name.split()).strip(" .,:;-&")
         if not name or len(name) > 120 or not re.search(r"[A-Za-z\u0080-\uffff]", name):
             return None
 
@@ -3647,14 +3648,17 @@ def local_fallback_parse(message_text):
                 break
             amount_text = next((value for value in match.groups() if value is not None), None)
             name_text = (segment[:match.start()] + " " + segment[match.end():]).strip(" -:,$")
-            name_text = re.sub(r"\b(?:usd|dollars?|dollar)\b", " ", name_text, flags=re.I)
-            name_text = " ".join(name_text.split()).strip()
+            name_text = re.sub(r"\b(?:usd|dollars?|dollar|dolar|dola(?:r|ro))\b", " ", name_text, flags=re.I)
+            # WhatsApp users sometimes type amounts as "10&" or "10& dolar".
+            # The ampersand is a typing artifact, never part of the customer name.
+            name_text = re.sub(r"\s*&\s*", " ", name_text)
+            name_text = " ".join(name_text.split()).strip(" &")
             if not name_text:
                 ambiguous_entries = []
                 break
             tail_description = segment[match.end():].strip(" .,:;-")
             tail_description = re.sub(
-                r"\b(?:ayuu|wuxuu|wuu|ayaa|iga|qaatay|qaatey|qaato|bixiyay|bixiyey|bixisay|celiyay|celiyey|paid|repaid|amaah|deyn|dayn|cusub|usd|dollars?|dollar)\b",
+                r"\b(?:ayuu|wuxuu|wuu|ayaa|iga|qaatay|qaatey|qaato|bixiyay|bixiyey|bixisay|celiyay|celiyey|paid|repaid|amaah|deyn|dayn|cusub|usd|dollars?|dollar|dolar|dola(?:r|ro))\b",
                 " ", tail_description, flags=re.I
             )
             tail_description = " ".join(tail_description.split()).strip(" .,:;-")
@@ -3722,7 +3726,7 @@ def local_fallback_parse(message_text):
             r"\b(?:ayuu|wuxuu|wuu|ayaa|ayay|ayaan|waxay|way|buu|bay|iga|"
             r"qaatay|qaadatay|qaateen|qaatey|qaaty|qaato|bixiyay|bixiyey|bixisay|bixiye|"
             r"celiyay|celiyey|celisay|celiyeen|soo|helay|keenay|keentay|qabatay|qabtay|"
-            r"shubay|shubtay|xareeyay|xareysay|ii|ka|lacag|bixin|paid|repaid|amaah|deyn|dayn|cusub|usd|dollars?|dollar)\b",
+            r"shubay|shubtay|xareeyay|xareysay|ii|ka|lacag|bixin|paid|repaid|amaah|deyn|dayn|cusub|usd|dollars?|dollar|dolar|dola(?:r|ro))\b",
             " ", tail, flags=re.I
         )
         tail = " ".join(tail.split()).strip(" .,:;-")
@@ -4305,6 +4309,7 @@ def begin_delete_flow(sender_phone, business_user_id, requested_name):
         f"Macmiilka: *{candidate['name']}*\n"
         f"Wadarta deynta: *${balance:.2f}*\n"
         "Soo qor *HAA, TIRTIR*.\n"
+        "Macmiilka iyo dhammaan daymihiisa, lacag-bixinnadiisa iyo taariikhdiisa si joogto ah ayaa loo tirtirayaa.\n"
         "ama Qor *JOOJI* si aan loo Tirtirin."
     )
     return {"status": "delete_confirmation_required", "customer": candidate["name"], "rows": len(rows)}
@@ -4373,7 +4378,7 @@ def handle_delete_session(sender_phone, business_user_id, message_text):
             f"Wadarta deynta: *${balance:.2f}*\n"
             f"Diiwaannada macmiilka: *{len(candidate_rows)}*\n\n"
             "Haddii tani sax tahay, soo qor *HAA, TIRTIR*.\n"
-            "Haddii uu leeyahay lacag-bixin ama taariikh macaamil, waa la archive-gareynayaa; haddii kale waa la tirtirayaa.\n"
+            "Macmiilka, daymihiisa, lacag-bixinnadiisa iyo taariikhdiisa oo dhan si joogto ah ayaa loo tirtirayaa.\n"
             "Qor *JOOJI* si aad uga baxdo."
         )
         return {"status": "delete_confirmation_required", "customer": chosen["name"]}
@@ -4391,66 +4396,52 @@ def handle_delete_session(sender_phone, business_user_id, message_text):
             return {"status": "delete_missing_ids"}
 
         try:
-            # Financial history is authoritative: any payment OR transaction
-            # means the customer row must be retained and archived.
-            payment_history = (
-                supabase.table("payments")
-                .select("customer_id")
-                .eq("business_user_id", business_user_id)
-                .in_("customer_id", customer_ids)
-                .limit(1)
-                .execute()
-            )
-            transaction_history = (
-                supabase.table("customer_transactions")
-                .select("customer_id")
-                .eq("business_user_id", business_user_id)
-                .in_("customer_id", customer_ids)
-                .limit(1)
-                .execute()
-            )
-            has_history = bool(payment_history.data or transaction_history.data)
+            # Atomic database deletion: verify shop ownership, remove linked
+            # records, then remove the customer rows in one SQL transaction.
+            customer_keys = sorted({normalize_customer_name(customer_name)} - {""})
+            delete_result = supabase.rpc(
+                "permanently_delete_deynjir_customer",
+                {
+                    "p_customer_ids": [str(value) for value in customer_ids],
+                    "p_business_user_id": str(business_user_id),
+                    "p_customer_keys": customer_keys,
+                },
+            ).execute()
+            payload = delete_result.data
+            if isinstance(payload, list):
+                payload = payload[0] if payload else None
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (TypeError, ValueError):
+                    payload = None
+            if not isinstance(payload, dict) or not payload.get("success"):
+                raise RuntimeError("Database-ku ma xaqiijin tirtiridda joogtada ah.")
 
-            if has_history:
-                result = (
-                    supabase.table("customers")
-                    .update({"is_archived": True, "archived_at": datetime.now(timezone.utc).isoformat()})
-                    .eq("business_user_id", business_user_id)
-                    .in_("id", customer_ids)
-                    .eq("is_archived", False)
-                    .select("id")
-                    .execute()
-                )
-                affected = len(result.data or [])
-                DELETE_SESSIONS.pop(sender_phone, None)
-                if affected != len(customer_ids):
-                    send_whatsapp(sender_phone, f"⚠️ Macmiilka *{customer_name}* qayb ahaan ayaa loo archive-gareeyay ({affected}/{len(customer_ids)}). Fadlan hubi liiska.")
-                    return {"status": "archive_partial", "archived": affected}
-                send_whatsapp(sender_phone, f"✅ *{customer_name}* waa laga saaray liiska Rasmiga ah. Balse Deymihii iyo lacag-bixinnadiisii hore way kaydsan yihiin; waxaad ka heli kartaa markaad codsato xisaabtiisa.")
-                return {"status": "customer_archived", "archived": affected}
-
-            deleted_count = 0
-            for customer_id in customer_ids:
-                result = (
-                    supabase.table("customers")
-                    .delete()
-                    .eq("id", customer_id)
-                    .eq("business_user_id", business_user_id)
-                    .eq("is_archived", False)
-                    .select("id")
-                    .execute()
-                )
-                deleted_count += len(result.data or [])
+            deleted_count = int(payload.get("deleted_customers") or 0)
             DELETE_SESSIONS.pop(sender_phone, None)
             if deleted_count != len(customer_ids):
-                send_whatsapp(sender_phone, f"⚠️ {customer_name}: {deleted_count} ka mid ah {len(customer_ids)} diiwaan ayaa la tirtiray. Fadlan hubi liiska daynta.")
-                return {"status": "delete_partial", "deleted": deleted_count}
-            send_whatsapp(sender_phone, f"✅ *{customer_name}* waa la tirtiray. Ma lahayn lacag-bixin ama taariikh macaamil.")
-            return {"status": "delete_confirmed", "deleted": deleted_count}
+                raise RuntimeError(
+                    f"Tirtiriddu ma dhammaystirnayn: {deleted_count}/{len(customer_ids)}"
+                )
+            LAST_SELECTED_CUSTOMERS.pop(sender_phone, None)
+            LAST_HISTORY_REQUESTS.pop(sender_phone, None)
+            LAST_TRANSACTION_CONTEXT.pop(sender_phone, None)
+            LAST_BATCH_CONTEXT.pop(sender_phone, None)
+            send_whatsapp(
+                sender_phone,
+                f"✅ *{customer_name}* iyo dhammaan taariikhdiisii si joogto ah ayaa looga tirtiray database-ka. "
+                "Mar dambe kama soo muuqan doono raadinta, liisaska ama warbixinnada Deynjir."
+            )
+            return {
+                "status": "customer_permanently_deleted",
+                "deleted": deleted_count,
+                "deleted_related_records": payload.get("deleted_related_records", {}),
+            }
         except Exception as exc:
-            print(f"❌ Confirmed delete/archive failed: {type(exc).__name__}: {exc}")
+            print(f"❌ Confirmed permanent customer deletion failed: {type(exc).__name__}: {exc}")
             DELETE_SESSIONS.pop(sender_phone, None)
-            send_whatsapp(sender_phone, "❌ Tirtiridda/archiving-ku way fashilantay. Waxba lama xaqiijin; fadlan hubi database-ka.")
+            send_whatsapp(sender_phone, "❌ Tirtiridda joogtada ahi way fashilantay. Database-ku ma xaqiijin; fadlan hubi database-ka.")
             return {"status": "delete_error"}
 
     DELETE_SESSIONS.pop(sender_phone, None)
@@ -5939,8 +5930,16 @@ async def _whatsapp_webhook_process(request: Request):
             RENAME_SESSIONS.pop(sender_phone, None)
         direction_reply = parse_transaction_clarification(message_text)
         numeric_reply = str(message_text or "").strip()
+        # If a duplicate-name selector is waiting, its numbered choices own
+        # the next numeric reply. An older menu must not steal "1" or "2".
+        customer_match_numeric_reply_priority = bool(
+            customer_match_waiting_for_shop
+            and active_customer_match.get("stage") == "choose"
+            and numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}
+        )
         guided_menu_choice = (
             not pending_transaction_clarification_active
+            and not customer_match_numeric_reply_priority
             and guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
             and numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
         )
@@ -6051,7 +6050,7 @@ async def _whatsapp_webhook_process(request: Request):
         # An explicitly displayed menu owns its numeric replies. Route these
         # before import/search/AI/session handlers so option 4 or 5 cannot be
         # mistaken for a debt name, amount, or another workflow's answer.
-        if expired_menu_choice:
+        if expired_menu_choice and not customer_match_numeric_reply_priority:
             send_whatsapp(sender_phone, "Waqtigii menu-ga wuu dhammaaday. Soo qor *MENU* si aad u doorato adeegga aad rabto.")
             return {"status": "menu_choice_expired"}
 
@@ -7809,7 +7808,7 @@ async def _whatsapp_webhook_process(request: Request):
             proposed = str(message_text or "").strip()
             if (
                 len(proposed) < 2 or len(proposed) > 120
-                or re.fullmatch(r"[$]?\s*\d+(?:[.,]\d{1,2})?\s*(?:usd|dollar|dollars)?", proposed, re.I)
+                or re.fullmatch(r"[$]?\s*\d+(?:[.,]\d{1,2})?\s*(?:usd|dollar|dollars|dolar|dola(?:r|ro))?", proposed, re.I)
             ):
                 send_whatsapp(sender_phone, "Fadlan qor magac cusub oo qoraal ah, ee ha qorin lacag. Ama JOOJI.")
                 return {"status": "rename_new_name_invalid"}
@@ -8096,7 +8095,6 @@ async def _whatsapp_webhook_process(request: Request):
                 if not isinstance(entries, list) or not entries:
                     raise ValueError("Saved pending entries are empty or invalid")
                 forced_transaction_action = clarification_action
-
                 # Keep optional product/detail information from the clarification
                 # reply, while preserving the saved customer and amount.
                 if clarification_action == "ADD":
@@ -8112,6 +8110,9 @@ async def _whatsapp_webhook_process(request: Request):
                                 saved_entry["description"] = clarification_detail[:160]
                                 break
 
+                # Replay the exact saved batch, not the original free-text through
+                # Gemini. This preserves every customer row, amount and detail.
+                pending_new_transaction_entries = [dict(item) for item in entries]
                 message_text = pending_clarification.get("original_message") or message_text
                 supabase.table("pending_transaction_clarifications").delete().eq("sender_phone", sender_phone).eq("business_user_id", business_user_id).execute()
                 print(f"✅ Clarification received; replaying saved message as {forced_transaction_action}")
