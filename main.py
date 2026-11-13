@@ -1132,6 +1132,12 @@ def is_contextual_followup(message_text, sender_phone):
     if not text or len(text) > 140:
         return False
     normalized = normalize_customer_name(text).strip(" .!?؟")
+    # File/export follow-ups are deterministic commands, not conversational
+    # context. In particular, "PDF" must reach the customer-statement PDF
+    # handler instead of being swallowed by this short-turn detector.
+    if normalized in {"pdf", "soo dir pdf", "pdf soo dir", "pdf xisaabta", "xisaabta pdf",
+                      "excel", "xlsx", "csv"}:
+        return False
     # Never intercept numeric menu choices, financial entries, or explicit commands.
     if re.fullmatch(r"\d+", normalized):
         return False
