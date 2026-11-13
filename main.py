@@ -337,24 +337,22 @@ def send_deynjir_choice_buttons(to_phone, body, buttons, fallback_text):
 
 
 def send_deynjir_main_menu(to_phone):
-    """Send exactly three WhatsApp reply buttons; use text if API sending fails."""
+    """Always show numbered menu text, then offer the same three reply buttons."""
     clean_phone = str(to_phone).replace("+", "").split("@")[0].strip()
+    # Some WhatsApp clients display the interactive choices but hide or collapse
+    # the numbered body. Send the numbered menu as a normal text message first,
+    # so the 1/2/3 choices are always visible and usable as a fallback.
+    text_result = send_whatsapp(to_phone, deynjir_main_menu())
     if GREEN_API_TOKEN:
         url = f"{GREEN_API_BASE}/waInstance{INSTANCE_ID}/sendInteractiveButtonsReply/{GREEN_API_TOKEN}"
         payload = {
             "chatId": f"{clean_phone}@c.us",
             "header": "Deynjir",
-            "body": (
-                "Maxaad rabtaa inaad Xarayso?\n\n"
-                "1️⃣ Deyn Baxday\n"
-                "2️⃣ Deyn soo xarootay\n"
-                "3️⃣ Adeeg kale\n\n"
-                "Dooro badhamada hoose ama soo dir 1, 2 ama 3."
-            ),
-            "footer": "Dooro mid ka mid ah adeegyada",
+            "body": "Fadlan dooro adeegga aad rabto:",
+            "footer": "Waxaad sidoo kale ku jawaabi kartaa 1, 2 ama 3 fariinta kore.",
             "buttons": [
                 {"buttonId": "1", "buttonText": "Deyn Baxday"},
-                {"buttonId": "2", "buttonText": "Dayn soo xarootay"},
+                {"buttonId": "2", "buttonText": "Deyn soo xarootay"},
                 {"buttonId": "3", "buttonText": "Adeeg kale"},
             ],
         }
@@ -368,8 +366,8 @@ def send_deynjir_main_menu(to_phone):
                     print(f"⚠️ Menu reminder scheduling failed: {reminder_error}")
                 return True
         except Exception as exc:
-            print(f"⚠️ Interactive menu unavailable; using text fallback: {type(exc).__name__}: {exc}")
-    return send_whatsapp(to_phone, deynjir_main_menu())
+            print(f"⚠️ Interactive menu unavailable; numbered text menu was sent: {type(exc).__name__}: {exc}")
+    return text_result
 
 def deynjir_recovery_menu_message(intro=None):
     """Recovery prompt aligned with the same three-choice menu routing."""
@@ -1415,7 +1413,7 @@ def is_clear_new_supported_request(message_text, include_transactions=True):
         r"^(?:add|pay|deyn\s+cusub|lacag\s*bixin|liiska|raadi|raadso|search|find|"
         r"faahfaahin|history|taariikh|statement|report|warbixin|export|download|"
         r"import|delete|remove|tirtir|tirtiraan|edit|sax|dhigaal|undo|"
-        r"xusuusin|remind|balamaha|ballamaha|balanta|ballanta|menu|help|caawi)\b",
+        r"xusuusin|remind|balamaha|ballamaha|balanta|ballanta|menu|help|caawi|caawin|caawimaad|adeegyada|adeeg\s+kale)\b",
         r"\b(?:liiska\s+daymaha|liiska\s+deynta|daymaha\s+oo\s+dhan|deymaha\s+oo\s+dhan)\b",
         r"\b(?:tirtir|tirtiraan|delete|remove)\b",
         r"\b(?:warbixin|report|liiska\s+lacag\s*bixinta|lacagihii\s+maanta)\b",
@@ -4079,6 +4077,23 @@ def _unique_customer_names(matches):
     return list(unique.values())
 
 
+def send_customer_match_confirmation(to_phone, customer_name, allow_new=False):
+    """Offer HAA/MAYA/CUSUB as real reply buttons with a readable text fallback."""
+    body = (
+        f"Waxaan helay hal macmiil oo magacaagu u egyahay: *{customer_name}*.\n\n"
+        "Ma isaga/iyada ayaad ula jeeddaa?"
+    )
+    buttons = [
+        ("CUSTOMER_MATCH_YES", "HAA"),
+        ("CUSTOMER_MATCH_NO", "MAYA"),
+    ]
+    fallback = body + "\n\nDooro: HAA ama MAYA."
+    if allow_new:
+        buttons.append(("CUSTOMER_MATCH_NEW", "QOF CUSUB"))
+        fallback = body + "\n\nDooro HAA, MAYA, ama QOF CUSUB."
+    return send_deynjir_choice_buttons(to_phone, body, buttons, fallback)
+
+
 def start_customer_match_session(sender_phone, business_user_id, entry,
                                  original_message, matches, stage,
                                  remaining_entries=None, allow_new=False):
@@ -4096,12 +4111,8 @@ def start_customer_match_session(sender_phone, business_user_id, entry,
     }
 
     if stage == "confirm_single":
-        prompt = (
-            f"Waxaan helay hal macmiil oo magacaagu u egyahay: *{names[0]}*.\n\n"
-            "Ma isaga/iyada ayaad ula jeeddaa? Soo qor *HAA* ama *MAYA*."
-        )
-        if allow_new:
-            prompt += "\nHaddii aad rabto macmiil cusub, qor *CUSUB*."
+        send_customer_match_confirmation(sender_phone, names[0], allow_new=allow_new)
+        return
     elif stage == "enter_full_name":
         prompt = (
             f"Ma helin *{entry.get('customer_name')}* liiska macaamiisha.\n"
@@ -5244,6 +5255,9 @@ async def _whatsapp_webhook_process(request: Request):
         "other_import": "7", "import — deymo hore": "7", "soo geli daymo hore": "7",
         "other_help": "8", "caawimaad": "8",
         "other_back": "9", "dib u noqo": "9",
+        "customer_match_yes": "HAA", "haa": "HAA",
+        "customer_match_no": "MAYA", "maya": "MAYA",
+        "customer_match_new": "CUSUB", "qof cusub": "CUSUB",
         "import_mode_debt": "DEYN", "deyn": "DEYN",
         "import_mode_cancel": "CANCEL", "jooji": "CANCEL",
         "import_confirm_ok": "OK", "ok": "OK",
@@ -5865,10 +5879,8 @@ async def _whatsapp_webhook_process(request: Request):
         customer_match_waiting_for_shop = (
             active_customer_match.get("business_user_id") == str(business_user_id)
         )
-        if customer_match_waiting_for_shop and (
-            normalized_inbound in {"cusub"}
-            or re.search(r"\b(?:caawin|caawi|help)\b", normalized_inbound, re.I)
-        ):
+        if customer_match_waiting_for_shop and normalized_inbound in {"cusub"}:
+            # CUSUB is a valid answer inside the active match confirmation.
             pending_new_request = False
         if (
             customer_match_waiting_for_shop
@@ -7218,7 +7230,16 @@ async def _whatsapp_webhook_process(request: Request):
         send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "contextual_followup_answered"}
 
-    menu_words = {"menu", "start", "help", "caawi", "caawimaad", "bilow"}
+    help_words = {"help", "caawi", "caawin", "caawimaad"}
+    if guided_text.casefold() in help_words:
+        CONVERSATION_SESSIONS.pop(sender_phone, None)
+        GUIDED_SESSIONS.pop(sender_phone, None)
+        PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
+        CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+        send_whatsapp(sender_phone, deynjir_help_message())
+        return {"status": "help_sent"}
+
+    menu_words = {"menu", "start", "bilow"}
     if guided_text.casefold() in menu_words:
         CONVERSATION_SESSIONS.pop(sender_phone, None)
         # MENU always starts a fresh menu context, even when it interrupts an old workflow.
@@ -7778,6 +7799,14 @@ async def _whatsapp_webhook_process(request: Request):
             CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
             send_whatsapp(sender_phone, "⌛ Xulashadii macmiilka way dhacday. Waxba lama diiwaangelin. Fadlan macaamilka mar kale dir.")
             return {"status": "customer_match_session_expired"}
+
+    if customer_match_state and pending_new_request:
+        # A clear new command (e.g. CAawin, DEYN CUSUB, LIISKA DAYNTA,
+        # MENU, search, or another supported operation) takes priority over
+        # the pending duplicate-name question. Do not let the command become
+        # a customer name or leave a stale match session to hijack the next reply.
+        CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+        customer_match_state = None
 
     if customer_match_state and not pending_new_request:
         answer = str(message_text or "").strip()
@@ -8810,7 +8839,7 @@ async def _whatsapp_webhook_process(request: Request):
                 return {"status": "pending_clarification_save_error"}
             clarification_prompt = (
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
-                "Fadlan cadee waxa aad rabto inaad xarayso."
+                "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
             )
             send_deynjir_choice_buttons(
                 sender_phone, clarification_prompt,
