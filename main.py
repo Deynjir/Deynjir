@@ -2464,11 +2464,17 @@ def parse_somali_narrative_due_date_update(message_text):
     # descriptive debt/payment wording. Take the first clear clause only.
     prefix = raw[:date_match.start()].strip(" \t,;:-")
     marker = re.search(
-        r"\b(?:wuxuu?|wuxun|waxuu|waxay|wuu|waxaa|waxa\s+uu|"
+        r"\b(?:wuxuu?|wuxun|wuxuu?u|waxuu|waxay|wuu|waxaa|waxa\s+uu|"
         r"waxay\s+uu|isagoo|iyadoo)\b",
         prefix,
         re.I,
     )
+    # Some common Somali variants put the debt amount before the subject/verb:
+    # "Mahad Xasan lacag 10& wuxun ku bamey ...". In that construction,
+    # "lacag 10&" describes the existing debt and is not part of the name.
+    lacag_marker = re.search(r"\blacag(?:ta)?\b", prefix, re.I)
+    if lacag_marker and (marker is None or lacag_marker.start() < marker.start()):
+        marker = lacag_marker
     if marker:
         name = prefix[:marker.start()].strip(" \t,;:-")
     else:
@@ -2504,6 +2510,9 @@ def parse_somali_narrative_due_date_update(message_text):
         "days_until_due": None,
         "description": None,
         "_somali_narrative_due_date_update": True,
+        # Amounts in this narrative describe the existing debt; the requested
+        # operation is strictly a promised-date change, never a balance edit.
+        "_amount_is_context_only": True,
     }
 
 
@@ -9270,7 +9279,11 @@ async def _whatsapp_webhook_process(request: Request):
         # a request to update that customer's existing debt date, not create a
         # second debt with amount 0. Example: existing debt is $4 with no due
         # date; "C/SAMAD SANDHEERE oct 10" should update its date to Oct 10.
-        source_has_amount = bool(entry.get("_source_amount_verified")) or (message_has_explicit_amount_for_name(message_text, name) if name else False)
+        source_has_amount = (
+            False if entry.get("_amount_is_context_only")
+            else bool(entry.get("_source_amount_verified"))
+            or (message_has_explicit_amount_for_name(message_text, name) if name else False)
+        )
         if action == "ADD" and amount is not None and not source_has_amount:
             # The model may hallucinate/copy a balance not present in the user's
             # message. Never apply that amount as a financial transaction.
@@ -9440,7 +9453,11 @@ async def _whatsapp_webhook_process(request: Request):
                 continue
 
         # Recover the full stored name from the original WhatsApp message if AI shortened it.
-        if name and action in {"ADD", "PAY", "EDIT", "DELETE", "HISTORY", "SEARCH"}:
+        if (
+            name
+            and action in {"ADD", "PAY", "EDIT", "DELETE", "HISTORY", "SEARCH"}
+            and not entry.get("_somali_narrative_due_date_update")
+        ):
             try:
                 recovered_name = resolve_name_from_original_message(
                     business_user_id, message_text, name
@@ -10078,7 +10095,14 @@ async def _whatsapp_webhook_process(request: Request):
                 matches = find_debtor_matches(business_user_id, name)
 
                 if len(matches) == 0:
-                    send_whatsapp(sender_phone, f"❌ Ma hayo deynta aan weli la bixin ee {name}.")
+                    if entry.get("_somali_narrative_due_date_update"):
+                        send_whatsapp(
+                            sender_phone,
+                            f"⚠️ Ma helin deyn furan oo si hubaal ah ugu dhiganta *{name}*. "
+                            "Ballanta lama beddelin, lacagta lama taaban. Fadlan hubi magaca buuxa ee ku qoran liiska deymaha, kadibna mar kale ii soo dir."
+                        )
+                    else:
+                        send_whatsapp(sender_phone, f"❌ Ma hayo deynta aan weli la bixin ee {name}.")
                     failed_inserts.append({"name": name, "reason": "Debtor not found"})
                     continue
 
