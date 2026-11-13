@@ -6064,6 +6064,22 @@ async def _whatsapp_webhook_process(request: Request):
             RENAME_SESSIONS.pop(sender_phone, None)
         direction_reply = parse_transaction_clarification(message_text)
         numeric_reply = str(message_text or "").strip()
+        # An active reminder-selection list owns numeric replies such as "2"
+        # and "1,3". This priority must be applied before transaction-direction
+        # parsing and before an older guided main-menu session can consume them.
+        active_reminder_state = REMINDER_SESSIONS.get(sender_phone) or {}
+        reminder_numeric_reply_priority = bool(
+            active_reminder_state.get("business_user_id") == str(business_user_id)
+            and active_reminder_state.get("stage") == "selecting"
+            and re.fullmatch(r"\s*\d+(?:\s*[,; ]\s*\d+)*\s*", numeric_reply)
+        )
+        if reminder_numeric_reply_priority:
+            pending_new_request = False
+            print(
+                f"📣 Reminder selection owns numeric reply {numeric_reply!r} "
+                f"for sender={sender_phone}"
+            )
+
         # If a duplicate-name selector is waiting, its numbered choices own
         # the next numeric reply. An older menu must not steal "1" or "2".
         customer_match_numeric_reply_priority = bool(
@@ -6073,6 +6089,7 @@ async def _whatsapp_webhook_process(request: Request):
         )
         guided_menu_choice = (
             not pending_transaction_clarification_active
+            and not reminder_numeric_reply_priority
             and not customer_match_numeric_reply_priority
             and guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
             and numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
@@ -6099,6 +6116,7 @@ async def _whatsapp_webhook_process(request: Request):
             and not undo_waiting_for_this_shop
             and not (rename_waiting_for_this_shop and not rename_interrupt)
             and direction_reply in {"ADD", "PAY"}
+            and not reminder_numeric_reply_priority
             and not guided_menu_choice
             and not guided_amount_reply
             and not financial_confirmation_reply
