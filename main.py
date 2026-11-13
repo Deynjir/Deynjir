@@ -83,6 +83,9 @@ PENDING_REPLY_REMINDER_ENABLED = os.getenv("PENDING_REPLY_REMINDER_ENABLED", "fa
 # Temporary manual reminder workflow. Sessions expire after 15 minutes and are
 # cleared before sending so a repeated "HAA DIR" cannot resend the same batch.
 REMINDER_SESSIONS = {}
+# Evening inactivity check-in menu; owns its button/numeric replies for 24 hours.
+INACTIVITY_SESSIONS = {}
+INACTIVITY_SESSION_TTL = timedelta(hours=24)
 # Two-step customer-name correction sessions (sender -> shop/name/stage).
 RENAME_SESSIONS = {}
 # Amount edits are staged and require explicit confirmation before changing a balance.
@@ -123,6 +126,7 @@ SEARCH_DETAIL_SESSIONS = {}
 # use the same registry so new workflows cannot be omitted from interruption logic.
 WORKFLOW_SESSION_MAPS = (
     IMPORT_SESSIONS, PAYMENT_EXPORT_SESSIONS, REMINDER_SESSIONS,
+    INACTIVITY_SESSIONS,
     RENAME_SESSIONS, AMOUNT_EDIT_SESSIONS, GUIDED_SESSIONS,
     PAUSED_GUIDED_SESSIONS, CUSTOMER_MATCH_SESSIONS, DELETE_SESSIONS,
     FIRST_DEBT_SESSIONS,
@@ -139,6 +143,7 @@ PERSISTED_SESSION_MAPS = {
     "first_debt": FIRST_DEBT_SESSIONS,
     "conversation": CONVERSATION_SESSIONS,
     "reminder": REMINDER_SESSIONS,
+    "inactivity": INACTIVITY_SESSIONS,
     "rename": RENAME_SESSIONS,
     "amount_edit": AMOUNT_EDIT_SESSIONS,
     "import": IMPORT_SESSIONS,
@@ -695,7 +700,7 @@ def format_reminder_list(customers, missing_phone_count=0):
     if missing_phone_count:
         lines.extend([
             "",
-            f"ℹ️ {missing_phone_count} Lanbarkan ma saxna ama laguma isticmaalo WhatsApp.",
+            f"ℹ️ {missing_phone_count} Lanbar lama Save-garayn ama ma saxna ama laguma isticmaalo WhatsApp.",
         ])
     return "\n".join(lines)
 def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone, is_repeat=False):
@@ -719,7 +724,7 @@ def build_debt_reminder(debtor, shopkeeper_name, shopkeeper_phone, is_repeat=Fal
     )
     return (
         f"Asc {name},\n\n"
-        f"Waxaan si xushmad leh kuu xusuusinayaa in aad soo bixiso "
+        f"Waxaan ku xusuusinayaa in aad soo bixiso "
         f"lacagtii daynta ahayd oo dhan: *${balance:.2f}*.\n\n"
         f"Fariintan waxaa kuu soo diray *{sender}*.\n\n"
         "Fadlan sida ugu dhakhsaha badan u bixi lacagta.  Mahadsanid."
@@ -5812,6 +5817,67 @@ async def _whatsapp_webhook_process(request: Request):
 
         business_user_id = business_user["id"]
 
+        # The evening inactivity menu owns its reply buttons and numeric fallback
+        # before pending transaction clarification, guided menus, or payment routing.
+        inactivity_state = INACTIVITY_SESSIONS.get(sender_phone) or {}
+        inactivity_choice_raw = str(message_text or "").strip()
+        inactivity_choice_key = inactivity_choice_raw.casefold()
+        inactivity_choice_map = {
+            "1": "debt", "inactivity_debt": "debt", "deyn baxday": "debt",
+            "2": "payment", "inactivity_payment": "payment",
+            "deyn soo xarootay": "payment", "lacag bixin": "payment",
+            "3": "other", "inactivity_other": "other", "adeeg kale": "other",
+        }
+        inactivity_choice = inactivity_choice_map.get(inactivity_choice_key)
+        if inactivity_state:
+            inactivity_expiry = inactivity_state.get("expires_at")
+            if (
+                inactivity_state.get("business_user_id") == str(business_user_id)
+                and inactivity_expiry
+                and datetime.now(timezone.utc) <= inactivity_expiry
+                and inactivity_choice
+            ):
+                INACTIVITY_SESSIONS.pop(sender_phone, None)
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                if inactivity_choice == "debt":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "debt_name",
+                        "transaction_type": "debt",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
+                    _save_persisted_workflow_sessions(sender_phone)
+                    send_whatsapp(
+                        sender_phone,
+                        "Magaca macmiilka deynta lagu leeyahay?\\n\\nQor *JOOJI* si aad uga baxdo."
+                    )
+                    return {"status": "inactivity_menu_debt_started"}
+                if inactivity_choice == "payment":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "payment_name",
+                        "transaction_type": "payment",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
+                    _save_persisted_workflow_sessions(sender_phone)
+                    send_whatsapp(
+                        sender_phone,
+                        "Magaca qofka lacagta bixiyey?\\n\\nQor *JOOJI* si aad uga baxdo."
+                    )
+                    return {"status": "inactivity_menu_payment_started"}
+                GUIDED_SESSIONS[sender_phone] = {
+                    "stage": "menu_other",
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+                }
+                _save_persisted_workflow_sessions(sender_phone)
+                send_deynjir_other_services_menu(sender_phone, page=1)
+                return {"status": "inactivity_menu_other_services"}
+            elif (
+                inactivity_state.get("business_user_id") == str(business_user_id)
+                and inactivity_expiry
+                and datetime.now(timezone.utc) > inactivity_expiry
+            ):
+                INACTIVITY_SESSIONS.pop(sender_phone, None)
+                _save_persisted_workflow_sessions(sender_phone)
+
         # Database-backed transaction clarification has priority over every
         # in-memory workflow. A short reply such as "1" must answer ADD/PAY,
         # never an old correction, undo, or first-debt onboarding prompt.
@@ -9150,7 +9216,7 @@ async def _whatsapp_webhook_process(request: Request):
                 return {"status": "pending_clarification_save_error"}
             clarification_prompt = (
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
-                "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
+                "Ma deyn baxday baa mise mid soo xarootay."
             )
             send_deynjir_choice_buttons(
                 sender_phone, clarification_prompt,
@@ -9824,7 +9890,7 @@ async def _whatsapp_webhook_process(request: Request):
                         "expires_at": datetime.now(timezone.utc) + DEPOSIT_OFFER_TTL,
                     }
                     send_whatsapp(sender_phone,
-                        f"⚠️ *{name}* kuma jiro liiska macaamiishaada, mana laha deyn diiwaangashan.\n\n"
+                        f"⚠️ *{name}* kuma hayo liiska macaamiishaada, mana laha deyn diiwaangashan.\n\n"
                         f"Ma rabtaa in ${proposed_deposit:.2f} loogu diiwaangeliyo *dhigaal* ahaan?\n\n"
                         "*HAA* — Dhigaal samee\n*MAYA* — Jooji\n\n"
                         "Waxba lama kaydin ilaa aad HAA ku xaqiijiso.")
@@ -10596,7 +10662,7 @@ async def _whatsapp_webhook_process(request: Request):
                     message = (
                         f"📒 *Xisaabta {matched_display_name}:* "
                         f"Wadarta deynta ${original_total:.2f}, "
-                        f"lacagta uu bixiyay ${total_paid:.2f}, "
+                        f"lacag bixinta ${total_paid:.2f}, "
                         f"haraaga hadda ${total_balance:.2f}."
                     )
 
@@ -11511,11 +11577,17 @@ async def inactivity_checkin(request: Request):
         return {"status": "database_error"}
 
     message = (
-        "🌙 *Xusuusin*\n\n"
-        "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\n\n"
-        "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\n\n"
-        "Haddii ay jiraan, ii soo dir si aan diiwaankaaga u cusboonaysiiyo.\n\n"
-        "Mahadsanid! 🤝"
+        "🌙 *Xusuusin*\\n\\n"
+        "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\\n\\n"
+        "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\\n\\n"
+        "*Haddii ay jiraan, soo geli:*"
+    )
+    fallback_message = (
+        message + "\\n\\n"
+        "1. Deyn baxday\\n"
+        "2. Deyn soo xarootay\\n"
+        "3. Adeeg kale\\n\\n"
+        "Dooro 1, 2 ama 3."
     )
 
     for user in users:
@@ -11561,14 +11633,32 @@ async def inactivity_checkin(request: Request):
                 )
                 continue
 
-            ok = send_whatsapp(phone, message)
+            INACTIVITY_SESSIONS[phone] = {
+                "business_user_id": str(business_user_id),
+                "stage": "menu",
+                "expires_at": datetime.now(timezone.utc) + INACTIVITY_SESSION_TTL,
+            }
+            _save_persisted_workflow_sessions(phone)
+
+            ok = send_deynjir_choice_buttons(
+                phone,
+                fallback_message,
+                [
+                    ("INACTIVITY_DEBT", "Deyn baxday"),
+                    ("INACTIVITY_PAYMENT", "Deyn soo xarootay"),
+                    ("INACTIVITY_OTHER", "Adeeg kale"),
+                ],
+                fallback_message,
+            )
 
             if ok:
                 sent_count += 1
-                print(f"✅ Inactivity reminder sent: user={business_user_id}")
+                print(f"✅ Inactivity reminder with reply buttons sent: user={business_user_id}")
             else:
-                error_count += 1
-                print(f"❌ Inactivity reminder failed: user={business_user_id}")
+                # The helper sends the text fallback when interactive buttons fail.
+                # Keep the session so numeric choices still work.
+                sent_count += 1
+                print(f"ℹ️ Inactivity reminder sent with text fallback: user={business_user_id}")
 
         except Exception as e:
             error_count += 1
