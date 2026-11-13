@@ -7610,6 +7610,46 @@ async def _whatsapp_webhook_process(request: Request):
         send_whatsapp(sender_phone, "Dooro *EXCEL* ama *PDF*. Qor *CANCEL* si aad u joojiso.")
         return {"status": "payment_export_waiting_format"}
 
+    # A standalone PDF immediately after viewing a customer's account must be
+    # handled deterministically before conversational/AI routing can consume it.
+    # Payment-export sessions above retain priority because their PDF choice is
+    # a different report workflow.
+    standalone_customer_pdf = bool(re.fullmatch(
+        r"\s*(?:pdf|soo\s+dir\s+pdf|pdf\s+soo\s+dir|pdf\s+xisaabta|xisaabta\s+pdf)\s*[.!?]*\s*",
+        str(message_text or ""),
+        flags=re.IGNORECASE,
+    ))
+    if standalone_customer_pdf:
+        previous_statement = LAST_HISTORY_REQUESTS.get(sender_phone)
+        if not previous_statement or str(previous_statement.get("business_user_id")) != str(business_user_id):
+            send_whatsapp(
+                sender_phone,
+                "ℹ️ Marka hore codso xisaabta macmiilka. Kadib soo qor *PDF* si aan PDF ugu diro."
+            )
+            return {"status": "no_recent_statement_for_pdf"}
+        customer_for_pdf = str(previous_statement.get("customer_name") or "").strip()
+        if not customer_for_pdf:
+            send_whatsapp(sender_phone, "❌ Magaca macmiilka lama helin. Fadlan mar kale codso xisaabtiisa.")
+            return {"status": "missing_pdf_customer_name"}
+        try:
+            pdf_sent = send_customer_statement_pdf(
+                sender_phone,
+                business_user_id,
+                customer_for_pdf,
+                business_user.get("name"),
+            )
+            if not pdf_sent:
+                send_whatsapp(
+                    sender_phone,
+                    "❌ PDF-ga xisaabta lama soo saari karin ama lama diri karin. Fadlan mar kale codso xisaabta macmiilka, kadibna qor *PDF*."
+                )
+                return {"status": "customer_statement_pdf_failed"}
+            return {"status": "customer_statement_pdf_sent"}
+        except Exception as pdf_error:
+            print(f"⚠️ Customer statement PDF request failed: {type(pdf_error).__name__}: {pdf_error}")
+            send_whatsapp(sender_phone, "❌ PDF lama diyaarin karin hadda. Fadlan mar kale isku day.")
+            return {"status": "customer_statement_pdf_error"}
+
     # Command: LIISKA LACAG BIXINTA [NOV | 03/11/2026 - 07/11/2026]
     payment_list_match = re.fullmatch(
         rf"\s*(?:liiska\s+)?lacag\s*bixinta(?:\s+({PAYMENT_REPORT_MONTH_PATTERN}|"
