@@ -2432,6 +2432,81 @@ def parse_contextual_due_date_update(message_text, recent_customer_name):
     }
 
 
+def parse_somali_narrative_due_date_update(message_text):
+    """Safely parse a Somali narrative that names a debtor then describes a promised date.
+
+    Example: "Mahad Xasan wuxu qabe lacag 10& wuxun ku bamey in uu ku bixinayo 1/12/2026".
+    The customer name is the leading phrase before the first narrative verb, not
+    the whole sentence and never a fuzzy match against arbitrary sentence words.
+    """
+    raw = " ".join(str(message_text or "").strip().split())
+    if not raw:
+        return None
+
+    # Require an explicit date at the end of the message and a payment-promise
+    # context. This parser is intentionally narrow to avoid reclassifying debts.
+    date_match = re.search(
+        r"(?P<date>\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2})\s*[.!؟]?\s*$",
+        raw,
+        re.I,
+    )
+    if not date_match:
+        return None
+    if not re.search(
+        r"\b(?:bixin(?:ayo|ayaa|ayaa|doono|doonta|doonaan)?|bixi(?:n|naya)?|"
+        r"bamey|ballan|balan|muddo|mudada|ku\s+leh|qabe|qabo)\b",
+        raw,
+        re.I,
+    ):
+        return None
+
+    # Somali narrative connectors separate the actual customer name from
+    # descriptive debt/payment wording. Take the first clear clause only.
+    prefix = raw[:date_match.start()].strip(" \t,;:-")
+    marker = re.search(
+        r"\b(?:wuxuu?|wuxun|waxuu|waxay|wuu|waxaa|waxa\s+uu|"
+        r"waxay\s+uu|isagoo|iyadoo)\b",
+        prefix,
+        re.I,
+    )
+    if marker:
+        name = prefix[:marker.start()].strip(" \t,;:-")
+    else:
+        # Fallback for compact phrases such as "Mahad Xasan ballantiisa...".
+        marker = re.search(r"\b(?:ballan(?:ta)?|balan(?:ta)?|muddo(?:da)?|taariikh(?:da)?)\b", prefix, re.I)
+        if not marker:
+            return None
+        name = prefix[:marker.start()].strip(" \t,;:-")
+
+    name = re.sub(r"^(?:ballanta|balanta|ballan|balan|update|edit|beddel|cusboonaysii)\s+", "", name, flags=re.I).strip()
+    name_parts = name.split()
+    if not name_parts or len(name_parts) > 4 or len(name) > 80:
+        return None
+    if re.search(r"\b(?:lacag|dolar|dollar|usd|deyn|dayn|bixin|bixiyay|qabe|qabo)\b|[$&]", name, re.I):
+        return None
+
+    raw_date = date_match.group("date")
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date):
+            parsed = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        else:
+            parsed = datetime.strptime(raw_date.replace("-", "/"), "%d/%m/%Y").date()
+    except ValueError:
+        return None
+
+    return {
+        "action": "EDIT",
+        "customer_name": name,
+        "amount": None,
+        "new_amount": None,
+        "promised_date": parsed.isoformat(),
+        "new_date": parsed.isoformat(),
+        "days_until_due": None,
+        "description": None,
+        "_somali_narrative_due_date_update": True,
+    }
+
+
 def parse_single_due_date_update(message_text):
     """Parse one existing customer name followed by a due date, e.g. NAME NOV 16."""
     raw = " ".join(str(message_text or "").strip().split())
@@ -3950,31 +4025,25 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
             return resolved
         return None
 
-    # If the customer typed a small spelling variation (e.g. MAT AAN vs MATAN),
-    # compare same-length word windows from the original message against names.
-    message_parts = normalize_customer_name(message_text).split()
-    requested_parts = normalize_customer_name(ai_name).split()
+    # Fuzzy recovery may compare only the model's extracted customer-name
+    # field with stored names. Never scan arbitrary windows of the full message:
+    # narrative words, amounts and dates can otherwise accidentally match an
+    # unrelated customer (the QARAN incident).
+    requested_parts = ai_norm.split()
+    narrative_words = {
+        "wuxuu", "wuxu", "wuxun", "waxuu", "waxay", "wuu", "lacag",
+        "deyn", "dayn", "qabe", "qabo", "bixinayo", "bixiyay", "bixisay",
+        "bamey", "ku", "leh", "in", "uu", "iyo", "ayaa", "ayuu",
+    }
+    if not requested_parts or len(requested_parts) > 3 or any(part in narrative_words for part in requested_parts):
+        print(f"⚠️ Skipping fuzzy name recovery because extracted name looks like sentence text: {ai_name!r}")
+        return None
+
     candidates = []
-
     for normalized, display in stored_names.items():
-        stored_parts = normalized.split()
-        if not stored_parts:
-            continue
-        # Compare contiguous phrase windows of the same word count. This
-        # avoids treating a shared token like CALI as a full-name match.
-        windows = [
-            " ".join(message_parts[i:i + len(stored_parts)])
-            for i in range(max(0, len(message_parts) - len(stored_parts) + 1))
-        ]
-        score = max((_name_similarity(window, normalized) for window in windows), default=0.0)
-
-        has_related_token = any(
-            _token_match_score(req, stored) >= 0.78
-            for req in requested_parts
-            for stored in stored_parts
-        )
-        if score >= 0.78 and has_related_token:
-            candidates.append((score, len(stored_parts), len(normalized), display, normalized))
+        score = _name_similarity(ai_norm, normalized)
+        if score >= 0.82:
+            candidates.append((score, len(normalized.split()), len(normalized), display, normalized))
 
     if not candidates:
         return None
@@ -8654,7 +8723,14 @@ async def _whatsapp_webhook_process(request: Request):
     recent_selected_customer = get_recent_selected_customer(sender_phone, business_user_id)
     contextual_payment_entry = parse_contextual_somali_payment(message_text, recent_selected_customer)
     batch_due_date_entries = parse_due_date_batch(message_text)
-    single_due_date_entry = parse_single_due_date_update(message_text) if not batch_due_date_entries else None
+    somali_narrative_due_date_entry = (
+        parse_somali_narrative_due_date_update(message_text)
+        if not batch_due_date_entries else None
+    )
+    single_due_date_entry = (
+        parse_single_due_date_update(message_text)
+        if not batch_due_date_entries and not somali_narrative_due_date_entry else None
+    )
     contextual_due_date_entry = parse_contextual_due_date_update(message_text, recent_selected_customer)
     if recent_selected_customer:
         dynamic_system_prompt += (
@@ -8708,6 +8784,13 @@ async def _whatsapp_webhook_process(request: Request):
     elif batch_due_date_entries:
         entries = batch_due_date_entries
         print(f"📅 Deterministic multi-customer due-date batch parsed: {len(entries)} entries")
+    elif somali_narrative_due_date_entry:
+        entries = [somali_narrative_due_date_entry]
+        print(
+            "📅 Deterministic Somali narrative due-date update parsed: "
+            f"{somali_narrative_due_date_entry['customer_name']!r} -> "
+            f"{somali_narrative_due_date_entry['new_date']}"
+        )
     elif single_due_date_entry:
         entries = [single_due_date_entry]
         print(f"📅 Deterministic single-customer due-date update parsed: {single_due_date_entry['customer_name']!r} -> {single_due_date_entry['new_date']}")
