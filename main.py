@@ -653,7 +653,7 @@ def is_reminder_start_command(text):
 
 def is_reminder_cancel_command(text):
     return bool(re.fullmatch(
-        r"\s*(?:jooji|jooji xusuusinta|cancel|stop)\s*[.!]?\s*",
+        r"\s*(?:reminder_cancel|jooji|jooji xusuusinta|cancel|stop)\s*[.!]?\s*",
         str(text or ""),
         flags=re.IGNORECASE,
     ))
@@ -661,7 +661,7 @@ def is_reminder_cancel_command(text):
 
 def is_reminder_confirm_command(text):
     return bool(re.fullmatch(
-        r"\s*haa\s+dir\s*[.!]?\s*",
+        r"\s*(?:reminder_confirm|haa\s+dir)\s*[.!]?\s*",
         str(text or ""),
         flags=re.IGNORECASE,
     ))
@@ -6109,6 +6109,20 @@ async def _whatsapp_webhook_process(request: Request):
             and not (rename_waiting_for_this_shop and not rename_interrupt)
             and is_clear_new_supported_request(message_text, include_transactions=True)
         )
+        # Reminder confirmation/cancellation replies belong to the reminder
+        # workflow, even if the general request classifier mistakes "HAA DIR"
+        # for a new financial request.
+        active_reminder_for_shop = REMINDER_SESSIONS.get(sender_phone) or {}
+        reminder_confirmation_reply = (
+            active_reminder_for_shop.get("business_user_id") == str(business_user_id)
+            and active_reminder_for_shop.get("stage") == "confirming"
+            and (
+                is_reminder_confirm_command(message_text)
+                or is_reminder_cancel_command(message_text)
+            )
+        )
+        if reminder_confirmation_reply:
+            pending_new_request = False
         # CUSUB and help are replies inside an active customer-match workflow,
         # not new financial requests. Keep the saved ADD/PAY entry (name + amount)
         # so rejecting a suggested match never forces the shopkeeper to retype it.
@@ -8528,10 +8542,19 @@ async def _whatsapp_webhook_process(request: Request):
                 f"👥 Tirada: {len(selected_customers)} macmiil",
                 f"💰 Wadarta deynta: ${total:.2f}",
                 "",
-                "Haddii aad hubisay, soo qor *HAA DIR* si fariimaha loo diro.",
-                "Haddii kale soo qor *JOOJI*."
+                "Haddii aad hubisay, dooro *HAA DIR*.",
+                "Haddii kale dooro *JOOJI*."
             ])
-            send_whatsapp(sender_phone, "\n".join(preview_lines))
+            preview_text = "\n".join(preview_lines)
+            send_deynjir_choice_buttons(
+                sender_phone,
+                preview_text,
+                [
+                    ("REMINDER_CONFIRM", "HAA DIR"),
+                    ("REMINDER_CANCEL", "JOOJI"),
+                ],
+                preview_text + "\n\nSoo qor *HAA DIR* si aad u dirto, ama *JOOJI* si aad u baajiso."
+            )
             return {"status": "reminder_selection_confirm_required", "selected": len(selected_customers)}
         if re.fullmatch(r"\s*\d+(?:\s*[,; ]\s*\d+)*\s*", reminder_text):
             send_whatsapp(
