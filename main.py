@@ -219,7 +219,11 @@ def _load_persisted_workflow_sessions(sender_phone):
     except Exception as exc:
         # Financial operations remain guarded by idempotent RPCs. Session
         # persistence failures are logged; the active process can still proceed.
-        print(f"⚠️ Workflow session restore failed: {type(exc).__name__}: {exc}")
+        print(
+            "⚠️ WORKFLOW_SESSION_RESTORE_FAILURE "
+            f"sender={str(sender_phone)[-4:]} "
+            f"error_type={type(exc).__name__} error={exc}"
+        )
 
 
 def _save_persisted_workflow_sessions(sender_phone):
@@ -239,15 +243,31 @@ def _save_persisted_workflow_sessions(sender_phone):
                 "payload": payload, "expires_at": expiry,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
-        # Replace the sender snapshot as a single logical save. Rows absent from
-        # this snapshot are removed so completed/cancelled flows do not return.
-        (supabase.table("deynjir_workflow_sessions").delete()
-            .eq("sender_phone", str(sender_phone)).execute())
+        # Save current rows BEFORE deleting stale rows. If serialization or the
+        # upsert fails, the previously persisted workflow remains recoverable.
         if rows:
             supabase.table("deynjir_workflow_sessions").upsert(
                 rows, on_conflict="sender_phone,session_name").execute()
+
+        existing_result = (supabase.table("deynjir_workflow_sessions")
+            .select("session_name")
+            .eq("sender_phone", str(sender_phone)).execute())
+        active_names = {row.get("session_name") for row in rows}
+        stale_names = {
+            row.get("session_name") for row in (existing_result.data or [])
+            if row.get("session_name") not in active_names
+        }
+        for stale_name in stale_names:
+            if stale_name:
+                (supabase.table("deynjir_workflow_sessions").delete()
+                    .eq("sender_phone", str(sender_phone))
+                    .eq("session_name", stale_name).execute())
     except Exception as exc:
-        print(f"⚠️ Workflow session save failed: {type(exc).__name__}: {exc}")
+        print(
+            "⚠️ WORKFLOW_SESSION_PERSISTENCE_FAILURE "
+            f"operation=save sender={str(sender_phone)[-4:]} "
+            f"error_type={type(exc).__name__} error={exc}"
+        )
 
 
 def deynjir_main_menu():
@@ -636,7 +656,7 @@ def is_reminder_cancel_command(text):
 
 def is_reminder_confirm_command(text):
     return bool(re.fullmatch(
-        r"\s*(?:haa dir|haa|dir|send|confirm|yes|confirm send)\s*[.!]?\s*",
+        r"\s*haa\s+dir\s*[.!]?\s*",
         str(text or ""),
         flags=re.IGNORECASE,
     ))
@@ -1145,13 +1165,13 @@ def is_contextual_followup(message_text, sender_phone):
         return False
     if re.match(r"^(?:add|pay|deyn|lacag bixin|liiska|raadi|search|faahfaahin|history|report|export|import|undo|delete|edit|dhigaal|menu|start|help)\b", normalized, re.I):
         return False
-    # Very short turns are often contextual; longer turns need a clear conversational cue.
-    short_turn = len(normalized.split()) <= 6
+    # Do not treat every short message as conversational context: short Somali
+    # commands and ordinary statements must continue to the deterministic router.
     followup_cue = bool(re.search(
         r"\b(sidee|haddaba|markaas|marka|haddii|sidaas|taas|taasi|isaga|iyada|kuwaas|maxaa kale|ka waran|ii sheeg|ii sharax|ii faahfaahi|tusaale|faahfaahi|ma fahmin|maxaad ula jeeddaa|maxay ka dhigan tahay|ma ii sharxi kartaa|sax miyaa|run miyaa|haye|maya|haa|how|why|what about|what if|tell me more|explain|what do you mean|and then)\b",
         normalized, re.I
     ))
-    return short_turn or followup_cue
+    return followup_cue
 
 
 def is_natural_top_debt_question(message_text):
@@ -2688,6 +2708,42 @@ def is_explicit_due_date_change(message_text):
         str(message_text or ""),
         re.I,
     ))
+
+
+def is_ambiguous_amount_and_date_narrative(message_text):
+    """Detect a name + money + date narrative whose transaction direction is unclear.
+
+    Such a message must go to the main ADD/PAY menu, never the due-date editor,
+    customer search, or fuzzy customer-name recovery. Future-promise wording
+    (e.g. 'ku bixinayo') is not evidence that a payment has already happened.
+    """
+    raw = " ".join(str(message_text or "").strip().split())
+    if not raw:
+        return False
+
+    has_date = bool(re.search(
+        r"(?<!\d)(?:\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2})(?!\d)",
+        raw,
+        re.I,
+    ))
+    has_money = bool(re.search(
+        r"(?:\$\s*\d+(?:[.,]\d{1,2})?|\b\d+(?:[.,]\d{1,2})?\s*(?:&(?:\s*(?:dolar(?:ka|ro)?|dollar(?:s)?|usd))?|(?:dolar(?:ka|ro)?|dollar(?:s)?|usd)\b))",
+        raw,
+        re.I,
+    ))
+    if not (has_date and has_money):
+        return False
+
+    # Clear transaction instructions remain on their normal ADD/PAY paths.
+    explicit_direction = bool(re.search(
+        r"\b(?:deyn\s+cusub|dayn\s+cusub|add|lacag\s*bixin|pay|paid|"
+        r"bixiyay|bixisay|bixiyey|bixiyeen|soo\s*celiyay|soo\s*celisay|"
+        r"lacagtii\s+(?:waa\s*)?la\s*helay|wuu\s+qaatay|way\s+qaadatay|"
+        r"iga\s+qaatay|dayn\s+ayuu\s+qaatay)\b",
+        raw,
+        re.I,
+    ))
+    return not explicit_direction
 
 
 def remember_recent_transaction(sender_phone, business_user_id, customer_id, customer_name):
@@ -8248,6 +8304,7 @@ async def _whatsapp_webhook_process(request: Request):
     standalone_menu_choice = str(message_text or "").strip()
     if (
         re.fullmatch(r"[1-6]", standalone_menu_choice)
+        and sender_phone not in REMINDER_SESSIONS
         and not _has_active_in_memory_workflow(sender_phone)
         and pending_clarification is None
     ):
@@ -8729,6 +8786,18 @@ async def _whatsapp_webhook_process(request: Request):
         "If a weekday phrase could mean more than one date, ask one short clarification. "
         "A phone number (normally 9-15 digits, or 7-15 digits when explicitly labelled as a phone) is never a transaction amount. "
     )
+    # A message containing both a money amount and a date, but no clear ADD/PAY
+    # instruction, is not a due-date edit. Ask the shopkeeper to choose the
+    # transaction type through the main menu before interpreting any customer.
+    if is_ambiguous_amount_and_date_narrative(message_text):
+        activate_guided_menu(sender_phone)
+        send_deynjir_main_menu(sender_phone)
+        print(
+            "🧭 Ambiguous amount+date narrative routed to main ADD/PAY menu; "
+            f"no customer lookup or appointment update performed: {message_text!r}"
+        )
+        return {"status": "ambiguous_amount_date_routed_to_main_menu"}
+
     recent_selected_customer = get_recent_selected_customer(sender_phone, business_user_id)
     contextual_payment_entry = parse_contextual_somali_payment(message_text, recent_selected_customer)
     batch_due_date_entries = parse_due_date_batch(message_text)
