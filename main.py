@@ -277,6 +277,64 @@ def deynjir_other_services_menu():
     )
 
 
+def send_deynjir_other_services_menu(to_phone, page=1):
+    """Send the six services across three WhatsApp-compatible button pages."""
+    pages = {
+        1: (
+            "📋 ADEEGYADA KALE (1/3)\n\nDooro adeegga:",
+            [("OTHER_DEBT_LIST", "Liiska daynta"),
+             ("OTHER_SEARCH", "Raadi macmiil"),
+             ("OTHER_NEXT", "Adeegyada xiga")],
+            "1️⃣ Liiska daynta\n2️⃣ Raadi macmiil\n3️⃣ Adeegyada xiga"
+        ),
+        2: (
+            "📋 ADEEGYADA KALE (2/3)\n\nDooro adeegga:",
+            [("OTHER_APPOINTMENTS", "Ballamaha maanta"),
+             ("OTHER_HELP", "Caawimaad"),
+             ("OTHER_NEXT", "Adeegyada xiga")],
+            "3️⃣ Ballamaha maanta\n4️⃣ Caawimaad\n5️⃣ Adeegyada xiga"
+        ),
+        3: (
+            "📋 ADEEGYADA KALE (3/3)\n\nDooro adeegga:",
+            [("OTHER_IMPORT", "Soo geli daymo hore"),
+             ("OTHER_PAYMENTS", "Liiska lacag-bixinta"),
+             ("OTHER_BACK", "Ku noqo adeegyada hore")],
+            "5️⃣ Soo geli daymo hore (IMPORT)\n6️⃣ Liiska lacag-bixinta\n7️⃣ Ku noqo"
+        ),
+    }
+    body, buttons, fallback_lines = pages.get(page, pages[1])
+    return send_deynjir_choice_buttons(
+        to_phone, body, buttons,
+        fallback_lines + "\n\nSoo dir lambarka adeegga."
+    )
+
+
+def send_deynjir_choice_buttons(to_phone, body, buttons, fallback_text):
+    """Send contextual WhatsApp reply buttons; preserve a text fallback."""
+    clean_phone = str(to_phone).replace("+", "").split("@")[0].strip()
+    if GREEN_API_TOKEN:
+        url = f"{GREEN_API_BASE}/waInstance{INSTANCE_ID}/sendInteractiveButtonsReply/{GREEN_API_TOKEN}"
+        payload = {
+            "chatId": f"{clean_phone}@c.us",
+            "header": "Deynjir",
+            "body": body,
+            "footer": "Dooro badhanka hoose",
+            "buttons": [
+                {"buttonId": str(button_id), "buttonText": str(button_text)}
+                for button_id, button_text in buttons
+            ],
+        }
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            print(f"📡 Green-API contextual buttons: {response.status_code} - {response.text}")
+            if response.ok and response.json().get("idMessage"):
+                return True
+        except Exception as exc:
+            print(f"⚠️ Contextual buttons unavailable; using text fallback: {type(exc).__name__}: {exc}")
+    send_whatsapp(to_phone, fallback_text)
+    return False
+
+
 def send_deynjir_main_menu(to_phone):
     """Send exactly three WhatsApp reply buttons; use text if API sending fails."""
     clean_phone = str(to_phone).replace("+", "").split("@")[0].strip()
@@ -4384,7 +4442,14 @@ def _stage_import(admin_phone, entries, import_mode="debt"):
         lines += ["", f"*Wadarta guud: ${total:.2f}*", "", "Hubi magacyada iyo lacagaha.",
                   "Haddii ay sax yihiin, soo qor *OK* si loo kaydiyo.",
                   "Haddii kale, soo qor *CANCEL* si loo joojiyo."]
-    send_whatsapp(admin_phone, "\n".join(lines))
+    preview_prompt = "\n".join(lines)
+    send_deynjir_choice_buttons(
+        admin_phone,
+        preview_prompt,
+        [("IMPORT_CONFIRM_OK", "OK, kaydi"),
+         ("IMPORT_CONFIRM_CANCEL", "CANCEL, jooji")],
+        preview_prompt
+    )
 
 
 def _import_duplicate_groups(business_user_id, entries):
@@ -4991,6 +5056,24 @@ async def _whatsapp_webhook_process(request: Request):
         "dayn cusub": "1",
         "dayn soo xarootay": "2",
         "adeeg kale": "3",
+        "tx_add": "1", "deyn cusub (add)": "1",
+        "tx_pay": "2", "lacag-bixin": "2", "lacag bixin": "2",
+        "tx_cancel": "3", "jooji": "3",
+        "import_both": "2", "labadaba geli": "2",
+        "import_single": "1", "hal deyn geli": "1",
+        "undo_yes": "1", "haa, ka noqo": "1", "haa ka noqo": "1",
+        "undo_no": "2", "maya, iska daa": "2", "maya iska daa": "2",
+        "other_debt_list": "1", "liiska daynta": "1",
+        "other_search": "2", "raadi macmiil": "2",
+        "other_appointments": "3", "ballamaha maanta": "3",
+        "other_help": "4", "caawimaad": "4",
+        "other_import": "5", "soo geli daymo hore": "5",
+        "other_payments": "6", "liiska lacag-bixinta": "6",
+        "other_next": "7", "adeegyada xiga": "7", "other_back": "8", "ku noqo adeegyada hore": "8",
+        "import_mode_debt": "DEYN", "deyn": "DEYN",
+        "import_mode_payment": "LACAG BIXIN", "lacag-bixin": "LACAG BIXIN",
+        "import_confirm_ok": "OK", "ok": "OK",
+        "import_confirm_cancel": "CANCEL", "cancel": "CANCEL",
     }
     message_text = _button_label_map.get(_button_label, message_text)
 
@@ -5102,13 +5185,21 @@ async def _whatsapp_webhook_process(request: Request):
                 _apply_import_duplicate_choice(session_for_choice, "2")
                 session_for_choice["request_id"] = secrets.token_urlsafe(24)
                 session_for_choice["stage"] = "ready"
-                send_whatsapp(sender_phone, "✅ Labada deymood waa la kala gelinayaa. soo qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
+                send_deynjir_choice_buttons(
+                    sender_phone, "✅ Labada deymood waa la kala gelinayaa. Ma kaydinnaa?",
+                    [("IMPORT_CONFIRM_OK", "OK, kaydi"), ("IMPORT_CONFIRM_CANCEL", "CANCEL, jooji")],
+                    "✅ Labada deymood waa la kala gelinayaa. Soo qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo."
+                )
                 return {"status": "import_duplicates_confirmed_separate"}
             if re.fullmatch(r"\s*1\s*", import_text):
                 _apply_import_duplicate_choice(session_for_choice, "1")
                 session_for_choice["request_id"] = secrets.token_urlsafe(24)
                 session_for_choice["stage"] = "ready"
-                send_whatsapp(sender_phone, "✅ Hal deyn oo keliya ayaan kaydinayaa. soo qor *OK* si aan u kaydiyo ama *CANCEL* si loo joojiyo.")
+                send_deynjir_choice_buttons(
+                    sender_phone, "✅ Hal deyn oo keliya ayaan kaydinayaa. Ma kaydiyaa?",
+                    [("IMPORT_CONFIRM_OK", "OK, kaydi"), ("IMPORT_CONFIRM_CANCEL", "CANCEL, jooji")],
+                    "✅ Hal deyn oo keliya ayaan kaydinayaa. Soo qor *OK* si aan u kaydiyo ama *CANCEL* si loo joojiyo."
+                )
                 return {"status": "import_duplicates_confirmed_single"}
             send_whatsapp(sender_phone, "ku Jawaab *2* si labada deymoodba loo geliyo, ama *1* si hal mid keliya loo geliyo. ama *CANCEL* si loo joojiyo.")
             return {"status": "awaiting_import_duplicate_choice"}
@@ -5138,7 +5229,12 @@ async def _whatsapp_webhook_process(request: Request):
                             if group.get("existing"):
                                 lines.append("  Deyn noocan ah hore ayay dukaanka ugu jirtaa.")
                         lines.extend(["", "*2* — Deymaha kala duwan labadaba geli.", "*1* — Hal deyn keliya hay.", "*CANCEL* — Jooji import-ka."])
-                        send_whatsapp(sender_phone, "\n".join(lines))
+                        prompt = "\n".join(lines)
+                        send_deynjir_choice_buttons(
+                            sender_phone, prompt,
+                            [("IMPORT_BOTH", "Labadaba geli"), ("IMPORT_SINGLE", "Hal deyn geli")],
+                            prompt + "\n\nSoo dir *2* ama *1*, ama *CANCEL* si loo joojiyo."
+                        )
                         return {"status": "import_duplicate_choice_required", "groups": len(duplicate_groups)}
                 _commit_import(sender_phone, session)
                 IMPORT_SESSIONS.pop(sender_phone, None)
@@ -5171,13 +5267,12 @@ async def _whatsapp_webhook_process(request: Request):
                     "entries": None, "mode": None, "request_id": secrets.token_urlsafe(24),
                     "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
                 }
-                send_whatsapp(sender_phone,
-                    f"✅ Magaca: {own_shop.get('name') or sender_phone}.\n\n"
-                    "Maxaad rabtaa inaad soo xarayso?\n"
-                    "*DEYN* — deymo cusub.\n"
-                    "*LACAG BIXIN* — Deyn soo xarootay.\n\n"
-                    "Kadib ii soo dir qoraal, Excel/CSV ama sawir.\n"
-                    "Xaqiiji, kadib soo qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
+                mode_prompt = f"✅ Magaca: {own_shop.get('name') or sender_phone}.\n\nMaxaad rabtaa inaad soo xarayso?"
+                send_deynjir_choice_buttons(
+                    sender_phone, mode_prompt,
+                    [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_PAYMENT", "LACAG BIXIN")],
+                    mode_prompt + "\n\n*DEYN* — deymo cusub.\n*LACAG BIXIN* — Deyn soo xarootay.\n\nKadib ii soo dir qoraal, Excel/CSV ama sawir."
+                )
                 return {"status": "import_own_shop_selected"}
             except Exception as exc:
                 print(f"❌ Own-shop import lookup error: {exc}")
@@ -5204,7 +5299,12 @@ async def _whatsapp_webhook_process(request: Request):
                 IMPORT_SESSIONS[sender_phone] = {"business_user_id": shop["id"], "shop_phone": target_phone,
                     "shop_name": shop.get("name") or target_phone, "entries": None, "mode": None,
                     "request_id": secrets.token_urlsafe(24), "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL}
-                send_whatsapp(sender_phone, f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\n\nMaxaad rabtaa inaad soo geliso?\n*DEYN* — deymo cusub.\n*LACAG BIXIN* — lacagaha laga bixiyay deymaha jira.\n\nKadib ii soo dir qoraal, Excel/CSV ama sawir.\nHubi hordhaca, kadib qor *OK* si loo kaydiyo ama *CANCEL* si loo joojiyo.")
+                mode_prompt = f"✅ Dukaanka waa la doortay: {shop.get('name') or target_phone}.\n\nMaxaad rabtaa inaad soo geliso?"
+                send_deynjir_choice_buttons(
+                    sender_phone, mode_prompt,
+                    [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_PAYMENT", "LACAG BIXIN")],
+                    mode_prompt + "\n\n*DEYN* — deymo cusub.\n*LACAG BIXIN* — lacagaha laga bixiyay deymaha jira.\n\nKadib ii soo dir qoraal, Excel/CSV ama sawir."
+                )
                 return {"status": "import_shop_selected"}
             except Exception as exc:
                 print(f"❌ Import shop lookup error: {exc}")
@@ -5221,7 +5321,7 @@ async def _whatsapp_webhook_process(request: Request):
                 active_import["mode"] = "debt"
                 active_import["entries"] = None
                 active_import["expires_at"] = datetime.now(timezone.utc) + IMPORT_SESSION_TTL
-                send_whatsapp(sender_phone, "✅ Waxaad dooratay *DEYN*. soo dir liiska deynta qoraal ahaan, Excel/CSV ama sawir ahaan.")
+                send_whatsapp(sender_phone, "✅ Waxaad dooratay *DEYN*. Soo dir liiska deynta qoraal ahaan, Excel/CSV ama sawir ahaan.")
                 return {"status": "import_mode_debt_selected"}
             if mode_choice in {"lacag bixin", "lacag bixinta", "payment", "payments", "bixin"}:
                 active_import["mode"] = "payment"
@@ -5566,7 +5666,7 @@ async def _whatsapp_webhook_process(request: Request):
             guided_expiry = guided_waiting.get("expires_at")
             if not guided_expiry or datetime.now(timezone.utc) > guided_expiry:
                 expired_menu_choice = (
-                    guided_waiting.get("stage") in {"menu", "menu_other"}
+                    guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
                     and str(message_text or "").strip() in {"1", "2", "3", "4", "5", "6"}
                 )
                 GUIDED_SESSIONS.pop(sender_phone, None)
@@ -5606,8 +5706,8 @@ async def _whatsapp_webhook_process(request: Request):
         direction_reply = parse_transaction_clarification(message_text)
         numeric_reply = str(message_text or "").strip()
         guided_menu_choice = (
-            guided_waiting.get("stage") in {"menu", "menu_other"}
-            and numeric_reply in {"1", "2", "3", "4", "5", "6"}
+            guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
+            and numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8"}
         )
         guided_amount_reply = guided_waiting.get("stage") in {"debt_amount", "payment_amount"} and _guided_amount(numeric_reply) is not None
         deposit_waiting = DEPOSIT_OFFER_SESSIONS.get(sender_phone) or {}
@@ -5753,11 +5853,18 @@ async def _whatsapp_webhook_process(request: Request):
                         "stage": "menu_other",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
                     }
-                    send_whatsapp(sender_phone, deynjir_other_services_menu())
+                    send_deynjir_other_services_menu(sender_phone)
                     return {"status": "other_services_menu_sent"}
 
             # OTHER SERVICES MENU: numbers are interpreted only in this stage.
             elif menu_stage == "menu_other":
+                if choice == "7":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "menu_other_page2",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+                    }
+                    send_deynjir_other_services_menu(sender_phone, page=2)
+                    return {"status": "other_services_page_two_sent"}
                 if choice == "1":
                     GUIDED_SESSIONS.pop(sender_phone, None)
                     message_text = "LIISKA DAYNTA"
@@ -5784,8 +5891,25 @@ async def _whatsapp_webhook_process(request: Request):
                     return {"status": "help_sent"}
 
                 elif choice == "5":
+                    # Start import directly: the import router runs earlier in this webhook.
                     GUIDED_SESSIONS.pop(sender_phone, None)
-                    message_text = "IMPORT"
+                    shop_name = str((business_user or {}).get("name") or sender_phone)
+                    IMPORT_SESSIONS[sender_phone] = {
+                        "business_user_id": str(business_user_id),
+                        "shop_phone": sender_phone,
+                        "shop_name": shop_name,
+                        "entries": None,
+                        "mode": None,
+                        "request_id": secrets.token_urlsafe(24),
+                        "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
+                    }
+                    mode_prompt = f"✅ Magaca: {shop_name}.\n\nMaxaad rabtaa inaad soo xarayso?"
+                    send_deynjir_choice_buttons(
+                        sender_phone, mode_prompt,
+                        [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_PAYMENT", "LACAG BIXIN")],
+                        mode_prompt + "\n\n*DEYN* — deymo cusub.\n*LACAG BIXIN* — Deyn soo xarootay.\n\nKadib ii soo dir qoraal, Excel/CSV ama sawir."
+                    )
+                    return {"status": "menu_import_started"}
 
                 elif choice == "6":
                     GUIDED_SESSIONS.pop(sender_phone, None)
@@ -5795,8 +5919,61 @@ async def _whatsapp_webhook_process(request: Request):
                     send_whatsapp(
                         sender_phone,
                         "Fadlan dooro lambar u dhexeeya 1 iyo 6.\n\n"
-                        + deynjir_other_services_menu()
                     )
+                    send_deynjir_other_services_menu(sender_phone, page=1)
+                    return {"status": "other_services_invalid_choice"}
+
+            elif menu_stage == "menu_other_page2":
+                if choice == "3":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    message_text = "Balamaha Maanta"
+                elif choice == "4":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    send_whatsapp(sender_phone, deynjir_help_message())
+                    return {"status": "help_sent"}
+                elif choice == "7":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "menu_other_page3",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+                    }
+                    send_deynjir_other_services_menu(sender_phone, page=3)
+                    return {"status": "other_services_page_three_sent"}
+                else:
+                    send_deynjir_other_services_menu(sender_phone, page=2)
+                    return {"status": "other_services_invalid_choice"}
+
+            elif menu_stage == "menu_other_page3":
+                if choice == "5":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    shop_name = str((business_user or {}).get("name") or sender_phone)
+                    IMPORT_SESSIONS[sender_phone] = {
+                        "business_user_id": str(business_user_id),
+                        "shop_phone": sender_phone,
+                        "shop_name": shop_name,
+                        "entries": None,
+                        "mode": None,
+                        "request_id": secrets.token_urlsafe(24),
+                        "expires_at": datetime.now(timezone.utc) + IMPORT_SESSION_TTL,
+                    }
+                    mode_prompt = f"✅ Magaca: {shop_name}.\n\nMaxaad rabtaa inaad soo xarayso?"
+                    send_deynjir_choice_buttons(
+                        sender_phone, mode_prompt,
+                        [("IMPORT_MODE_DEBT", "DEYN"), ("IMPORT_MODE_PAYMENT", "LACAG BIXIN")],
+                        mode_prompt + "\\n\\n*DEYN* — deymo cusub.\\n*LACAG BIXIN* — Deyn soo xarootay.\\n\\nKadib ii soo dir qoraal, Excel/CSV ama sawir."
+                    )
+                    return {"status": "menu_import_started"}
+                if choice == "6":
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    message_text = "LIISKA LACAG BIXINTA"
+                elif choice == "8":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "menu",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+                    }
+                    send_deynjir_other_services_menu(sender_phone, page=1)
+                    return {"status": "other_services_page_one_sent"}
+                else:
+                    send_deynjir_other_services_menu(sender_phone, page=3)
                     return {"status": "other_services_invalid_choice"}
 
         # A disagreement shortly after a committed transaction opens a confirmation;
@@ -5849,14 +6026,18 @@ async def _whatsapp_webhook_process(request: Request):
                         "request_id": f"undo:{secrets.token_urlsafe(18)}",
                         "expires_at": datetime.now(timezone.utc) + UNDO_CONFIRMATION_TTL,
                     }
-                    send_whatsapp(sender_phone,
+                    undo_prompt = (
                         f"⚠️ Waxaad u muuqataa inaadan ku qanacsanayn macaamilkii ugu dambeeyay.\n\n"
                         f"Macmiil: *{preview.get('customer_name') or recent_tx.get('customer_name')}*\n"
                         f"Lacagta: *${float(preview.get('amount') or 0):.2f}*\n\n"
                         "*Ma rabtaa inaad ka noqoto macaamilkan?*\n\n"
-                        "1️⃣ HAA — Ka noqo (UNDO)\n"
-                        "2️⃣ MAYA — Waa sax, xaree\n\n"
-                        "Waxba lama beddelayo ilaa aad xaqiijiso.")
+                        "Waxba lama beddelayo ilaa aad xaqiijiso."
+                    )
+                    send_deynjir_choice_buttons(
+                        sender_phone, undo_prompt,
+                        [("UNDO_YES", "Haa, ka noqo"), ("UNDO_NO", "Maya, iska daa")],
+                        undo_prompt + "\n\n1️⃣ HAA — Ka noqo (UNDO)\n2️⃣ MAYA — Waa sax, xaree\nKu jawaab 1 ama 2."
+                    )
                     return {"status": "undo_confirmation_requested"}
             except Exception as preview_error:
                 print(f"⚠️ Could not preview latest transaction for disagreement: {type(preview_error).__name__}: {preview_error}")
@@ -5957,12 +6138,17 @@ async def _whatsapp_webhook_process(request: Request):
                     )
                     if len(batch_transactions) > 10:
                         summary += f"\n• Iyo {len(batch_transactions) - 10} macaamiil oo kale"
-                    send_whatsapp(sender_phone,
+                    undo_prompt = (
                         "⚠️ *Xaqiiji ka-noqoshada batch-kii ugu dambeeyay*\n\n"
                         f"{summary}\n\n"
                         f"Tirada: *{len(batch_transactions)}*\nWadarta: *${float(recent_batch.get('total') or 0):.2f}*\n\n"
-                        "1️⃣ *HAA* — Dhammaan ka noqo\n2️⃣ *MAYA* — Hayso\n\n"
-                        "Waxba lama beddelin ilaa aad xaqiijiso. (5 daqiiqo)")
+                        "Waxba lama beddelin ilaa aad xaqiijiso. (5 daqiiqo)"
+                    )
+                    send_deynjir_choice_buttons(
+                        sender_phone, undo_prompt,
+                        [("UNDO_YES", "Haa, ka noqo"), ("UNDO_NO", "Maya, iska daa")],
+                        undo_prompt + "\n\n1️⃣ HAA — Ka noqo\n2️⃣ MAYA — Hayso\nKu jawaab 1 ama 2."
+                    )
                     return {"status": "batch_undo_confirmation_requested"}
                 recent = get_recent_selected_customer(sender_phone, business_user_id)
                 undo_key = str((recent or {}).get("customer_name") or "").strip()
@@ -6022,10 +6208,16 @@ async def _whatsapp_webhook_process(request: Request):
                     "request_id": f"undo:{secrets.token_urlsafe(18)}",
                     "expires_at": datetime.now(timezone.utc) + UNDO_CONFIRMATION_TTL,
                 }
-                send_whatsapp(sender_phone,
+                undo_prompt = (
                     f"⚠️ *Xaqiiji ka-noqoshada macaamilka*\n\nMacmiil: *{preview.get('customer_name') or undo_customer.get('name')}*\n"
                     f"Nooca: *{preview.get('transaction_type')}*\nLacagta: *${float(preview.get('amount') or 0):.2f}*\n\n"
-                    "1️⃣ HAA — Ka noqo\n2️⃣ MAYA — Xaree oo sii hay\n\nWaxba lama beddelin. Ku jawaab 1 ama 2 (5 daqiiqo).")
+                    "Waxba lama beddelin ilaa aad xaqiijiso. (5 daqiiqo)"
+                )
+                send_deynjir_choice_buttons(
+                    sender_phone, undo_prompt,
+                    [("UNDO_YES", "Haa, ka noqo"), ("UNDO_NO", "Maya, iska daa")],
+                    undo_prompt + "\n\n1️⃣ HAA — Ka noqo\n2️⃣ MAYA — Xaree oo sii hay\nKu jawaab 1 ama 2."
+                )
                 return {"status": "undo_confirmation_requested"}
             except Exception as undo_error:
                 print(f"❌ UNDO error: {type(undo_error).__name__}: {undo_error}")
@@ -7692,7 +7884,12 @@ async def _whatsapp_webhook_process(request: Request):
                 pending_clarification = None
                 print(f"🔄 New explicit transaction superseded stale clarification: {fresh_financial_entries!r}")
             else:
-                send_whatsapp(sender_phone, "Deyn cusub baa mise lacag-bixin?\n\nSoo qor *DEYN CUSUB* ama *LACAG BIXIN*. Qor *JOOJI* haddii aad rabto inaad ka baxdo.")
+                clarification_prompt = "Deyn cusub baa mise lacag-bixin?"
+                send_deynjir_choice_buttons(
+                    sender_phone, clarification_prompt,
+                    [("TX_ADD", "Deyn cusub"), ("TX_PAY", "Lacag-bixin"), ("TX_CANCEL", "Jooji")],
+                    clarification_prompt + "\n\nSoo qor *DEYN CUSUB*, *LACAG BIXIN* ama *JOOJI*."
+                )
                 return {"status": "awaiting_transaction_clarification"}
 
     # A standalone 1-6 outside any active workflow is treated as a menu choice.
@@ -8467,15 +8664,15 @@ async def _whatsapp_webhook_process(request: Request):
                 print(f"❌ Could not save pending transaction clarification: {pending_err}")
                 send_whatsapp(sender_phone, "❌ Ma kaydin karo fariinta sugaysa. Waxba lama diiwaangelin; fadlan mar kale isku day.")
                 return {"status": "pending_clarification_save_error"}
-            send_whatsapp(
-                sender_phone,
+            clarification_prompt = (
                 "Waxaad soo qortay magac iyo tiro keliya.\n\n"
-                "*Hadii aad ula jeedo*\n\n"
-                "*DEYN CUSUB* - Taabo 1\n\n"
-                "*LACAG BIXIN* - Taabo 2.\n\n"
-                "Soo qor *JOOJI* haddii aad rabto inaad ka baxdo.\n\n"
                 "Waxba lama diiwaangelinayo ilaa aad kala caddeyso."
-             )
+            )
+            send_deynjir_choice_buttons(
+                sender_phone, clarification_prompt,
+                [("TX_ADD", "Deyn cusub"), ("TX_PAY", "Lacag-bixin"), ("TX_CANCEL", "Jooji")],
+                clarification_prompt + "\n\n*DEYN CUSUB* — 1\n*LACAG BIXIN* — 2\n*JOOJI* — 3"
+            )
             return {"status": "awaiting_transaction_clarification"}
         elif has_financial_entries and explicit_direction:
             for parsed_entry in entries:
