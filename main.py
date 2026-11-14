@@ -281,11 +281,11 @@ def deynjir_main_menu():
     """Text fallback for the three main WhatsApp actions."""
     return (
         "👋 *Ku soo dhawoow Deynjir!*\n\n"
-        "Maxaad rabtaa inaad Xarayso\n\n"
-        "1️⃣ Deyn Baxday\n"
-        "2️⃣ Deyn soo xarootay\n"
-        "3️⃣ Adeeg kale\n\n"
-        "Dooro badhamada hoose ama soo dir 1, 2 ama 3."
+        "Maxaad rabtaa inaad qabato?\n\n"
+        "1️⃣ Deyn cusub — Diiwaangeli deyn macmiil qaatay\n"
+        "2️⃣ Lacag-bixin — Diiwaangeli lacag macmiil bixiyey\n"
+        "3️⃣ Adeegyada kale\n\n"
+        "Dooro badhan ama soo dir 1, 2 ama 3."
     )
 
 
@@ -363,6 +363,18 @@ def send_deynjir_choice_buttons(to_phone, body, buttons, fallback_text):
     return False
 
 
+def send_deynjir_yes_no(to_phone, body, yes_label="HAA", no_label="MAYA", fallback_extra=""):
+    """Send clear HAA/MAYA selection buttons with a text fallback."""
+    fallback = body + f"\n\n1. *{yes_label}*\n2. *{no_label}*"
+    if fallback_extra:
+        fallback += "\n" + fallback_extra
+    return send_deynjir_choice_buttons(
+        to_phone, body,
+        [("CONFIRM_YES", yes_label), ("CONFIRM_NO", no_label)],
+        fallback,
+    )
+
+
 def send_deynjir_main_menu(to_phone):
     """Send the main menu once, with visible numbered choices and reply buttons."""
     clean_phone = str(to_phone).replace("+", "").split("@")[0].strip()
@@ -375,9 +387,9 @@ def send_deynjir_main_menu(to_phone):
             "body": body,
             "footer": "Dooro badhan ama ku jawaab 1, 2 ama 3.",
             "buttons": [
-                {"buttonId": "1", "buttonText": "Deyn Baxday"},
-                {"buttonId": "2", "buttonText": "Deyn soo xarootay"},
-                {"buttonId": "3", "buttonText": "Adeeg kale"},
+                {"buttonId": "MAIN_ADD", "buttonText": "Deyn cusub"},
+                {"buttonId": "MAIN_PAY", "buttonText": "Lacag-bixin"},
+                {"buttonId": "MAIN_OTHER", "buttonText": "Adeegyada kale"},
             ],
         }
         try:
@@ -5395,6 +5407,11 @@ async def _whatsapp_webhook_process(request: Request):
         "dayn soo xarootay": "LACAG BIXIN",
         "deyn soo xarootay": "LACAG BIXIN",
         "adeeg kale": "3",
+        "main_add": "1",
+        "main_pay": "2",
+        "main_other": "3", "adeegyada kale": "3",
+        "payment_yes": "HAA", "confirm_yes": "HAA", "deposit_yes": "HAA",
+        "payment_no": "MAYA", "confirm_no": "MAYA", "deposit_no": "MAYA",
         "tx_add": "DEYN CUSUB", "deyn cusub (add)": "DEYN CUSUB",
         "tx_pay": "LACAG BIXIN", "lacag-bixin": "LACAG BIXIN", "lacag bixin": "LACAG BIXIN",
         "tx_cancel": "JOOJI", "jooji": "JOOJI",
@@ -6038,13 +6055,12 @@ async def _whatsapp_webhook_process(request: Request):
                     first_debt["stage"] = "confirm"
                     first_debt["expires_at"] = datetime.now(timezone.utc) + FIRST_DEBT_SESSION_TTL
                     due_label = "-" if not first_debt["promised_date"] else parsed_due.strftime("%d/%m/%Y")
-                    send_whatsapp(sender_phone,
+                    send_deynjir_yes_no(sender_phone,
                         "Hubi xogta daynta:\n\n"
                         f"• Qofka: *{first_debt['customer_name']}*\n"
                         f"• Lacagta: *${first_debt['amount']:.2f}*\n"
                         f"• Ballanta: *{due_label}*\n\n"
-                        "Ma diiwaangeliyaa? Soo qor *HAA* ama *MAYA*.\n"
-                        "Waxba lama kaydin ilaa aad soo qorto *HAA*.")
+                        "Ma diiwaangeliyaa? Waxba lama kaydin ilaa aad xaqiijiso.")
                     return {"status": "first_debt_confirmation_requested"}
 
                 if stage == "name_correction":
@@ -6903,7 +6919,7 @@ async def _whatsapp_webhook_process(request: Request):
                 AMOUNT_EDIT_SESSIONS.pop(sender_phone, None)
                 send_whatsapp(sender_phone, "✅ Wax-ka-beddelka waa la joojiyey. Waxba lama beddelin.")
                 return {"status": "amount_edit_cancelled"}
-            send_whatsapp(sender_phone, "Fadlan qor *HAA* si loo xaqiijiyo ama *MAYA* si loo joojiyo. Waxba lama beddelin weli.")
+            send_deynjir_yes_no(sender_phone, "Xaqiiji wax-ka-beddelka? Waxba lama beddelin weli.")
             return {"status": "amount_edit_confirmation_required"}
 
         # Resolve the sender's persisted payment confirmation before parsing new commands.
@@ -7085,12 +7101,11 @@ async def _whatsapp_webhook_process(request: Request):
                         if not updated_pending.data:
                             send_whatsapp(sender_phone, "Saxitaanka macmiilka lama kaydin karin. Waxba lama diiwaangelin; fadlan mar kale isku day.")
                             return {"status": "payment_customer_correction_update_failed"}
-                        send_whatsapp(
+                        send_deynjir_yes_no(
                             sender_phone,
                             "*Macmiilka waa la saxay.*\n\n"
                             f"{corrected_debtor.get('name')} ma wuxuu bixiyay *${corrected_amount:.2f}*?\n\n"
-                            "1. *HAA*\n2. *MAYA*\n\n"
-                            "Waxba lama kaydin ilaa aad xaqiijiso."
+                            "Waxba lama kaydin ilaa aad xaqiijiso.",
                         )
                         return {"status": "payment_customer_corrected_pending_confirmation"}
 
@@ -7168,7 +7183,10 @@ async def _whatsapp_webhook_process(request: Request):
                     send_whatsapp(sender_phone, "Saxitaanka lama diyaarin karin. Waxba lama kaydin.")
                     return {"status": "payment_correction_save_failed"}
                 corrected_pending = inserted.data[0]
-                send_whatsapp(sender_phone, f"*Xaqiiji saxitaanka*\n\n{corrected_debtor.get('name')} ma wuxuu bixiyay *${corrected_amount:.2f}*?\n\n1. *HAA*\n2. *MAYA*\n\nWaxba lama kaydin ilaa aad xaqiijiso.")
+                send_deynjir_yes_no(
+                    sender_phone,
+                    f"*Xaqiiji saxitaanka*\n\n{corrected_debtor.get('name')} ma wuxuu bixiyay *${corrected_amount:.2f}*?\n\nWaxba lama kaydin ilaa aad xaqiijiso.",
+                )
                 if owner_phone:
                     send_whatsapp(owner_phone, f"📝 Saxitaan cusub oo sugaya xaqiijin: {corrected_debtor.get('name')} ${corrected_amount:.2f}. ID: {corrected_pending.get('id')}")
                 return {"status": "corrected_payment_pending_confirmation"}
@@ -7257,7 +7275,7 @@ async def _whatsapp_webhook_process(request: Request):
                 DEPOSIT_OFFER_SESSIONS.pop(sender_phone, None)
                 send_whatsapp(sender_phone, "✅ Waa la joojiyey. Wax lacag ah lama diiwaangelin.")
                 return {"status": "deposit_offer_cancelled"}
-            send_whatsapp(sender_phone, "Fadlan ku jawaab *HAA* si dhigaalka loo diiwaangeliyo ama *MAYA* si loo joojiyo. Waxba weli lama kaydin.")
+            send_deynjir_yes_no(sender_phone, "Ma diiwaangeliyaa dhigaalka? Waxba weli lama kaydin.")
             return {"status": "deposit_offer_confirmation_required"}
 
     # Resolve a pending amount correction; the SQL RPC reverses and replaces the ledger event atomically.
@@ -7404,7 +7422,8 @@ async def _whatsapp_webhook_process(request: Request):
         if guided_stage in {"debt_amount", "payment_amount"} and guided:
             guided["stage"] = "debt_name" if guided_stage == "debt_amount" else "payment_name"
             guided.pop("customer_name", None)
-            guided.pop("amount", None)
+            # Keep the amount already supplied; the next name reply completes
+            # the same transaction without asking the shopkeeper to repeat it.
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
         name_correction_reply = (
             f"Waan fahmay—fariintaasi magac ma ahayn. Fadlan qor magaca {expected_name}, "
@@ -7869,7 +7888,8 @@ async def _whatsapp_webhook_process(request: Request):
         if is_missing_value(name):
             guided["stage"] = "debt_name" if transaction_type == "debt" else "payment_name"
             guided.pop("customer_name", None)
-            guided.pop("amount", None)
+            # Keep the amount already supplied; the next name reply completes
+            # the same transaction without asking the shopkeeper to repeat it.
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
             prompt = "Magaca macmiilka deynta lagu leeyahay?" if transaction_type == "debt" else "Magaca macmiilka lacagta bixiyey?"
             send_whatsapp(sender_phone, prompt)
@@ -10177,13 +10197,11 @@ async def _whatsapp_webhook_process(request: Request):
                     pending_row = pending_insert.data[0] if pending_insert.data else None
                     if not pending_row or not pending_row.get("id"):
                         raise RuntimeError("Pending payment row was not created")
-                    send_whatsapp(
+                    send_deynjir_yes_no(
                         sender_phone,
                         "*Xaqiiji lacag-bixinta*\n\n"
                         f"{debtor.get('name') or name} ma wuxuu bixiyay *${actual_payment:.2f}*?\n\n"
-                        "1. *HAA*\n"
-                        "2. *MAYA*\n\n"
-                        "Waxba lama kaydin ilaa aad xaqiijiso."
+                        "Waxba lama kaydin ilaa aad xaqiijiso.",
                     )
                     continue
                 except Exception as pending_payment_error:
