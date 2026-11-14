@@ -6310,14 +6310,26 @@ async def _whatsapp_webhook_process(request: Request):
             send_whatsapp(sender_phone, "Fadlan ku jawaab *1* = HAA, ka noqo; ama *2* = MAYA, xaree oo sii hay.\nWaqtigu waa 5 daqiiqo.")
             return {"status": "undo_confirmation_waiting"}
 
-        # An explicitly displayed menu owns its numeric replies. Route these
-        # before import/search/AI/session handlers so option 4 or 5 cannot be
-        # mistaken for a debt name, amount, or another workflow's answer.
-        if expired_menu_choice and not customer_match_numeric_reply_priority:
+        # A pending financial payment confirmation has priority over any
+        # previously displayed guided menu. Do not let "1" (HAA) become the
+        # menu's "new debt" choice while a payment awaits confirmation.
+        if pending_payment_confirmation_active and guided_menu_choice:
+            guided_stage_for_payment = str((GUIDED_SESSIONS.get(sender_phone) or {}).get("stage") or "")
+            if guided_stage_for_payment in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}:
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                _save_persisted_workflow_sessions(sender_phone)
+                print(
+                    "🛡️ Pending payment confirmation took priority over guided menu: "
+                    f"sender={sender_phone}, stage={guided_stage_for_payment}"
+                )
+
+        # An explicitly displayed menu owns its numeric replies only when no
+        # financial payment confirmation is waiting for this sender.
+        if expired_menu_choice and not customer_match_numeric_reply_priority and not pending_payment_confirmation_active:
             send_whatsapp(sender_phone, "Waqtigii menu-ga wuu dhammaaday. Soo qor *MENU* si aad u doorato adeegga aad rabto.")
             return {"status": "menu_choice_expired"}
 
-        if guided_menu_choice:
+        if guided_menu_choice and not pending_payment_confirmation_active:
             choice = numeric_reply
             menu_stage = guided_waiting.get("stage")
 
