@@ -5839,6 +5839,42 @@ async def _whatsapp_webhook_process(request: Request):
                 .execute()
             )
             pending_payment_confirmation_active = bool(active_payment_confirmation.data)
+            # Resolve the explicit numeric answer immediately, before ANY menu,
+            # guided-session, inactivity, or conversational handler can consume it.
+            # The later full confirmation handler remains for natural-language
+            # answers and customer-name corrections.
+            early_confirmation_text = str(message_text or "").strip()
+            early_confirmation_answer = normalize_customer_name(early_confirmation_text).strip(" .!?؟")
+            if pending_payment_confirmation_active and early_confirmation_answer in {"1", "haa", "h", "yes", "y", "ok", "sax"}:
+                early_pending = (
+                    supabase.table("pending_payment_confirmations")
+                    .select("id")
+                    .eq("sender_phone", sender_phone)
+                    .eq("business_user_id", str(business_user_id))
+                    .in_("status", ["pending", "processing"])
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if early_pending.data:
+                    early_ok, early_result_text = _process_pending_payment_confirmation(early_pending.data[0]["id"], sender_phone)
+                    send_whatsapp(sender_phone, early_result_text)
+                    return {"status": "payment_confirmed" if early_ok else "payment_confirmation_failed", "handler": "early_pending_payment_priority"}
+            elif pending_payment_confirmation_active and early_confirmation_answer in {"2", "maya", "may", "no", "n", "cancel", "jooji"}:
+                early_pending = (
+                    supabase.table("pending_payment_confirmations")
+                    .select("id")
+                    .eq("sender_phone", sender_phone)
+                    .eq("business_user_id", str(business_user_id))
+                    .eq("status", "pending")
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if early_pending.data:
+                    early_ok, early_rejected = _reject_pending_payment_confirmation(early_pending.data[0]["id"], sender_phone)
+                    send_whatsapp(sender_phone, early_rejected if not early_ok else "Lacag-bixinta waa la diiday. Waxba lama kaydin.")
+                    return {"status": "payment_rejected" if early_ok else "payment_rejection_failed", "handler": "early_pending_payment_priority"}
         except Exception as payment_priority_error:
             # Fail closed: do not let a competing menu consume a possible
             # financial confirmation if its priority check cannot be completed.
