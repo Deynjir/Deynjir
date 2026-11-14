@@ -5386,13 +5386,18 @@ async def _whatsapp_webhook_process(request: Request):
     # Normalize both forms so the same menu routing works for every response shape.
     _button_label = str(message_text or "").strip().casefold()
     _button_label_map = {
-        "deyn cusub": "1",
-        "dayn cusub": "1",
-        "dayn soo xarootay": "2",
+        # Transaction clarification replies stay semantic, not numeric, so
+        # they cannot be confused with a main-menu or guided-flow selection.
+        "deyn cusub": "DEYN CUSUB",
+        "dayn cusub": "DEYN CUSUB",
+        "deyn baxday": "DEYN CUSUB",
+        "dayn baxday": "DEYN CUSUB",
+        "dayn soo xarootay": "LACAG BIXIN",
+        "deyn soo xarootay": "LACAG BIXIN",
         "adeeg kale": "3",
-        "tx_add": "1", "deyn cusub (add)": "1",
-        "tx_pay": "2", "lacag-bixin": "2", "lacag bixin": "2",
-        "tx_cancel": "3", "jooji": "3",
+        "tx_add": "DEYN CUSUB", "deyn cusub (add)": "DEYN CUSUB",
+        "tx_pay": "LACAG BIXIN", "lacag-bixin": "LACAG BIXIN", "lacag bixin": "LACAG BIXIN",
+        "tx_cancel": "JOOJI", "jooji": "JOOJI",
         "import_both": "2", "labadaba geli": "2",
         "import_single": "1", "hal deyn geli": "1",
         "undo_yes": "1", "haa, ka noqo": "1", "haa ka noqo": "1",
