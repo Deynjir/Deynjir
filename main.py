@@ -346,7 +346,7 @@ def send_deynjir_choice_buttons(to_phone, body, buttons, fallback_text):
             "chatId": f"{clean_phone}@c.us",
             "header": "Deynjir",
             "body": body,
-            "footer": "Dooro badhamada hoose",
+            "footer": "",
             "buttons": [
                 {"buttonId": str(button_id), "buttonText": str(button_text)}
                 for button_id, button_text in buttons
@@ -7756,55 +7756,93 @@ async def _whatsapp_webhook_process(request: Request):
             remember_conversation_outcome(sender_phone, guided_text, no_customer_reply)
             send_whatsapp(sender_phone, no_customer_reply)
             return {"status": "guided_missing_customer_cancelled"}
-        if len(guided_text) < 2 or len(guided_text) > 100 or re.search(r"\d", guided_text):
+        # The selected menu action already determines ADD versus PAY.
+        # Accept "Name $30" in one reply without asking the direction again.
+        combined_amount_match = re.search(
+            r"(?P<amount>\$\s*\d+(?:[.,]\d{1,2})?|"
+            r"\d+(?:[.,]\d{1,2})?\s*(?:usd|dollars?|dolar|dola(?:r|ro))?)\s*$",
+            guided_text,
+            re.I,
+        )
+        if combined_amount_match and guided.get("transaction_type") in {"debt", "payment"}:
+            combined_name = guided_text[:combined_amount_match.start()].strip(" ,;:-")
+            combined_amount = _guided_amount(combined_amount_match.group("amount"))
+            if (
+                combined_name
+                and 2 <= len(combined_name) <= 100
+                and not re.search(r"\d", combined_name)
+                and combined_amount is not None
+            ):
+                selected_type = guided.get("transaction_type")
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                guided_transaction_override = {
+                    "action": "ADD" if selected_type == "debt" else "PAY",
+                    "customer_name": combined_name,
+                    "amount": combined_amount,
+                    "payment_type": "PARTIAL" if selected_type == "payment" else None,
+                    "description": "-",
+                    "_source_amount_verified": True,
+                    "_guided_transaction": True,
+                }
+                guided = None
+                print(
+                    "✅ Guided name+amount accepted with selected action preserved: "
+                    f"type={selected_type}, name={combined_name!r}, amount={combined_amount}"
+                )
+            else:
+                send_whatsapp(sender_phone, "Fadlan hubi magaca iyo lacagta. Tusaale: *Geney Gurxan $30*.")
+                return {"status": "guided_invalid_name_amount"}
+        elif len(guided_text) < 2 or len(guided_text) > 100 or re.search(r"\d", guided_text):
             send_whatsapp(sender_phone, "Fadlan qor magaca macmiilka oo keliya, ama *JOOJI*.")
             return {"status": "guided_invalid_name"}
-        guided["customer_name"] = guided_text.strip()
-        if guided.get("amount") is not None:
-            saved_amount = _guided_amount(guided.get("amount"))
-            saved_type = guided.get("transaction_type")
-            if saved_amount is None or saved_type not in {"debt", "payment"}:
-                GUIDED_SESSIONS.pop(sender_phone, None)
-                send_whatsapp(sender_phone, "Wadahadalkii hore si sax ah looma aqoonsan. Fadlan mar kale dir magaca iyo lacagta.")
-                return {"status": "guided_saved_amount_invalid"}
-            saved_name = guided["customer_name"]
-            saved_description = str(guided.get("description") or "").strip()
-            GUIDED_SESSIONS.pop(sender_phone, None)
-            description_part = f" {saved_description}" if saved_description and saved_description != "-" else ""
-            message_text = (
-                f"{saved_name} ${saved_amount}{description_part} ayuu iga qaatay"
-                if saved_type == "debt"
-                else f"{saved_name} ${saved_amount}{description_part} ayuu bixiyay"
-            )
-            if saved_type == "debt" and guided.get("existing_account_request"):
-                message_text += " ku dar xisaabtii hore"
-            guided_transaction_override = {
-                "action": "ADD" if saved_type == "debt" else "PAY",
-                "customer_name": saved_name,
-                "amount": saved_amount,
-                "payment_type": "PARTIAL" if saved_type == "payment" else None,
-                "description": saved_description or "-",
-                "_source_amount_verified": True,
-                "_guided_transaction": True,
-            }
-            guided = None
-            print(f"✅ Amount-first guided transaction completed deterministically: type={saved_type}, name={saved_name!r}, amount={saved_amount}")
         else:
-            guided["stage"] = "debt_amount" if guided.get("stage") == "debt_name" else "payment_amount"
-            guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-        if guided and guided.get("stage") == "debt_amount":
-            amount_prompt = (
-                f"Immisa lacag ah ayaa *{guided['customer_name']}* lagu leeyahay?\n\n"
-                "Qor lacagta oo keliya."
-            )
-        elif guided and guided.get("stage") == "payment_amount":
-            amount_prompt = (
-                f"Immisa dollar ayuu *{guided['customer_name']}* bixiyey?\n\n"
-                "Qor lacagta oo keliya."
-            )
-        if guided:
-            send_whatsapp(sender_phone, amount_prompt)
-            return {"status": "guided_amount_requested"}
+            guided["customer_name"] = guided_text.strip()
+        if guided is not None:
+            if guided.get("amount") is not None:
+                saved_amount = _guided_amount(guided.get("amount"))
+                saved_type = guided.get("transaction_type")
+                if saved_amount is None or saved_type not in {"debt", "payment"}:
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    send_whatsapp(sender_phone, "Wadahadalkii hore si sax ah looma aqoonsan. Fadlan mar kale dir magaca iyo lacagta.")
+                    return {"status": "guided_saved_amount_invalid"}
+                saved_name = guided["customer_name"]
+                saved_description = str(guided.get("description") or "").strip()
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                description_part = f" {saved_description}" if saved_description and saved_description != "-" else ""
+                message_text = (
+                    f"{saved_name} ${saved_amount}{description_part} ayuu iga qaatay"
+                    if saved_type == "debt"
+                    else f"{saved_name} ${saved_amount}{description_part} ayuu bixiyay"
+                )
+                if saved_type == "debt" and guided.get("existing_account_request"):
+                    message_text += " ku dar xisaabtii hore"
+                guided_transaction_override = {
+                    "action": "ADD" if saved_type == "debt" else "PAY",
+                    "customer_name": saved_name,
+                    "amount": saved_amount,
+                    "payment_type": "PARTIAL" if saved_type == "payment" else None,
+                    "description": saved_description or "-",
+                    "_source_amount_verified": True,
+                    "_guided_transaction": True,
+                }
+                guided = None
+                print(f"✅ Amount-first guided transaction completed deterministically: type={saved_type}, name={saved_name!r}, amount={saved_amount}")
+            else:
+                guided["stage"] = "debt_amount" if guided.get("stage") == "debt_name" else "payment_amount"
+                guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+            if guided and guided.get("stage") == "debt_amount":
+                amount_prompt = (
+                    f"Immisa lacag ah ayaa *{guided['customer_name']}* lagu leeyahay?\n\n"
+                    "Qor lacagta oo keliya."
+                )
+            elif guided and guided.get("stage") == "payment_amount":
+                amount_prompt = (
+                    f"Immisa dollar ayuu *{guided['customer_name']}* bixiyey?\n\n"
+                    "Qor lacagta oo keliya."
+                )
+            if guided:
+                send_whatsapp(sender_phone, amount_prompt)
+                return {"status": "guided_amount_requested"}
 
     if (
         guided
@@ -11756,16 +11794,16 @@ async def inactivity_checkin(request: Request):
         return {"status": "database_error"}
 
     message = (
-        "🌙 *Xusuusin*\\n\\n"
-        "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\\n\\n"
-        "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\\n\\n"
+        "🌙 *Xusuusin*\n\n"
+        "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\n\n"
+        "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\n\n"
         "*Haddii ay jiraan, soo geli:*"
     )
     fallback_message = (
-        message + "\\n\\n"
-        "1. Deyn baxday\\n"
-        "2. Deyn soo xarootay\\n"
-        "3. Adeeg kale\\n\\n"
+        message + "\n\n"
+        "1. Deyn cusub\n"
+        "2. Lacag-bixin\n"
+        "3. Adeeg kale\n\n"
         "Dooro 1, 2 ama 3."
     )
 
