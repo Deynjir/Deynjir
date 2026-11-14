@@ -5824,8 +5824,32 @@ async def _whatsapp_webhook_process(request: Request):
 
         business_user_id = business_user["id"]
 
-        # The evening inactivity menu owns its reply buttons and numeric fallback
-        # before pending transaction clarification, guided menus, or payment routing.
+        # A pending financial payment confirmation must own its reply before
+        # the inactivity menu. Otherwise its numeric "1" (HAA) can be consumed
+        # as the inactivity menu's "new debt" choice.
+        pending_payment_confirmation_active = False
+        try:
+            active_payment_confirmation = (
+                supabase.table("pending_payment_confirmations")
+                .select("id")
+                .eq("sender_phone", sender_phone)
+                .eq("business_user_id", str(business_user_id))
+                .in_("status", ["pending", "processing"])
+                .limit(1)
+                .execute()
+            )
+            pending_payment_confirmation_active = bool(active_payment_confirmation.data)
+        except Exception as payment_priority_error:
+            # Fail closed: do not let a competing menu consume a possible
+            # financial confirmation if its priority check cannot be completed.
+            pending_payment_confirmation_active = True
+            print(
+                "⚠️ Pending payment priority check failed; bypassing inactivity menu: "
+                f"{type(payment_priority_error).__name__}: {payment_priority_error}"
+            )
+
+        # The inactivity menu may own numeric replies only when no payment
+        # confirmation is waiting for this sender/shop.
         inactivity_state = INACTIVITY_SESSIONS.get(sender_phone) or {}
         inactivity_choice_raw = str(message_text or "").strip()
         inactivity_choice_key = inactivity_choice_raw.casefold()
@@ -5836,7 +5860,7 @@ async def _whatsapp_webhook_process(request: Request):
             "3": "other", "inactivity_other": "other", "adeeg kale": "other",
         }
         inactivity_choice = inactivity_choice_map.get(inactivity_choice_key)
-        if inactivity_state:
+        if inactivity_state and not pending_payment_confirmation_active:
             inactivity_expiry = inactivity_state.get("expires_at")
             if (
                 inactivity_state.get("business_user_id") == str(business_user_id)
