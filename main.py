@@ -5986,7 +5986,12 @@ async def _whatsapp_webhook_process(request: Request):
             UNDO_CONFIRMATION_SESSIONS.pop(sender_phone, None)
             DEPOSIT_OFFER_SESSIONS.pop(sender_phone, None)
             FIRST_DEBT_SESSIONS.pop(sender_phone, None)
-            GUIDED_SESSIONS.pop(sender_phone, None)
+            # A guided flow that is explicitly waiting for the customer's name
+            # owns the next free-text reply. Do not erase it merely because an
+            # older database clarification row is still present.
+            active_guided_for_name = GUIDED_SESSIONS.get(sender_phone) or {}
+            if active_guided_for_name.get("stage") not in {"debt_name", "payment_name"}:
+                GUIDED_SESSIONS.pop(sender_phone, None)
 
         # Admin-triggered first-debt onboarding. This flow is deterministic and
         # deliberately runs before conversational AI, Gemini parsing, and the
@@ -8415,7 +8420,41 @@ async def _whatsapp_webhook_process(request: Request):
 
     if pending_clarification:
         clarification_action = parse_transaction_clarification(message_text)
-        if clarification_action == "CANCEL":
+
+        # If the user has already entered a guided ADD/PAY name-entry step,
+        # that explicit workflow owns ordinary name text. A leftover pending
+        # clarification is stale and must not repeatedly hijack the name reply.
+        active_guided_for_name = GUIDED_SESSIONS.get(sender_phone) or {}
+        guided_name_stage_active = (
+            active_guided_for_name.get("stage") in {"debt_name", "payment_name"}
+            and str(active_guided_for_name.get("business_user_id") or business_user_id) == str(business_user_id)
+        )
+        if guided_name_stage_active and clarification_action is None:
+            try:
+                (supabase.table("pending_transaction_clarifications")
+                    .delete()
+                    .eq("sender_phone", sender_phone)
+                    .eq("business_user_id", business_user_id)
+                    .execute())
+                print(
+                    "🧭 Guided name-entry took priority over stale transaction clarification: "
+                    f"stage={active_guided_for_name.get('stage')}"
+                )
+                pending_clarification = None
+            except Exception as stale_pending_error:
+                print(
+                    "❌ Could not clear stale clarification before guided name entry: "
+                    f"{type(stale_pending_error).__name__}: {stale_pending_error}"
+                )
+                send_whatsapp(
+                    sender_phone,
+                    "Wadahadalkii hore weli wuu sugayaa. Fadlan dooro Deyn cusub ama Lacag-bixin, ama qor JOOJI."
+                )
+                return {"status": "guided_name_stale_clarification_cleanup_failed"}
+
+        if pending_clarification is None:
+            pass
+        elif clarification_action == "CANCEL":
             try:
                 (
                     supabase.table("pending_transaction_clarifications")
