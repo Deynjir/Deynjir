@@ -5506,7 +5506,7 @@ async def _whatsapp_webhook_process(request: Request):
         "undo_no": "2", "maya, iska daa": "2", "maya iska daa": "2",
         "other_debt_list": "1", "liiska daynta": "1",
         "other_search": "2", "raadi macmiil": "2",
-        "other_next_1": "3", "adeegyada xiga": "3",
+        "other_next_1": "OPEN_OTHER_SERVICES_PAGE_2", "adeegyada xiga": "OPEN_OTHER_SERVICES_PAGE_2",
         "other_appointments": "4", "ballamaha maanta": "4",
         "other_payments": "5", "liiska lacag-bixinta": "5",
         "other_next_2": "6", "bogga xiga": "6",
@@ -8805,6 +8805,13 @@ async def _whatsapp_webhook_process(request: Request):
                     clarification_prompt + "\n\nSoo qor *DEYN CUSUB*, *LACAG BIXIN* ama *JOOJI*."
                 )
                 return {"status": "awaiting_transaction_clarification"}
+
+    # The page-1 "Adeegyada xiga" button opens page 2; it must not be
+    # collapsed to numeric choice 3 (the legacy debt-list shortcut).
+    if str(message_text or "").strip() == "OPEN_OTHER_SERVICES_PAGE_2":
+        send_deynjir_other_services_menu(sender_phone, page=2)
+        print("🧭 Other-services page 1 next button routed to page 2")
+        return {"status": "other_services_page_2_opened"}
 
     # A standalone 1-6 outside any active workflow is treated as a menu choice.
     # This protects users whose menu state was lost (for example after a Render
