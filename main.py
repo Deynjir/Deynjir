@@ -4356,6 +4356,38 @@ def _unique_customer_names(matches):
     return list(unique.values())
 
 
+def has_exact_customer_name_match(requested_name, matches):
+    """True only when the complete normalized requested name equals a stored name."""
+    requested = normalize_customer_name(requested_name)
+    if not requested:
+        return False
+    return any(
+        normalize_customer_name(row.get("name")) == requested
+        for row in (matches or [])
+    )
+
+
+def send_similar_customer_options(to_phone, customer_name, allow_new=True):
+    """Offer the three explicit choices when a stored name is only a possible match."""
+    body = (
+        f"Waxaan helay macmiil magaciisu u egyahay: *{customer_name}*.\n\n"
+        "Ma isaga/iyada ayaad ula jeeddaa?"
+    )
+    buttons = [
+        ("SIMILAR_USE_EXISTING", "1. Isticmaal"),
+        ("SIMILAR_CORRECT_NAME", "2. Sax magaca"),
+    ]
+    if allow_new:
+        buttons.append(("SIMILAR_CREATE_NEW", "3. Macmiil cusub"))
+    fallback = (
+        body
+        + "\n\n1. Isticmaal macmiilka jira"
+        + "\n2. Geli magaca saxda ah"
+        + ("\n3. Samee macmiil cusub" if allow_new else "")
+    )
+    return send_deynjir_choice_buttons(to_phone, body, buttons, fallback)
+
+
 def send_customer_match_confirmation(to_phone, customer_name, allow_new=False):
     """Offer HAA/MAYA/CUSUB as real reply buttons with a readable text fallback."""
     body = (
@@ -4391,6 +4423,12 @@ def start_customer_match_session(sender_phone, business_user_id, entry,
 
     if stage == "confirm_single":
         send_customer_match_confirmation(sender_phone, names[0], allow_new=allow_new)
+        return
+    elif stage == "similar_single":
+        send_similar_customer_options(
+            sender_phone, names[0] if names else entry.get("customer_name"),
+            allow_new=allow_new,
+        )
         return
     elif stage == "enter_full_name":
         prompt = (
@@ -5535,6 +5573,9 @@ async def _whatsapp_webhook_process(request: Request):
         "customer_match_yes": "HAA", "haa": "HAA",
         "customer_match_no": "MAYA", "maya": "MAYA",
         "customer_match_new": "CUSUB", "qof cusub": "CUSUB",
+        "similar_use_existing": "1",
+        "similar_correct_name": "2",
+        "similar_create_new": "3",
         "import_mode_debt": "DEYN", "deyn": "DEYN",
         "import_mode_cancel": "CANCEL", "jooji": "CANCEL",
         "import_confirm_ok": "OK", "ok": "OK",
@@ -6476,7 +6517,7 @@ async def _whatsapp_webhook_process(request: Request):
         # the next numeric reply. An older menu must not steal "1" or "2".
         customer_match_numeric_reply_priority = bool(
             customer_match_waiting_for_shop
-            and active_customer_match.get("stage") == "choose"
+            and active_customer_match.get("stage") in {"choose", "similar_single"}
             and numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}
         )
         guided_menu_choice = (
@@ -8647,6 +8688,7 @@ async def _whatsapp_webhook_process(request: Request):
         entry = dict(customer_match_state.get("entry") or {})
         selected_name = None
         force_new = False
+        recheck_customer_name = False
 
         if stage == "confirm_extracted_name":
             proposed_name = clean_extracted_customer_name(entry.get("customer_name"))
@@ -8675,6 +8717,32 @@ async def _whatsapp_webhook_process(request: Request):
 
             entry["customer_name"] = corrected_name
             entry["_customer_name_source_confirmed"] = True
+            entry["_corrected_name_recheck"] = True
+            recheck_customer_name = True
+
+        elif stage == "similar_single":
+            if answer_folded in {"1", "haa", "yes", "y", "existing", "use"}:
+                selected_name = candidate_names[0] if candidate_names else entry.get("customer_name")
+            elif answer_folded in {"2", "maya", "no", "n", "correct", "sax"}:
+                customer_match_state["stage"] = "enter_full_name"
+                customer_match_state["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
+                send_whatsapp(
+                    sender_phone,
+                    "Fadlan qor magaca saxda ah ee macmiilka. "
+                    "Magacaas ayaan mar kale liiska ka raadinayaa. "
+                    "Haddii aanu jirin, waxaa loo qaadanayaa macmiil cusub. "
+                    "Waxba lama diiwaangelin weli."
+                )
+                _save_persisted_workflow_sessions(sender_phone)
+                return {"status": "customer_match_corrected_name_requested"}
+            elif answer_folded in {"3", "cusub", "new"} and customer_match_state.get("allow_new"):
+                force_new = True
+            else:
+                send_whatsapp(
+                    sender_phone,
+                    "Fadlan dooro 1 (macmiilka jira), 2 (sax magaca), ama 3 (macmiil cusub)."
+                )
+                return {"status": "customer_match_similar_choice_pending"}
 
         elif stage == "choose":
             if answer_folded == "cusub" and customer_match_state.get("allow_new"):
@@ -8697,6 +8765,9 @@ async def _whatsapp_webhook_process(request: Request):
                     is_existing_account_add_request(customer_match_state.get("original_message"))
                 )
                 entry["_customer_match_confirmed"] = False
+                entry["_customer_name_source_confirmed"] = True
+                entry["_corrected_name_recheck"] = True
+                recheck_customer_name = True
                 selected_name = answer
             else:
                 send_whatsapp(sender_phone, "Fadlan dooro lambarka macmiilka, ama qor magaca oo buuxa.")
@@ -8726,6 +8797,9 @@ async def _whatsapp_webhook_process(request: Request):
                     is_existing_account_add_request(customer_match_state.get("original_message"))
                 )
                 entry["_customer_match_confirmed"] = False
+                entry["_customer_name_source_confirmed"] = True
+                entry["_corrected_name_recheck"] = True
+                recheck_customer_name = True
             else:
                 send_whatsapp(sender_phone, "Fadlan qor magaca buuxa, ama *JOOJI*.")
                 return {"status": "customer_match_full_name_invalid"}
@@ -8737,7 +8811,7 @@ async def _whatsapp_webhook_process(request: Request):
                 entry["_source_amount_verified"] = True
         elif selected_name:
             entry["customer_name"] = selected_name
-            entry["_customer_match_confirmed"] = True
+            entry["_customer_match_confirmed"] = not recheck_customer_name
             if entry.get("amount") is not None:
                 # The original transaction passed source-amount validation before
                 # this identity prompt; retain that validation after the name changes.
@@ -10139,18 +10213,19 @@ async def _whatsapp_webhook_process(request: Request):
                     "entry": dict(entry),
                     "original_message": str(message_text or ""),
                     "candidate_names": [],
-                    "stage": "confirm_extracted_name",
+                    "stage": "enter_full_name",
                     "remaining_entries": [dict(item) for item in entries[entry_index + 1:]],
-                    "allow_new": False,
+                    "allow_new": True,
                     "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
                 }
                 send_whatsapp(
                     sender_phone,
-                    f"Magaca waxaan u fahmay *{grounded_name}*. "
-                    "Haddii uu sax yahay soo qor *OK*; haddii kale soo qor magaca saxda ah.\n\n"
-                    "Waxba lama diiwaangelin ilaa magaca la xaqiijiyo. Qor *JOOJI* si aad u baajiso."
+                    f"Magaca si buuxda uma fahmin. Waxaan u qaatay *{grounded_name}*. "
+                    "Fadlan qor magaca saxda ah haddii uu khaldan yahay. "
+                    "Haddii uu sax yahay, dib ugu soo dir magaca iyo lacagta. "
+                    "Waxba lama diiwaangelin weli."
                 )
-                return {"status": "customer_name_confirmation_pending"}
+                return {"status": "customer_name_correction_requested"}
 
         if action in {"ADD", "PAY"} and not new_phone and (amount is None or (action == "ADD" and date_intent_without_amount)):
             date_only = promised_date if action == "ADD" else None
@@ -10287,6 +10362,10 @@ async def _whatsapp_webhook_process(request: Request):
                 if amount is not None:
                     force_new_customer = bool(entry.get("_force_new_customer"))
                     matches = [] if force_new_customer else find_debtor_matches(business_user_id, name)
+                    if entry.get("_corrected_name_recheck") and not has_exact_customer_name_match(name, matches):
+                        matches = []
+                        force_new_customer = True
+                        entry["_force_new_customer"] = True
                     distinct_names = _unique_customer_names(matches)
                     existing_account_request = is_existing_account_add_request(message_text)
 
@@ -10298,10 +10377,21 @@ async def _whatsapp_webhook_process(request: Request):
                         )
                         break
 
+                    if (
+                        len(distinct_names) == 1
+                        and not entry.get("_customer_match_confirmed")
+                        and not has_exact_customer_name_match(name, matches)
+                    ):
+                        start_customer_match_session(
+                            sender_phone, business_user_id, entry, message_text, matches,
+                            "similar_single", entries[entry_index + 1:],
+                            allow_new=True,
+                        )
+                        break
+
                     if len(distinct_names) == 1 and not entry.get("_customer_match_confirmed"):
-                        # A single unambiguous match is shown by its canonical stored name
-                        # in the final HAA/MAYA transaction preview. Avoid a separate
-                        # name-only confirmation layer.
+                        # A complete exact name match proceeds immediately, without
+                        # an extra name confirmation layer.
                         name = distinct_names[0]
                         entry["customer_name"] = name
                         entry["_customer_match_confirmed"] = True
@@ -10493,7 +10583,12 @@ async def _whatsapp_webhook_process(request: Request):
             try:
                 payment_amount = entry.get("amount")
                 payment_type = str(entry.get("payment_type") or "UNKNOWN").upper()
-                matches = find_debtor_matches(business_user_id, name)
+                force_new_customer = bool(entry.get("_force_new_customer"))
+                matches = [] if force_new_customer else find_debtor_matches(business_user_id, name)
+                if entry.get("_corrected_name_recheck") and not has_exact_customer_name_match(name, matches):
+                    matches = []
+                    force_new_customer = True
+                    entry["_force_new_customer"] = True
                 distinct_names = _unique_customer_names(matches)
 
                 if len(matches) == 0:
@@ -10534,9 +10629,20 @@ async def _whatsapp_webhook_process(request: Request):
                     )
                     break
 
+                if (
+                    len(distinct_names) == 1
+                    and not entry.get("_customer_match_confirmed")
+                    and not has_exact_customer_name_match(name, matches)
+                ):
+                    start_customer_match_session(
+                        sender_phone, business_user_id, entry, message_text, matches,
+                        "similar_single", entries[entry_index + 1:],
+                        allow_new=True,
+                    )
+                    break
+
                 if len(distinct_names) == 1 and not entry.get("_customer_match_confirmed"):
-                    # The final payment preview will show the exact stored name.
-                    # Do not ask the shopkeeper to confirm the name separately.
+                    # Exact full-name match: proceed directly without another prompt.
                     name = distinct_names[0]
                     entry["customer_name"] = name
                     entry["_customer_match_confirmed"] = True
