@@ -6076,6 +6076,12 @@ async def _whatsapp_webhook_process(request: Request):
                 PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
                 early_pending_transaction_entries = [dict(item) for item in saved_entries]
                 early_forced_transaction_action = early_clarification_action
+                # The user's button choice is authoritative. The saved parser
+                # output is intentionally provisional (usually ADD); overwrite
+                # every financial entry before any customer-match or replay path.
+                for saved_entry in early_pending_transaction_entries:
+                    if str(saved_entry.get("action") or "").upper() in {"ADD", "PAY"}:
+                        saved_entry["action"] = early_forced_transaction_action
                 (supabase.table("pending_transaction_clarifications")
                     .delete()
                     .eq("sender_phone", sender_phone)
@@ -7720,7 +7726,18 @@ async def _whatsapp_webhook_process(request: Request):
 
     # A clear refusal should end optional guidance instead of restarting the
     # same service-selection question. Do not intercept active financial stages.
-    if (not guided or guided.get("stage") == "menu") and is_user_declining_help(guided_text):
+    active_customer_match_for_decline = CUSTOMER_MATCH_SESSIONS.get(sender_phone) or {}
+    customer_match_owns_decline = (
+        str(active_customer_match_for_decline.get("business_user_id") or "") == str(business_user_id)
+        and active_customer_match_for_decline.get("stage") in {
+            "confirm_extracted_name", "choose", "confirm_single", "enter_full_name"
+        }
+    )
+    if (
+        (not guided or guided.get("stage") == "menu")
+        and not customer_match_owns_decline
+        and is_user_declining_help(guided_text)
+    ):
         if guided and guided.get("stage") == "menu":
             GUIDED_SESSIONS.pop(sender_phone, None)
         print(f"🔕 Optional help declined silently: {guided_text!r}")
@@ -8564,6 +8581,8 @@ async def _whatsapp_webhook_process(request: Request):
         customer_match_resume_entry = entry
         customer_match_resume_remaining = customer_match_state.get("remaining_entries") or []
         customer_match_resume_forced_action = str(entry.get("action") or "").upper()
+        if customer_match_resume_forced_action in {"ADD", "PAY"}:
+            entry["action"] = customer_match_resume_forced_action
         message_text = customer_match_state.get("original_message") or message_text
         print(
             f"✅ Customer match resolved: action={customer_match_resume_forced_action}, "
@@ -9259,11 +9278,19 @@ async def _whatsapp_webhook_process(request: Request):
         )
     
     if pending_new_transaction_entries:
-        # A user-selected ADD/PAY answer must replay the exact saved extraction
-        # before any unrelated guided-session override can replace its fields.
-        entries = pending_new_transaction_entries
+        # A user-selected ADD/PAY answer is authoritative for every saved row.
+        # Apply it here too, so replay and customer-match resumption cannot
+        # accidentally retain the provisional ADD action from local parsing.
+        entries = [dict(item) for item in pending_new_transaction_entries]
+        if forced_transaction_action in {"ADD", "PAY"}:
+            for saved_entry in entries:
+                if str(saved_entry.get("action") or "").upper() in {"ADD", "PAY"}:
+                    saved_entry["action"] = forced_transaction_action
         guided_transaction_override = None
-        print(f"⚡ Replaying saved clarified transaction entries: {entries!r}")
+        print(
+            f"⚡ Replaying saved clarified transaction entries as "
+            f"{forced_transaction_action or 'saved action'}: {entries!r}"
+        )
     elif guided_transaction_override:
         entries = [guided_transaction_override]
         print(f"⚡ Using deterministic guided transaction entry: {guided_transaction_override!r}")
