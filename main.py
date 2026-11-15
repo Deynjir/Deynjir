@@ -6017,6 +6017,15 @@ async def _whatsapp_webhook_process(request: Request):
                 INACTIVITY_SESSIONS.pop(sender_phone, None)
                 early_pending_transaction_entries = [dict(item) for item in saved_entries]
                 early_forced_transaction_action = early_clarification_action
+
+                # IMPORTANT: after consuming the choice, continue processing the
+                # ORIGINAL transaction text, not the button label ("DEYN CUSUB").
+                # Otherwise the later guided-action router mistakes the answer
+                # for a fresh guided-debt command and asks for the name again.
+                original_transaction_message = str(early_row.get("original_message") or "").strip()
+                if original_transaction_message:
+                    message_text = original_transaction_message
+
                 # The user's button choice is authoritative. The saved parser
                 # output is intentionally provisional (usually ADD); overwrite
                 # every financial entry before any customer-match or replay path.
@@ -7513,6 +7522,10 @@ async def _whatsapp_webhook_process(request: Request):
     guided_transaction_override = None
     guided_text = str(message_text or "").strip()
     guided = GUIDED_SESSIONS.get(sender_phone)
+    # A transaction clarification has already restored its saved entries above.
+    # It must bypass all guided name/amount prompts on this same inbound reply.
+    if early_pending_transaction_entries:
+        guided = None
     if pending_new_request:
         guided = None  # Keep the saved session; route this message as a separate request.
     if guided:
