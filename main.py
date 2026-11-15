@@ -7422,6 +7422,27 @@ async def _whatsapp_webhook_process(request: Request):
 
     guided_normalized = normalize_customer_name(guided_text).strip(" .!?؟")
 
+    # A saved free-text transaction clarification takes priority over an
+    # unrelated/stale guided menu session. Otherwise a reply such as
+    # "Deyn baxday" can be consumed as a customer-name response and the bot
+    # asks for the name again instead of restoring the saved name/amount/date.
+    if guided and parse_transaction_clarification(guided_text) in {"ADD", "PAY", "CANCEL"}:
+        try:
+            clarification_check = (
+                supabase.table("pending_transaction_clarifications")
+                .select("sender_phone")
+                .eq("sender_phone", sender_phone)
+                .eq("business_user_id", business_user_id)
+                .limit(1)
+                .execute()
+            )
+            if clarification_check.data:
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                guided = None
+                print("🧭 Pending transaction clarification takes priority over guided session reply")
+        except Exception as clarification_check_error:
+            print(f"⚠️ Could not check pending clarification before guided routing: {clarification_check_error}")
+
     # Stage-aware semantic triage: status statements and name corrections are
     # not customer names or amounts. Resolve them before the guided parser.
     guided_stage = str((guided or {}).get("stage") or "")
@@ -9148,12 +9169,15 @@ async def _whatsapp_webhook_process(request: Request):
             "Use it for a pronoun-only follow-up only when the user's wording clearly refers to this customer."
         )
     
-    if guided_transaction_override:
+    if pending_new_transaction_entries:
+        # A user-selected ADD/PAY answer must replay the exact saved extraction
+        # before any unrelated guided-session override can replace its fields.
+        entries = pending_new_transaction_entries
+        guided_transaction_override = None
+        print(f"⚡ Replaying saved clarified transaction entries: {entries!r}")
+    elif guided_transaction_override:
         entries = [guided_transaction_override]
         print(f"⚡ Using deterministic guided transaction entry: {guided_transaction_override!r}")
-    elif pending_new_transaction_entries:
-        entries = pending_new_transaction_entries
-        print(f"⚡ Processing new explicit transaction instead of stale clarification: {entries!r}")
     elif pending_payment_replay_entry:
         entries = [pending_payment_replay_entry]
         print(
