@@ -2577,6 +2577,11 @@ def parse_single_due_date_update(message_text):
     if not match:
         return None
     name = raw[:match.start()].strip(" \t\r\n,;:-")
+    # A numeric token immediately before a trailing date is usually the
+    # transaction amount (e.g. "dhudi 10 16/11/2026"), not part of an
+    # existing customer's name. Let the transaction parser handle it.
+    if re.search(r"(?:^|\s)\d+(?:[.,]\d{1,2})?$", name):
+        return None
     # Labels such as "C/iiman Xasan balanta 16/11/26" describe the date;
     # they are not part of the customer's name.
     name = re.sub(r"\s+\b(?:ballanta|balanta|ballan|balan|muddo(?:da)?|taariikh(?:da)?)\s*$", "", name, flags=re.I).strip()
@@ -3462,6 +3467,11 @@ def parse_transaction_clarification(message_text):
     text = normalize_customer_name(str(message_text or ""))
     text = re.sub(r"[.!؟?،,:;]+", " ", text)
     text = " ".join(text.split()).strip()
+
+    # Green-API interactive button responses arrive as their button IDs,
+    # not as the visible labels. Handle those IDs before text/number parsing.
+    if text.casefold() in {"tx_add", "tx_pay", "tx_cancel"}:
+        return {"tx_add": "ADD", "tx_pay": "PAY", "tx_cancel": "CANCEL"}[text.casefold()]
 
     # Numbered WhatsApp choices: 1 = new debt, 2 = payment, 3 = cancel.
     if text == "1":
