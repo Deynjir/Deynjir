@@ -2567,7 +2567,7 @@ def parse_single_due_date_update(message_text):
     )
     date_re = re.compile(
         rf"(?P<date>\d{{4}}-\d{{1,2}}-\d{{1,2}}|"
-        rf"\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}}|"
+        rf"\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{2,4}}|"
         rf"(?:{month_pattern})\s+\d{{1,2}}(?:,?\s+\d{{4}})?|"
         rf"\d{{1,2}}\s+(?:{month_pattern})(?:\s+\d{{4}})?)\s*[.!؟]?\s*$",
         re.I,
@@ -2576,6 +2576,9 @@ def parse_single_due_date_update(message_text):
     if not match:
         return None
     name = raw[:match.start()].strip(" \t\r\n,;:-")
+    # Labels such as "C/iiman Xasan balanta 16/11/26" describe the date;
+    # they are not part of the customer's name.
+    name = re.sub(r"\s+\b(?:ballanta|balanta|ballan|balan|muddo(?:da)?|taariikh(?:da)?)\s*$", "", name, flags=re.I).strip()
     name = re.sub(r"^(?:ballanta|balanta|ballan|balan|update|edit|beddel|cusboonaysii)\s+", "", name, flags=re.I).strip()
     if not name or len(name) > 120 or not re.search(r"[A-Za-z\u0080-\uffff]", name):
         return None
@@ -2591,8 +2594,12 @@ def parse_single_due_date_update(message_text):
     try:
         if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", date_text):
             parsed = datetime.strptime(date_text, "%Y-%m-%d").date()
-        elif re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", date_text):
-            parsed = datetime.strptime(date_text.replace("-", "/"), "%d/%m/%Y").date()
+        elif re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", date_text):
+            day, month, year = map(int, re.split(r"[/-]", date_text))
+            # Two-digit years in shopkeeper messages are interpreted as 20YY.
+            if year < 100:
+                year += 2000
+            parsed = datetime(year, month, day).date()
         else:
             parts = date_text.split()
             year = None
@@ -9081,6 +9088,9 @@ async def _whatsapp_webhook_process(request: Request):
         "'Cabdilaahi Ciise 8 Nov, Aamina Axmed Shire 10 Nov' and separate lines with one name and date each. "
         "Never interpret a day number inside a date (such as 8 in '8 Nov') as money. Do not combine customers "
         "or apply one person's date to another. Extract the full customer name and amount. "
+        "DATE EXTRACTION: Numeric Somali dates are DD/MM/YYYY or DD/MM/YY; interpret 16/11/26 as 2026-11-16. "
+        "Words such as 'ballanta', 'balanta', 'ballan', 'muddo', and 'taariikh' introduce a promised date and are NOT part of the customer name. "
+        "For example, 'C/iiman Xasan balanta 16/11/26' has customer_name='C/iiman Xasan' and promised_date='2026-11-16'; never include the date or its label in customer_name. "
         "Never invent a name, amount, date, or transaction direction. "
         "When the user uses a pronoun and a recent customer context is supplied below, use that customer only "
         "when the message is clearly a direct follow-up about that customer. Otherwise ask a clarification. "
@@ -9092,17 +9102,9 @@ async def _whatsapp_webhook_process(request: Request):
         "If a weekday phrase could mean more than one date, ask one short clarification. "
         "A phone number (normally 9-15 digits, or 7-15 digits when explicitly labelled as a phone) is never a transaction amount. "
     )
-    # A message containing both a money amount and a date, but no clear ADD/PAY
-    # instruction, is not a due-date edit. Ask the shopkeeper to choose the
-    # transaction type through the main menu before interpreting any customer.
-    if is_ambiguous_amount_and_date_narrative(message_text):
-        activate_guided_menu(sender_phone)
-        send_deynjir_main_menu(sender_phone)
-        print(
-            "🧭 Ambiguous amount+date narrative routed to main ADD/PAY menu; "
-            f"no customer lookup or appointment update performed: {message_text!r}"
-        )
-        return {"status": "ambiguous_amount_date_routed_to_main_menu"}
+    # Name + amount + due date without an explicit transaction direction must
+    # continue to the normal extraction/clarification flow below. The parsed
+    # customer, amount and promised_date are saved before the user chooses ADD/PAY.
 
     recent_selected_customer = get_recent_selected_customer(sender_phone, business_user_id)
     contextual_payment_entry = parse_contextual_somali_payment(message_text, recent_selected_customer)
@@ -9443,14 +9445,32 @@ async def _whatsapp_webhook_process(request: Request):
                 print(f"❌ Could not save pending transaction clarification: {pending_err}")
                 send_whatsapp(sender_phone, "❌ Ma kaydin karo fariinta sugaysa. Waxba lama diiwaangelin; fadlan mar kale isku day.")
                 return {"status": "pending_clarification_save_error"}
-            clarification_prompt = (
-                "Waxaad soo qortay magac iyo tiro keliya.\n\n"
-                "Ma deyn baxday baa mise mid soo xarootay."
+            # Show exactly what the parser extracted before asking transaction intent.
+            # Keep the saved entries unchanged so the selected action reuses the same date.
+            summary_lines = ["Waxaad soo qortay:"]
+            for item in entries:
+                customer_name = str(item.get("customer_name") or "").strip()
+                amount_value = item.get("amount")
+                summary_lines.append(f"Magac: {customer_name or 'Lama garan'}")
+                if amount_value is not None:
+                    try:
+                        summary_lines.append(f"Lacag: ${float(amount_value):,.2f}")
+                    except (TypeError, ValueError):
+                        summary_lines.append(f"Lacag: {amount_value}")
+                promised_value = item.get("promised_date")
+                if promised_value:
+                    try:
+                        promised_display = datetime.strptime(str(promised_value)[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+                    except (TypeError, ValueError):
+                        promised_display = str(promised_value)
+                    summary_lines.append(f"Ballanta: {promised_display}")
+            clarification_prompt = "\n".join(summary_lines) + (
+                "\n\nXaqiiji waxa aad ka waddo:"
             )
             send_deynjir_choice_buttons(
                 sender_phone, clarification_prompt,
-                [("TX_ADD", "Deyn cusub"), ("TX_PAY", "Lacag-bixin"), ("TX_CANCEL", "Jooji")],
-                clarification_prompt + "\n\n*DEYN CUSUB* — 1\n*LACAG BIXIN* — 2\n*JOOJI* — 3"
+                [("TX_ADD", "Deyn baxday"), ("TX_PAY", "Deyn soo xarootay"), ("TX_CANCEL", "Jooji")],
+                clarification_prompt + "\n\n*DEYN BAXDAY* — 1\n*DEYN SOO XAROOTAY* — 2\n*JOOJI* — 3"
             )
             return {"status": "awaiting_transaction_clarification"}
         elif has_financial_entries and explicit_direction:
