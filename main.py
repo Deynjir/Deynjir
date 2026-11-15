@@ -6478,7 +6478,10 @@ async def _whatsapp_webhook_process(request: Request):
             and not reminder_numeric_reply_priority
             and not customer_match_numeric_reply_priority
             and guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
-            and numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
+            and (
+                numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
+                or numeric_reply == "OPEN_OTHER_SERVICES_PAGE_2"
+            )
         )
         guided_amount_reply = (
             not pending_transaction_clarification_active
@@ -6643,7 +6646,8 @@ async def _whatsapp_webhook_process(request: Request):
                         "stage": "menu_other",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
                     }
-                    send_deynjir_other_services_menu(sender_phone)
+                    _save_persisted_workflow_sessions(sender_phone)
+                    send_deynjir_other_services_menu(sender_phone, page=1)
                     return {"status": "other_services_menu_sent"}
 
             # OTHER SERVICES MENU: page-specific choices; button IDs and typed numbers
@@ -6659,7 +6663,7 @@ async def _whatsapp_webhook_process(request: Request):
                     }
                     send_whatsapp(sender_phone, "Qor magaca macmiilka aad raadinayso.\n\nQor *JOOJI* si aad uga baxdo.")
                     return {"status": "guided_search_name_requested"}
-                elif choice == "3":
+                elif choice in {"3", "OPEN_OTHER_SERVICES_PAGE_2"}:
                     GUIDED_SESSIONS[sender_phone] = {
                         "stage": "menu_other_page2",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
@@ -10638,56 +10642,58 @@ async def _whatsapp_webhook_process(request: Request):
                 new_balance = round(max(0.0, current_balance - actual_payment), 2)
                 is_now_paid = new_balance <= 0
 
-                # AI-interpreted payments always require explicit human confirmation.
-                # Store the proposal in Supabase first; do not alter the debt balance here.
+                # A clear payment for one uniquely identified customer is saved
+                # immediately. Ask questions only in the branches above where the
+                # customer, amount, debt, or payment direction is genuinely unclear.
+                # The RPC is idempotent per inbound webhook event, so retries cannot
+                # silently record the same payment twice.
                 try:
-                    existing_pending = (
-                        supabase.table("pending_payment_confirmations")
-                        .select("id, customer_name, amount, status")
-                        .eq("sender_phone", sender_phone)
-                        .eq("business_user_id", business_user_id)
-                        .in_("status", ["pending", "processing"])
-                        .limit(1)
-                        .execute()
-                    )
-                    if existing_pending.data:
-                        pending_item = existing_pending.data[0]
-                        send_whatsapp(
-                            sender_phone,
-                            f"Waxaa jira lacag-bixin kale oo sugaysa xaqiijin: "
-                            f"{pending_item.get('customer_name')} ${float(pending_item.get('amount') or 0):.2f}.\n"
-                            "Marka hore ka jawaab xaqiijintaas (1/HAA ama 2/MAYA)."
-                        )
-                        continue
-                    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
-                    pending_insert = supabase.table("pending_payment_confirmations").insert({
-                        "sender_phone": sender_phone,
-                        "business_user_id": str(business_user_id),
-                        "customer_id": str(debtor["id"]),
-                        "customer_name": str(debtor.get("name") or name),
-                        "amount": actual_payment,
-                        "description": description or "-",
-                        "original_message": str(message_text or ""),
-                        "status": "pending",
-                        "expires_at": expires_at,
+                    rpc_result = _financial_rpc("record_debt_payment_with_history", {
+                        "p_customer_id": str(debtor["id"]),
+                        "p_business_user_id": str(business_user_id),
+                        "p_amount": actual_payment,
+                        "p_description": str(description or "-").strip() or "-",
                     }).execute()
-                    pending_row = pending_insert.data[0] if pending_insert.data else None
-                    if not pending_row or not pending_row.get("id"):
-                        raise RuntimeError("Pending payment row was not created")
-                    send_deynjir_yes_no(
-                        sender_phone,
-                        "*Xaqiiji lacag-bixinta*\n\n"
-                        f"{debtor.get('name') or name} ma wuxuu bixiyay *${actual_payment:.2f}*?\n\n"
-                        "Waxba lama kaydin ilaa aad xaqiijiso.",
+                    rpc_data = rpc_result.data
+                    if isinstance(rpc_data, list):
+                        rpc_data = rpc_data[0] if rpc_data else None
+                    if not isinstance(rpc_data, dict) or not rpc_data.get("id"):
+                        raise RuntimeError("Payment RPC did not confirm the updated customer")
+
+                    saved_name = rpc_data.get("name") or debtor.get("name") or name
+                    remember_selected_customer(sender_phone, business_user_id, saved_name)
+                    remember_recent_transaction(sender_phone, business_user_id, rpc_data.get("id"), saved_name)
+                    success_text = (
+                        f"✅ Lacag-bixinta waa la diiwaangeliyey.\n"
+                        f"{saved_name}: ${actual_payment:.2f}\n"
+                        f"Baaqiga: ${float(rpc_data.get('amount') or 0):.2f}"
                     )
+                    if ONBOARDING_SESSIONS.get(sender_phone, {}).get("stage") == "first_successful_action":
+                        success_text += (
+                            "\n\n🎉 Diiwaangelintaadu way guulaysatay. "
+                            "Waxaad hadda sii diiwaangelin kartaa macaamillada kale."
+                        )
+                        ONBOARDING_SESSIONS.pop(sender_phone, None)
+                    remember_conversation_outcome(
+                        sender_phone, message_text or f"{name} ${actual_payment}", success_text
+                    )
+                    send_whatsapp(sender_phone, success_text)
+                    successful_inserts.append(entry)
                     continue
-                except Exception as pending_payment_error:
-                    print(f"❌ Could not stage payment confirmation: {pending_payment_error}")
+                except Exception as payment_save_error:
+                    print(
+                        f"❌ Immediate payment save failed: "
+                        f"{type(payment_save_error).__name__}: {payment_save_error}"
+                    )
                     send_whatsapp(
                         sender_phone,
-                        "❌ Xaqiijinta lacag-bixinta lama diyaarin karin. Waxba lama kaydin. Fadlan mar kale isku day."
+                        "❌ Lacag-bixinta lama diiwaangelin. Fadlan mar kale hubi; "
+                        "ha ku celin haddii aad aragto in haraagu is beddelay."
                     )
-                    failed_inserts.append({"name": name, "reason": "Could not stage payment confirmation"})
+                    failed_inserts.append({
+                        "name": name,
+                        "reason": f"Immediate payment save failed: {type(payment_save_error).__name__}",
+                    })
                     continue
 
             except Exception as e:
