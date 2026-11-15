@@ -5490,10 +5490,11 @@ async def _whatsapp_webhook_process(request: Request):
         "dayn baxday": "DEYN CUSUB",
         "dayn soo xarootay": "LACAG BIXIN",
         "deyn soo xarootay": "TX_PAY",
-        "adeeg kale": "3",
+        "adeeg kale": "OPEN_OTHER_SERVICES",
         "main_add": "1",
         "main_pay": "2",
-        "main_other": "3", "adeegyada kale": "3",
+        "main_other": "OPEN_OTHER_SERVICES",
+        "adeegyada kale": "OPEN_OTHER_SERVICES",
         "payment_yes": "HAA", "confirm_yes": "HAA", "deposit_yes": "HAA",
         "payment_no": "MAYA", "confirm_no": "MAYA", "deposit_no": "MAYA",
         "tx_add": "DEYN CUSUB", "deyn cusub (add)": "DEYN CUSUB",
@@ -5924,6 +5925,13 @@ async def _whatsapp_webhook_process(request: Request):
             return {"status": "unapproved_user_silenced"}
 
         business_user_id = business_user["id"]
+
+        # The main-menu "Adeegyada kale" button is an action, not numeric
+        # choice 3. Route it directly to the interactive services pages so it
+        # can never fall through to the legacy standalone "3 = debt list" path.
+        if str(message_text or "").strip() == "OPEN_OTHER_SERVICES":
+            send_deynjir_other_services_menu(sender_phone, page=1)
+            return {"status": "other_services_menu_opened"}
 
         # A pending financial payment confirmation must own its reply before
         # the inactivity menu. Otherwise its numeric "1" (HAA) can be consumed
