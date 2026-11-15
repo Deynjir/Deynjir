@@ -5442,10 +5442,10 @@ async def _whatsapp_webhook_process(request: Request):
         # they cannot be confused with a main-menu or guided-flow selection.
         "deyn cusub": "DEYN CUSUB",
         "dayn cusub": "DEYN CUSUB",
-        "deyn baxday": "DEYN CUSUB",
+        "deyn baxday": "TX_ADD",
         "dayn baxday": "DEYN CUSUB",
         "dayn soo xarootay": "LACAG BIXIN",
-        "deyn soo xarootay": "LACAG BIXIN",
+        "deyn soo xarootay": "TX_PAY",
         "adeeg kale": "3",
         "main_add": "1",
         "main_pay": "2",
@@ -5941,67 +5941,6 @@ async def _whatsapp_webhook_process(request: Request):
                 f"{type(payment_priority_error).__name__}: {payment_priority_error}"
             )
 
-        # The inactivity menu may own numeric replies only when no payment
-        # confirmation is waiting for this sender/shop.
-        inactivity_state = INACTIVITY_SESSIONS.get(sender_phone) or {}
-        inactivity_choice_raw = str(message_text or "").strip()
-        inactivity_choice_key = inactivity_choice_raw.casefold()
-        inactivity_choice_map = {
-            "1": "debt", "inactivity_debt": "debt", "deyn baxday": "debt",
-            "2": "payment", "inactivity_payment": "payment",
-            "deyn soo xarootay": "payment", "lacag bixin": "payment",
-            "3": "other", "inactivity_other": "other", "adeeg kale": "other",
-        }
-        inactivity_choice = inactivity_choice_map.get(inactivity_choice_key)
-        if inactivity_state and not pending_payment_confirmation_active:
-            inactivity_expiry = inactivity_state.get("expires_at")
-            if (
-                inactivity_state.get("business_user_id") == str(business_user_id)
-                and inactivity_expiry
-                and datetime.now(timezone.utc) <= inactivity_expiry
-                and inactivity_choice
-            ):
-                INACTIVITY_SESSIONS.pop(sender_phone, None)
-                GUIDED_SESSIONS.pop(sender_phone, None)
-                if inactivity_choice == "debt":
-                    GUIDED_SESSIONS[sender_phone] = {
-                        "stage": "debt_name",
-                        "transaction_type": "debt",
-                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
-                    }
-                    _save_persisted_workflow_sessions(sender_phone)
-                    send_whatsapp(
-                        sender_phone,
-                        "Magaca macmiilka deynta lagu leeyahay?\\n\\nQor *JOOJI* si aad uga baxdo."
-                    )
-                    return {"status": "inactivity_menu_debt_started"}
-                if inactivity_choice == "payment":
-                    GUIDED_SESSIONS[sender_phone] = {
-                        "stage": "payment_name",
-                        "transaction_type": "payment",
-                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
-                    }
-                    _save_persisted_workflow_sessions(sender_phone)
-                    send_whatsapp(
-                        sender_phone,
-                        "Magaca qofka lacagta bixiyey?\\n\\nQor *JOOJI* si aad uga baxdo."
-                    )
-                    return {"status": "inactivity_menu_payment_started"}
-                GUIDED_SESSIONS[sender_phone] = {
-                    "stage": "menu_other",
-                    "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
-                }
-                _save_persisted_workflow_sessions(sender_phone)
-                send_deynjir_other_services_menu(sender_phone, page=1)
-                return {"status": "inactivity_menu_other_services"}
-            elif (
-                inactivity_state.get("business_user_id") == str(business_user_id)
-                and inactivity_expiry
-                and datetime.now(timezone.utc) > inactivity_expiry
-            ):
-                INACTIVITY_SESSIONS.pop(sender_phone, None)
-                _save_persisted_workflow_sessions(sender_phone)
-
         # Database-backed transaction clarification has priority over every
         # in-memory workflow. A short reply such as "1" must answer ADD/PAY,
         # never an old correction, undo, or first-debt onboarding prompt.
@@ -6074,6 +6013,8 @@ async def _whatsapp_webhook_process(request: Request):
                 # customer, amount and promised_date from the saved clarification.
                 GUIDED_SESSIONS.pop(sender_phone, None)
                 PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
+                FIRST_DEBT_SESSIONS.pop(sender_phone, None)
+                INACTIVITY_SESSIONS.pop(sender_phone, None)
                 early_pending_transaction_entries = [dict(item) for item in saved_entries]
                 early_forced_transaction_action = early_clarification_action
                 # The user's button choice is authoritative. The saved parser
@@ -6117,6 +6058,71 @@ async def _whatsapp_webhook_process(request: Request):
             active_guided_for_name = GUIDED_SESSIONS.get(sender_phone) or {}
             if active_guided_for_name.get("stage") not in {"debt_name", "payment_name"}:
                 GUIDED_SESSIONS.pop(sender_phone, None)
+
+        # The inactivity menu may own numeric replies only when no payment
+        # confirmation is waiting for this sender/shop.
+        inactivity_state = INACTIVITY_SESSIONS.get(sender_phone) or {}
+        inactivity_choice_raw = str(message_text or "").strip()
+        inactivity_choice_key = inactivity_choice_raw.casefold()
+        inactivity_choice_map = {
+            "1": "debt", "inactivity_debt": "debt", "deyn baxday": "debt",
+            "2": "payment", "inactivity_payment": "payment",
+            "deyn soo xarootay": "payment", "lacag bixin": "payment",
+            "3": "other", "inactivity_other": "other", "adeeg kale": "other",
+        }
+        inactivity_choice = inactivity_choice_map.get(inactivity_choice_key)
+        if (
+            inactivity_state
+            and not pending_payment_confirmation_active
+            and not pending_transaction_clarification_active
+        ):
+            inactivity_expiry = inactivity_state.get("expires_at")
+            if (
+                inactivity_state.get("business_user_id") == str(business_user_id)
+                and inactivity_expiry
+                and datetime.now(timezone.utc) <= inactivity_expiry
+                and inactivity_choice
+            ):
+                INACTIVITY_SESSIONS.pop(sender_phone, None)
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                if inactivity_choice == "debt":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "debt_name",
+                        "transaction_type": "debt",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
+                    _save_persisted_workflow_sessions(sender_phone)
+                    send_whatsapp(
+                        sender_phone,
+                        "Magaca macmiilka deynta lagu leeyahay?\\n\\nQor *JOOJI* si aad uga baxdo."
+                    )
+                    return {"status": "inactivity_menu_debt_started"}
+                if inactivity_choice == "payment":
+                    GUIDED_SESSIONS[sender_phone] = {
+                        "stage": "payment_name",
+                        "transaction_type": "payment",
+                        "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                    }
+                    _save_persisted_workflow_sessions(sender_phone)
+                    send_whatsapp(
+                        sender_phone,
+                        "Magaca qofka lacagta bixiyey?\\n\\nQor *JOOJI* si aad uga baxdo."
+                    )
+                    return {"status": "inactivity_menu_payment_started"}
+                GUIDED_SESSIONS[sender_phone] = {
+                    "stage": "menu_other",
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+                }
+                _save_persisted_workflow_sessions(sender_phone)
+                send_deynjir_other_services_menu(sender_phone, page=1)
+                return {"status": "inactivity_menu_other_services"}
+            elif (
+                inactivity_state.get("business_user_id") == str(business_user_id)
+                and inactivity_expiry
+                and datetime.now(timezone.utc) > inactivity_expiry
+            ):
+                INACTIVITY_SESSIONS.pop(sender_phone, None)
+                _save_persisted_workflow_sessions(sender_phone)
 
         # Admin-triggered first-debt onboarding. This flow is deterministic and
         # deliberately runs before conversational AI, Gemini parsing, and the
