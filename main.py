@@ -7966,6 +7966,14 @@ async def _whatsapp_webhook_process(request: Request):
         send_whatsapp(sender_phone, reply or fallback_reply)
         return {"status": "system_question_answered"}
 
+    # Active financial confirmations own HAA/MAYA (including interactive button
+    # IDs after normalization). They must not be swallowed by generic help or
+    # acknowledgement handlers before their workflow-specific handler runs.
+    active_transaction_confirmation_for_shop = (
+        str((TRANSACTION_CONFIRMATION_SESSIONS.get(sender_phone) or {}).get("business_user_id") or "")
+        == str(business_user_id)
+    )
+
     # A clear refusal should end optional guidance instead of restarting the
     # same service-selection question. Do not intercept active financial stages.
     active_customer_match_for_decline = CUSTOMER_MATCH_SESSIONS.get(sender_phone) or {}
@@ -7978,6 +7986,7 @@ async def _whatsapp_webhook_process(request: Request):
     if (
         (not guided or guided.get("stage") == "menu")
         and not customer_match_owns_decline
+        and not active_transaction_confirmation_for_shop
         and is_user_declining_help(guided_text)
     ):
         if guided and guided.get("stage") == "menu":
@@ -7991,7 +8000,12 @@ async def _whatsapp_webhook_process(request: Request):
         (CUSTOMER_MATCH_SESSIONS.get(sender_phone) or {}).get("business_user_id") == str(business_user_id)
         and (CUSTOMER_MATCH_SESSIONS.get(sender_phone) or {}).get("stage") == "confirm_extracted_name"
     )
-    if not guided and is_simple_acknowledgement(guided_text) and not active_name_confirmation:
+    if (
+        not guided
+        and is_simple_acknowledgement(guided_text)
+        and not active_name_confirmation
+        and not active_transaction_confirmation_for_shop
+    ):
         # Acknowledgements should not create another notification or restart a task.
         # Workflow-specific confirmations have already been handled by their owners.
         print(f"🔕 Silent acknowledgement: {guided_text!r}")
@@ -10557,7 +10571,7 @@ async def _whatsapp_webhook_process(request: Request):
                                 "*Xaqiiji deynta cusub*\n\n"
                                 f"Macmiil: *{existing.get('name') or name}*\n"
                                 f"Lacagta lagu darayo: *${add_amount:.2f}*" + due_line + "\n\n"
-                                "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u joojiso."
+                                "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u saxdo."
                             )
                             break
 
