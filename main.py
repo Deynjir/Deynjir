@@ -4114,6 +4114,36 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
     if not ai_norm:
         return None
 
+    # A deterministic local transaction parse is more authoritative than a
+    # shorter name recovered from the customer table. For example, if the user
+    # typed "dhudi cali 16/11/2026 12" and the AI later returns only "cali",
+    # do not let an existing customer named "cali" overwrite the supplied
+    # two-part name. Return the exact locally parsed name instead.
+    try:
+        local_entries = local_fallback_parse(message_text)
+    except Exception as local_parse_error:
+        local_entries = []
+        print(
+            "⚠️ Local name guard could not parse original message: "
+            f"{type(local_parse_error).__name__}: {local_parse_error}"
+        )
+    for local_entry in local_entries or []:
+        if not isinstance(local_entry, dict):
+            continue
+        local_action = str(local_entry.get("action") or "").upper()
+        local_name = str(local_entry.get("customer_name") or "").strip()
+        local_norm = normalize_customer_name(local_name)
+        if (
+            local_action in {"ADD", "PAY"}
+            and local_norm
+            and (local_norm == ai_norm or local_norm.endswith(" " + ai_norm))
+        ):
+            print(
+                "🛡️ Preserving complete locally parsed customer name: "
+                f"AI={ai_name!r}, local={local_name!r}"
+            )
+            return local_name
+
     result = (
         supabase.table("customers")
         .select("name")
@@ -6017,15 +6047,6 @@ async def _whatsapp_webhook_process(request: Request):
                 INACTIVITY_SESSIONS.pop(sender_phone, None)
                 early_pending_transaction_entries = [dict(item) for item in saved_entries]
                 early_forced_transaction_action = early_clarification_action
-
-                # IMPORTANT: after consuming the choice, continue processing the
-                # ORIGINAL transaction text, not the button label ("DEYN CUSUB").
-                # Otherwise the later guided-action router mistakes the answer
-                # for a fresh guided-debt command and asks for the name again.
-                original_transaction_message = str(early_row.get("original_message") or "").strip()
-                if original_transaction_message:
-                    message_text = original_transaction_message
-
                 # The user's button choice is authoritative. The saved parser
                 # output is intentionally provisional (usually ADD); overwrite
                 # every financial entry before any customer-match or replay path.
@@ -7522,10 +7543,6 @@ async def _whatsapp_webhook_process(request: Request):
     guided_transaction_override = None
     guided_text = str(message_text or "").strip()
     guided = GUIDED_SESSIONS.get(sender_phone)
-    # A transaction clarification has already restored its saved entries above.
-    # It must bypass all guided name/amount prompts on this same inbound reply.
-    if early_pending_transaction_entries:
-        guided = None
     if pending_new_request:
         guided = None  # Keep the saved session; route this message as a separate request.
     if guided:
