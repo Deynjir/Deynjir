@@ -105,6 +105,8 @@ GUIDED_SESSION_TTL = timedelta(minutes=15)
 GUIDED_MENU_SESSION_TTL = timedelta(hours=24)
 # Pending ADD/PAY customer identity confirmations. No transaction is saved until resolved.
 CUSTOMER_MATCH_SESSIONS = {}
+# Final one-step confirmation for ADD transactions; no write occurs before HAA.
+TRANSACTION_CONFIRMATION_SESSIONS = {}
 # A PAY request for a customer with no outstanding debt may become a confirmed deposit.
 DEPOSIT_OFFER_SESSIONS = {}
 DEPOSIT_OFFER_TTL = timedelta(minutes=5)
@@ -130,7 +132,7 @@ WORKFLOW_SESSION_MAPS = (
     IMPORT_SESSIONS, PAYMENT_EXPORT_SESSIONS, REMINDER_SESSIONS,
     INACTIVITY_SESSIONS,
     RENAME_SESSIONS, AMOUNT_EDIT_SESSIONS, GUIDED_SESSIONS,
-    PAUSED_GUIDED_SESSIONS, CUSTOMER_MATCH_SESSIONS, DELETE_SESSIONS,
+    PAUSED_GUIDED_SESSIONS, CUSTOMER_MATCH_SESSIONS, TRANSACTION_CONFIRMATION_SESSIONS, DELETE_SESSIONS,
     FIRST_DEBT_SESSIONS,
     UNDO_CONFIRMATION_SESSIONS, SEARCH_DETAIL_SESSIONS,
     DEPOSIT_OFFER_SESSIONS, CORRECTION_SESSIONS,
@@ -153,6 +155,7 @@ PERSISTED_SESSION_MAPS = {
     "guided": GUIDED_SESSIONS,
     "paused_guided": PAUSED_GUIDED_SESSIONS,
     "customer_match": CUSTOMER_MATCH_SESSIONS,
+    "transaction_confirmation": TRANSACTION_CONFIRMATION_SESSIONS,
     "deposit_offer": DEPOSIT_OFFER_SESSIONS,
     "correction": CORRECTION_SESSIONS,
     "delete": DELETE_SESSIONS,
@@ -1559,6 +1562,7 @@ def _pending_workflow_snapshot(sender_phone):
         ("import", IMPORT_SESSIONS), ("payment_export", PAYMENT_EXPORT_SESSIONS),
         ("reminder", REMINDER_SESSIONS), ("search_detail", SEARCH_DETAIL_SESSIONS),
         ("deposit_offer", DEPOSIT_OFFER_SESSIONS), ("correction", CORRECTION_SESSIONS),
+        ("transaction_confirmation", TRANSACTION_CONFIRMATION_SESSIONS),
     )
     for label, session_map in session_maps:
         state = session_map.get(sender_phone)
@@ -1607,6 +1611,7 @@ def _pending_reply_reminder_text(sender_phone, original_prompt):
         ("guided", GUIDED_SESSIONS),
         ("delete", DELETE_SESSIONS),
         ("customer_match", CUSTOMER_MATCH_SESSIONS),
+        ("transaction_confirmation", TRANSACTION_CONFIRMATION_SESSIONS),
         ("amount_edit", AMOUNT_EDIT_SESSIONS),
         ("undo", UNDO_CONFIRMATION_SESSIONS),
         ("rename", RENAME_SESSIONS),
@@ -2309,7 +2314,17 @@ def customer_name_is_grounded_in_source(customer_name, source_message):
     source = normalize_customer_name(source_message)
     if not proposed or not source:
         return False
-    return f" {proposed} " in f" {source} "
+    if f" {proposed} " in f" {source} ":
+        return True
+    # Punctuation can be written differently by the shopkeeper and parser
+    # (for example C/kariin versus C kariin). Accept the same ordered full
+    # token sequence, but never a shortened/reordered name.
+    proposed_tokens = proposed.split()
+    source_tokens = source.split()
+    if not proposed_tokens or len(proposed_tokens) > len(source_tokens):
+        return False
+    width = len(proposed_tokens)
+    return any(source_tokens[i:i + width] == proposed_tokens for i in range(len(source_tokens) - width + 1))
 
 
 def is_name_confirmation_interrupt_command(message_text):
@@ -5993,7 +6008,16 @@ async def _whatsapp_webhook_process(request: Request):
                 )
                 if early_pending.data:
                     early_ok, early_rejected = _reject_pending_payment_confirmation(early_pending.data[0]["id"], sender_phone)
-                    send_whatsapp(sender_phone, early_rejected if not early_ok else "Lacag-bixinta waa la diiday. Waxba lama kaydin.")
+                    if not early_ok:
+                        early_reply = early_rejected
+                    elif early_confirmation_answer in {"jooji", "cancel"}:
+                        early_reply = "Lacag-bixinta waa la joojiyey. Waxba lama kaydin."
+                    else:
+                        early_reply = (
+                            "Waxba lama diiwaangelin. Fadlan dib u qor magaca iyo lacagta saxda ah, "
+                            "tusaale: *Cali $25* ama *Lacag bixin Cali $25*. Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+                        )
+                    send_whatsapp(sender_phone, early_reply)
                     return {"status": "payment_rejected" if early_ok else "payment_rejection_failed", "handler": "early_pending_payment_priority"}
         except Exception as payment_priority_error:
             # Fail closed: do not let a competing menu consume a possible
@@ -6463,9 +6487,11 @@ async def _whatsapp_webhook_process(request: Request):
         )
         deposit_waiting = DEPOSIT_OFFER_SESSIONS.get(sender_phone) or {}
         correction_waiting = CORRECTION_SESSIONS.get(sender_phone) or {}
+        transaction_confirmation_waiting = TRANSACTION_CONFIRMATION_SESSIONS.get(sender_phone) or {}
         financial_confirmation_reply = (
             (deposit_waiting.get("business_user_id") == str(business_user_id)
-             or correction_waiting.get("business_user_id") == str(business_user_id))
+             or correction_waiting.get("business_user_id") == str(business_user_id)
+             or transaction_confirmation_waiting.get("business_user_id") == str(business_user_id))
             and normalize_customer_name(numeric_reply).strip(" .!?؟") in {"1", "2", "haa", "h", "yes", "y", "ok", "maya", "may", "no", "n", "cancel", "jooji"}
         )
         delete_waiting = DELETE_SESSIONS.get(sender_phone) or {}
@@ -7320,11 +7346,14 @@ async def _whatsapp_webhook_process(request: Request):
                 if not ok:
                     send_whatsapp(sender_phone, rejected)
                     return {"status": "payment_rejection_failed"}
-                send_whatsapp(
-                    sender_phone,
-                    "Lacag-bixinta waa la diiday. Waxba lama kaydin.\n\n"
-                    "Haddii magaca ama lacagtu khaldan yihiin, sax oo soo qor: *SAX Axmed $40*."
-                )
+                if answer in {"jooji", "cancel"}:
+                    reply_text = "Lacag-bixinta waa la joojiyey. Waxba lama kaydin."
+                else:
+                    reply_text = (
+                        "Waxba lama diiwaangelin. Fadlan dib u qor magaca iyo lacagta saxda ah, "
+                        "tusaale: *Cali $25* ama *Lacag bixin Cali $25*. Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+                    )
+                send_whatsapp(sender_phone, reply_text)
                 if owner_phone:
                     send_whatsapp(
                         owner_phone,
@@ -8502,6 +8531,60 @@ async def _whatsapp_webhook_process(request: Request):
     customer_match_resume_entry = None
     customer_match_resume_remaining = []
     customer_match_resume_forced_action = None
+
+    transaction_confirmation_state = TRANSACTION_CONFIRMATION_SESSIONS.get(sender_phone)
+    if transaction_confirmation_state:
+        if transaction_confirmation_state.get("business_user_id") != str(business_user_id):
+            TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+            _save_persisted_workflow_sessions(sender_phone)
+        elif pending_new_request:
+            # A new explicit command replaces the unconfirmed proposal.
+            TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+            _save_persisted_workflow_sessions(sender_phone)
+        else:
+            expires_at = transaction_confirmation_state.get("expires_at")
+            if not expires_at or datetime.now(timezone.utc) > expires_at:
+                TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                _save_persisted_workflow_sessions(sender_phone)
+                send_whatsapp(sender_phone, "Waqtigii xaqiijintu wuu dhammaaday. Waxba lama diiwaangelin. Fadlan macaamilka mar kale dir.")
+                return {"status": "transaction_confirmation_expired"}
+
+            confirmation_answer = normalize_customer_name(str(message_text or "")).strip(" .!?؟")
+            if confirmation_answer in {"haa", "h", "yes", "y", "ok", "1"}:
+                TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                _save_persisted_workflow_sessions(sender_phone)
+                confirmed_entry = dict(transaction_confirmation_state.get("entry") or {})
+                confirmed_entry["_transaction_confirmed"] = True
+                confirmed_entry["_confirmation_request_id"] = str(transaction_confirmation_state.get("request_id") or "")
+                customer_match_resume_entry = confirmed_entry
+                customer_match_resume_remaining = [dict(item) for item in (transaction_confirmation_state.get("remaining_entries") or [])]
+                customer_match_resume_forced_action = str(confirmed_entry.get("action") or "ADD").upper()
+                message_text = transaction_confirmation_state.get("original_message") or message_text
+                print(
+                    "✅ ADD transaction confirmation accepted: "
+                    f"name={confirmed_entry.get('customer_name')!r}, amount={confirmed_entry.get('amount')!r}"
+                )
+            elif confirmation_answer in {"maya", "may", "no", "n", "2"}:
+                TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                _save_persisted_workflow_sessions(sender_phone)
+                send_whatsapp(
+                    sender_phone,
+                    "Waxba lama diiwaangelin. Fadlan dib u qor magaca iyo lacagta saxda ah, "
+                    "tusaale: *Cali $25*. Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+                )
+                return {"status": "transaction_confirmation_declined_rewrite_requested"}
+            elif confirmation_answer in {"jooji", "cancel", "baaji", "stop"}:
+                TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                _save_persisted_workflow_sessions(sender_phone)
+                send_whatsapp(sender_phone, "Waa la joojiyey. Waxba lama diiwaangelin.")
+                return {"status": "transaction_confirmation_cancelled"}
+            else:
+                send_deynjir_yes_no(
+                    sender_phone,
+                    "Fadlan ku jawaab *HAA* si loo diiwaangeliyo ama *MAYA* si aad u saxdo. Waxba lama kaydin."
+                )
+                return {"status": "transaction_confirmation_answer_required"}
+
     customer_match_state = CUSTOMER_MATCH_SESSIONS.get(sender_phone)
     if customer_match_state:
         if customer_match_state.get("business_user_id") != str(business_user_id):
@@ -10206,14 +10289,12 @@ async def _whatsapp_webhook_process(request: Request):
                         break
 
                     if len(distinct_names) == 1 and not entry.get("_customer_match_confirmed"):
-                        matched_name = distinct_names[0]
-                        if normalize_customer_name(name) != normalize_customer_name(matched_name):
-                            start_customer_match_session(
-                                sender_phone, business_user_id, entry, message_text, matches,
-                                "confirm_single", entries[entry_index + 1:],
-                                allow_new=not existing_account_request
-                            )
-                            break
+                        # A single unambiguous match is shown by its canonical stored name
+                        # in the final HAA/MAYA transaction preview. Avoid a separate
+                        # name-only confirmation layer.
+                        name = distinct_names[0]
+                        entry["customer_name"] = name
+                        entry["_customer_match_confirmed"] = True
 
                     if not matches and existing_account_request and not force_new_customer:
                         if entry.get("_existing_account_lookup_attempted"):
@@ -10269,6 +10350,27 @@ async def _whatsapp_webhook_process(request: Request):
                                 parsed_transaction_date, datetime.min.time(), tzinfo=EAT
                             ).isoformat()
 
+                        if not entry.get("_transaction_confirmed"):
+                            request_id = str(entry.get("_confirmation_request_id") or f"add-confirm:{secrets.token_urlsafe(18)}")
+                            TRANSACTION_CONFIRMATION_SESSIONS[sender_phone] = {
+                                "business_user_id": str(business_user_id),
+                                "entry": dict(entry),
+                                "original_message": str(message_text or ""),
+                                "remaining_entries": [dict(item) for item in entries[entry_index + 1:]],
+                                "request_id": request_id,
+                                "expires_at": datetime.now(timezone.utc) + timedelta(minutes=15),
+                            }
+                            _save_persisted_workflow_sessions(sender_phone)
+                            due_line = f"\nBallan: {promised_date}" if promised_date else ""
+                            send_deynjir_yes_no(
+                                sender_phone,
+                                "*Xaqiiji deynta cusub*\n\n"
+                                f"Macmiil: *{existing.get('name') or name}*\n"
+                                f"Lacagta lagu darayo: *${add_amount:.2f}*" + due_line + "\n\n"
+                                "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u saxdo.\nWaxba lama kaydin ilaa aad xaqiijiso."
+                            )
+                            break
+
                         updated_result = _financial_rpc("record_debt_addition", {
                             "p_customer_id": str(existing["id"]),
                             "p_business_user_id": str(business_user_id),
@@ -10278,7 +10380,7 @@ async def _whatsapp_webhook_process(request: Request):
                             "p_promised_date": promised_date,
                             "p_phone_number": new_phone,
                             "p_created_at": parsed_created_at,
-                        }).execute()
+                        }, request_id=entry.get("_confirmation_request_id") or None).execute()
                         updated_data = updated_result.data
                         if isinstance(updated_data, list):
                             updated_data = updated_data[0] if updated_data else None
@@ -10325,6 +10427,26 @@ async def _whatsapp_webhook_process(request: Request):
                         parsed_transaction_date, datetime.min.time(), tzinfo=EAT
                     ).isoformat()
 
+                if not entry.get("_transaction_confirmed"):
+                    request_id = str(entry.get("_confirmation_request_id") or f"add-confirm:{secrets.token_urlsafe(18)}")
+                    TRANSACTION_CONFIRMATION_SESSIONS[sender_phone] = {
+                        "business_user_id": str(business_user_id),
+                        "entry": dict(entry),
+                        "original_message": str(message_text or ""),
+                        "remaining_entries": [dict(item) for item in entries[entry_index + 1:]],
+                        "request_id": request_id,
+                        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=15),
+                    }
+                    _save_persisted_workflow_sessions(sender_phone)
+                    due_line = f"\nBallan: {promised_date}" if promised_date else ""
+                    send_deynjir_yes_no(
+                        sender_phone,
+                        "*Xaqiiji deynta cusub*\n\n"
+                        f"Macmiil: *{name}*\nLacagta: *${float(amount):.2f}*" + due_line + "\n\n"
+                        "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u saxdo.\nWaxba lama kaydin ilaa aad xaqiijiso."
+                    )
+                    break
+
                 result = _financial_rpc("record_debt_addition", {
                     "p_customer_id": None,
                     "p_business_user_id": str(business_user_id),
@@ -10334,7 +10456,7 @@ async def _whatsapp_webhook_process(request: Request):
                     "p_promised_date": promised_date,
                     "p_phone_number": new_phone,
                     "p_created_at": parsed_created_at,
-                }).execute()
+                }, request_id=entry.get("_confirmation_request_id") or None).execute()
                 if not result.data:
                     send_whatsapp(sender_phone, f"❌ Deynta {name} lama diiwaangelin. Database-ku wax jawaab ah ma soo celin.")
                     failed_inserts.append({"name": name, "reason": "record_debt_addition returned no rows"})
@@ -10403,13 +10525,11 @@ async def _whatsapp_webhook_process(request: Request):
                     break
 
                 if len(distinct_names) == 1 and not entry.get("_customer_match_confirmed"):
-                    matched_name = distinct_names[0]
-                    if normalize_customer_name(name) != normalize_customer_name(matched_name):
-                        start_customer_match_session(
-                            sender_phone, business_user_id, entry, message_text, matches,
-                            "confirm_single", entries[entry_index + 1:], allow_new=False
-                        )
-                        break
+                    # The final payment preview will show the exact stored name.
+                    # Do not ask the shopkeeper to confirm the name separately.
+                    name = distinct_names[0]
+                    entry["customer_name"] = name
+                    entry["_customer_match_confirmed"] = True
 
                 if len(matches) > 1:
                     # Same display name with multiple unpaid debt rows cannot be
@@ -12073,21 +12193,29 @@ async def inactivity_checkin(request: Request):
         print(f"❌ Error loading business users: {type(e).__name__}: {e}")
         return {"status": "database_error"}
 
-    message = (
-        "🌙 *Xusuusin*\n\n"
-        "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\n\n"
-        "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\n\n"
-        "*Haddii ay jiraan, soo geli:*"
-    )
-    fallback_message = (
-        message + "\n\n"
-        "1. Deyn cusub\n"
-        "2. Lacag-bixin\n"
-        "3. Adeeg kale\n\n"
-        "Dooro 1, 2 ama 3."
-    )
-
     for user in users:
+        sender_phone = user.get("phone_number")
+
+        if not sender_phone:
+            continue
+
+        message = (
+            "🌙 *Xusuusin*\n\n"
+            "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\n\n"
+            "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\n\n"
+            "Dooro adeegga aad rabto:"
+        )
+
+        send_deynjir_choice_buttons(
+            sender_phone,
+            message,
+            [
+                ("MAIN_ADD", "Deyn cusub"),
+                ("MAIN_PAY", "Lacag-bixin"),
+                ("MAIN_OTHER", "Adeegyada kale"),
+            ],
+            message
+        )
         business_user_id = user.get("id")
         phone = str(user.get("phone_number") or "").strip()
 
