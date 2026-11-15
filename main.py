@@ -4368,23 +4368,15 @@ def has_exact_customer_name_match(requested_name, matches):
 
 
 def send_similar_customer_options(to_phone, customer_name, allow_new=True):
-    """Offer the three explicit choices when a stored name is only a possible match."""
+    """When a name is only a possible match, ask only to correct it or create new."""
     body = (
-        f"Waxaan helay macmiil magaciisu u egyahay: *{customer_name}*.\n\n"
-        "Ma isaga/iyada ayaad ula jeeddaa?"
+        f"Magaca *{customer_name}* ayaan ka helay liiska, balse si buuxda uguma eka magaca aad qortay.\n\n"
+        "Maxaad rabtaa inaad samayso?"
     )
-    buttons = [
-        ("SIMILAR_USE_EXISTING", "1. Isticmaal"),
-        ("SIMILAR_CORRECT_NAME", "2. Sax magaca"),
-    ]
+    buttons = [("SIMILAR_CORRECT_NAME", "1. Sax magaca")]
     if allow_new:
-        buttons.append(("SIMILAR_CREATE_NEW", "3. Macmiil cusub"))
-    fallback = (
-        body
-        + "\n\n1. Isticmaal macmiilka jira"
-        + "\n2. Geli magaca saxda ah"
-        + ("\n3. Samee macmiil cusub" if allow_new else "")
-    )
+        buttons.append(("SIMILAR_CREATE_NEW", "2. Macmiil cusub"))
+    fallback = body + "\n\n1. Sax magaca\n2. Samee macmiil cusub" if allow_new else body + "\n\n1. Sax magaca"
     return send_deynjir_choice_buttons(to_phone, body, buttons, fallback)
 
 
@@ -5573,9 +5565,8 @@ async def _whatsapp_webhook_process(request: Request):
         "customer_match_yes": "HAA", "haa": "HAA",
         "customer_match_no": "MAYA", "maya": "MAYA",
         "customer_match_new": "CUSUB", "qof cusub": "CUSUB",
-        "similar_use_existing": "1",
-        "similar_correct_name": "2",
-        "similar_create_new": "3",
+        "similar_correct_name": "1",
+        "similar_create_new": "2",
         "import_mode_debt": "DEYN", "deyn": "DEYN",
         "import_mode_cancel": "CANCEL", "jooji": "CANCEL",
         "import_confirm_ok": "OK", "ok": "OK",
@@ -8721,26 +8712,24 @@ async def _whatsapp_webhook_process(request: Request):
             recheck_customer_name = True
 
         elif stage == "similar_single":
-            if answer_folded in {"1", "haa", "yes", "y", "existing", "use"}:
-                selected_name = candidate_names[0] if candidate_names else entry.get("customer_name")
-            elif answer_folded in {"2", "maya", "no", "n", "correct", "sax"}:
+            if answer_folded in {"1", "maya", "no", "n", "correct", "sax", "change", "correct name"}:
                 customer_match_state["stage"] = "enter_full_name"
                 customer_match_state["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
                 send_whatsapp(
                     sender_phone,
-                    "Fadlan qor magaca saxda ah ee macmiilka. "
-                    "Magacaas ayaan mar kale liiska ka raadinayaa. "
-                    "Haddii aanu jirin, waxaa loo qaadanayaa macmiil cusub. "
-                    "Waxba lama diiwaangelin weli."
+                    "Fadlan qor magaca saxda ah ee macmiilka.\n"
+                    "Haddii magacaasi ku jiro liiska, macaamilkaas ayaan adeegsanayaa. "
+                    "Haddii aanu jirin, macmiil cusub ayaan u samaynayaa.\n\n"
+                    "Lacagtii iyo nooca macaamilka waan hayaa; uma baahnid inaad dib u qorto."
                 )
                 _save_persisted_workflow_sessions(sender_phone)
                 return {"status": "customer_match_corrected_name_requested"}
-            elif answer_folded in {"3", "cusub", "new"} and customer_match_state.get("allow_new"):
+            elif answer_folded in {"2", "cusub", "new", "create new", "macmiil cusub"} and customer_match_state.get("allow_new"):
                 force_new = True
             else:
                 send_whatsapp(
                     sender_phone,
-                    "Fadlan dooro 1 (macmiilka jira), 2 (sax magaca), ama 3 (macmiil cusub)."
+                    "Fadlan dooro 1 (sax magaca) ama 2 (macmiil cusub)."
                 )
                 return {"status": "customer_match_similar_choice_pending"}
 
