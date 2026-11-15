@@ -6104,6 +6104,12 @@ async def _whatsapp_webhook_process(request: Request):
                 INACTIVITY_SESSIONS.pop(sender_phone, None)
                 early_pending_transaction_entries = [dict(item) for item in saved_entries]
                 early_forced_transaction_action = early_clarification_action
+                # Restore the ORIGINAL user message as the source text before
+                # customer-name grounding checks run later. Without this, the
+                # button label (e.g. "Deyn soo xarootay") is incorrectly treated
+                # as the source, so a perfectly valid name from the original
+                # message is challenged with an unnecessary OK/name correction.
+                message_text = str(early_row.get("original_message") or message_text)
                 # The user's button choice is authoritative. The saved parser
                 # output is intentionally provisional (usually ADD); overwrite
                 # every financial entry before any customer-match or replay path.
