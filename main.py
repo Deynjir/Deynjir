@@ -6504,6 +6504,20 @@ async def _whatsapp_webhook_process(request: Request):
                 f"for sender={sender_phone}"
             )
 
+        # A customer-search result owns its explicit 1/2 follow-up. Do this
+        # before generic request classification can treat "1" as a new action.
+        active_search_detail = SEARCH_DETAIL_SESSIONS.get(sender_phone) or {}
+        search_detail_numeric_priority = (
+            active_search_detail.get("business_user_id") == str(business_user_id)
+            and re.fullmatch(r"\s*[12]\s*", numeric_reply)
+        )
+        if search_detail_numeric_priority:
+            pending_new_request = False
+            print(
+                f"🔎 Customer search detail owns numeric reply {numeric_reply!r} "
+                f"for sender={sender_phone}"
+            )
+
         # If a duplicate-name selector is waiting, its numbered choices own
         # the next numeric reply. An older menu must not steal "1" or "2".
         customer_match_numeric_reply_priority = bool(
@@ -7797,6 +7811,11 @@ async def _whatsapp_webhook_process(request: Request):
         if search_answer in {"1", "haa", "h", "yes", "y", "xisaab", "xisaabta", "faahfaahin", "faahfaahinta"}:
             customer_for_statement = str(pending_search_detail.get("customer_name") or "").strip()
             SEARCH_DETAIL_SESSIONS.pop(sender_phone, None)
+            # The detail choice must continue as HISTORY, never as a guided
+            # debt-name answer or an AI-generated transaction clarification.
+            GUIDED_SESSIONS.pop(sender_phone, None)
+            PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
+            CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
             if customer_for_statement:
                 message_text = f"FAAHFAAHIN {customer_for_statement}"
                 guided_text = message_text
@@ -11291,6 +11310,16 @@ async def _whatsapp_webhook_process(request: Request):
                         except (TypeError, ValueError):
                             pass
                 nearest_due = min(due_dates).isoformat() if due_dates else None
+
+                # Starting a search is a new, non-financial workflow. Remove
+                # stale guided/identity prompts so they cannot consume the
+                # customer's 1/2 detail choice or the next search reply.
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
+                CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+                TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                DEPOSIT_OFFER_SESSIONS.pop(sender_phone, None)
+                CORRECTION_SESSIONS.pop(sender_phone, None)
 
                 SEARCH_DETAIL_SESSIONS[sender_phone] = {
                     "business_user_id": str(business_user_id),
