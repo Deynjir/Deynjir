@@ -7468,8 +7468,11 @@ async def _whatsapp_webhook_process(request: Request):
         send_whatsapp(sender_phone, no_customer_reply)
         return {"status": "guided_no_customer_yet"}
 
-    if guided and guided.get("stage") in {"menu", "debt_name", "payment_name"} and (
-        is_user_declining_help(guided_text) or guided_normalized in {"jooji", "cancel", "baaji", "iska daa"}
+    if guided and guided.get("stage") in {
+        "menu", "debt_name", "payment_name", "search_name", "history_name",
+    } and (
+        is_user_declining_help(guided_text)
+        or guided_normalized in {"jooji", "cancel", "baaji", "iska daa"}
     ):
         GUIDED_SESSIONS.pop(sender_phone, None)
         cancel_reply = "Waa hagaag, waan joojiyey. Waxba lama diiwaangelin. Markaad diyaar tahay, ii sheeg."
@@ -9407,9 +9410,16 @@ async def _whatsapp_webhook_process(request: Request):
     elif not pdf_only_requested:
         # In this multiline menu format, option 1 explicitly means a new
         # debt. Do not ask the ADD/PAY clarification a second time.
+        # A guided transaction has already obtained an explicit ADD/PAY
+        # choice from the user. Preserve that choice instead of reclassifying
+        # the bare amount reply (for example, "20.9") and asking again.
         explicit_direction = (
-            "ADD" if multiline_transaction else
-            classify_transaction_direction(message_text)
+            str(guided_transaction_override.get("action")).upper()
+            if guided_transaction_override
+            else (
+                "ADD" if multiline_transaction else
+                classify_transaction_direction(message_text)
+            )
         )
         has_financial_entries = any(
             isinstance(item, dict)
