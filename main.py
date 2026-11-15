@@ -347,7 +347,7 @@ def send_deynjir_choice_buttons(to_phone, body, buttons, fallback_text):
             "header": "Deynjir",
             "body": body,
             # Green-API rejects an empty footer with HTTP 400.
-            "footer": "Dooro hal ikhtiyaar.",
+            "footer": "Dooro:",
             "buttons": [
                 {"buttonId": str(button_id), "buttonText": str(button_text)}
                 for button_id, button_text in buttons
@@ -4138,12 +4138,33 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
     # "cali", do not silently downgrade the requested full name to "cali".
     # Conversely, if the parser extracted only "warsame" and the stored name
     # is "warsame cali", recovering the complete stored name is safe.
-    requested_name_parts = set(ai_norm.split())
+    requested_parts = ai_norm.split()
+    requested_name_parts = set(requested_parts)
+
+    # Work out whether the original message contains a multi-word name.
+    # Remove common date and amount formats first so numbers do not affect the
+    # count. If the parser extracted only "cali" from "warsame cali 12",
+    # the one-word database record "cali" must not win merely because that
+    # token appears in the message. A complete stored phrase such as
+    # "warsame cali" can still be recovered safely below.
+    source_for_name = str(message_text or "").casefold()
+    source_for_name = re.sub(r"\b\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b", " ", source_for_name)
+    source_for_name = re.sub(r"\b\d+(?:[.,]\d+)?\b", " ", source_for_name)
+    source_for_name = re.sub(r"[$€£]\s*", " ", source_for_name)
+    source_tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", source_for_name)
+    source_stop_words = {
+        "deyn", "dayn", "cusub", "lacag", "bixin", "bixiyay", "bixisay",
+        "wuu", "way", "iyo", "ku", "leh", "add", "pay", "debt",
+    }
+    source_name_tokens = [token for token in source_tokens if token not in source_stop_words]
+    source_has_multiword_name = len(source_name_tokens) > 1
+
     exact_candidates = [
         (len(normalized.split()), len(normalized), display, normalized)
         for normalized, display in stored_names.items()
         if f" {normalized} " in normalized_message
         and requested_name_parts.issubset(set(normalized.split()))
+        and not (source_has_multiword_name and len(normalized.split()) == 1)
     ]
     if exact_candidates:
         longest_words = max(item[0] for item in exact_candidates)
@@ -4161,7 +4182,18 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
     # field with stored names. Never scan arbitrary windows of the full message:
     # narrative words, amounts and dates can otherwise accidentally match an
     # unrelated customer (the QARAN incident).
-    requested_parts = ai_norm.split()
+    # When the source contains a multi-word customer name but the parser
+    # returned only one token, fuzzy matching is unsafe: it can map the final
+    # token to an unrelated one-word customer. Exact full-name recovery above
+    # is still allowed; otherwise leave the original parsed name untouched so
+    # normal customer matching can offer QOF CUSUB.
+    if source_has_multiword_name and len(requested_parts) == 1:
+        print(
+            "⚠️ Skipping one-token fuzzy name recovery for multi-word source: "
+            f"source_tokens={source_name_tokens!r}, ai_name={ai_name!r}"
+        )
+        return None
+
     narrative_words = {
         "wuxuu", "wuxu", "wuxun", "waxuu", "waxay", "wuu", "lacag",
         "deyn", "dayn", "qabe", "qabo", "bixinayo", "bixiyay", "bixisay",
@@ -4304,7 +4336,7 @@ def _unique_customer_names(matches):
 def send_customer_match_confirmation(to_phone, customer_name, allow_new=False):
     """Offer HAA/MAYA/CUSUB as real reply buttons with a readable text fallback."""
     body = (
-        f"Waxaan helay hal macmiil oo magacaagu u egyahay: *{customer_name}*.\n\n"
+        f"Waxaan helay hal macmiil oo magaciisu u egyahay: *{customer_name}*.\n\n"
         "Ma isaga/iyada ayaad ula jeeddaa?"
     )
     buttons = [
@@ -6501,7 +6533,7 @@ async def _whatsapp_webhook_process(request: Request):
                         raise RuntimeError("Database-ku ma xaqiijin ka-noqoshada.")
                     customer_after = undo_data.get("customer") or {}
                     undone_type = str(undo_data.get("transaction_type") or "").upper()
-                    type_so = {"ADD": "deyn lagu daray", "PAY": "lacag-bixin", "DEPOSIT": "dhigaal", "ADD + DHIGAAL": "deyn iyo isticmaalka dhigaalka"}.get(undone_type, "macaamil")
+                    type_so = {"ADD": "deyn", "PAY": "lacag-bixin", "DEPOSIT": "dhigaal", "ADD + DHIGAAL": "deyn iyo isticmaalka dhigaalka"}.get(undone_type, "macaamil")
                     restored_credit = undo_data.get("restored_credit_balance")
                     credit_line = f"\nHaraaga dhigaalka: ${float(restored_credit):.2f}" if restored_credit is not None else ""
                     send_whatsapp(sender_phone,
@@ -9992,7 +10024,7 @@ async def _whatsapp_webhook_process(request: Request):
                 send_whatsapp(
                     sender_phone,
                     f"Magaca waxaan u fahmay *{grounded_name}*. "
-                    "Haddii uu sax yahay soo qor *OK*; haddii kale soo qor magaca saxda ah.\\n\\n"
+                    "Haddii uu sax yahay soo qor *OK*; haddii kale soo qor magaca saxda ah.\n\n"
                     "Waxba lama diiwaangelin ilaa magaca la xaqiijiyo. Qor *JOOJI* si aad u baajiso."
                 )
                 return {"status": "customer_name_confirmation_pending"}
@@ -11478,7 +11510,16 @@ async def whatsapp_webhook(request: Request):
             print(f"❌ Webhook rejected: invalid event ID length; type={event_type!r}")
             raise HTTPException(status_code=400, detail="Invalid Green-API message ID")
     if event_id and is_duplicate_webhook(event_id):
+        print(
+            "♻️ Duplicate Green-API webhook ignored: "
+            f"type={event_type!r}, event_id={event_id!r}"
+        )
         return {"status": "duplicate_webhook_ignored"}
+    if event_id:
+        print(
+            "🧾 Green-API webhook accepted: "
+            f"type={event_type!r}, event_id={event_id!r}"
+        )
     sender_data = payload.get("senderData") or {}
     sender_chat_id = str(sender_data.get("chatId") or "")
     session_sender = sender_chat_id.split("@")[0] if sender_chat_id else ""
