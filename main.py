@@ -6006,6 +6006,8 @@ async def _whatsapp_webhook_process(request: Request):
         # in-memory workflow. A short reply such as "1" must answer ADD/PAY,
         # never an old correction, undo, or first-debt onboarding prompt.
         pending_transaction_clarification_active = False
+        early_pending_transaction_entries = None
+        early_forced_transaction_action = None
         try:
             pending_check = (
                 supabase.table("pending_transaction_clarifications")
@@ -6019,6 +6021,83 @@ async def _whatsapp_webhook_process(request: Request):
         except Exception as pending_check_error:
             pending_transaction_clarification_active = True
             print(f"⚠️ Pending clarification priority check failed: {pending_check_error}")
+
+        # Consume transaction-clarification choices BEFORE any guided name/menu
+        # workflow can interpret the button label as a customer name or new task.
+        # This is deliberately an early, DB-backed handoff because Green-API
+        # button replies can arrive while an unrelated guided session is active.
+        early_clarification_action = parse_transaction_clarification(message_text)
+        if pending_transaction_clarification_active and early_clarification_action in {"ADD", "PAY", "CANCEL"}:
+            try:
+                early_result = (
+                    supabase.table("pending_transaction_clarifications")
+                    .select("sender_phone, original_message, parsed_entries, created_at")
+                    .eq("sender_phone", sender_phone)
+                    .eq("business_user_id", business_user_id)
+                    .limit(1)
+                    .execute()
+                )
+                early_row = (early_result.data or [None])[0]
+                if not early_row:
+                    raise ValueError("Pending clarification disappeared before button response was handled")
+
+                if early_clarification_action == "CANCEL":
+                    (supabase.table("pending_transaction_clarifications")
+                        .delete()
+                        .eq("sender_phone", sender_phone)
+                        .eq("business_user_id", business_user_id)
+                        .execute())
+                    GUIDED_SESSIONS.pop(sender_phone, None)
+                    activate_guided_menu(sender_phone)
+                    send_whatsapp(
+                        sender_phone,
+                        deynjir_recovery_menu_message("Waa la joojiyey. Wax deyn ah lama diiwaangelin.")
+                    )
+                    return {"status": "pending_transaction_clarification_cancelled_early"}
+
+                saved_entries = early_row.get("parsed_entries") or []
+                if isinstance(saved_entries, str):
+                    saved_entries = json.loads(saved_entries)
+                if (
+                    not isinstance(saved_entries, list) or not saved_entries
+                    or any(
+                        not isinstance(item, dict)
+                        or str(item.get("action") or "").upper() not in {"ADD", "PAY"}
+                        or not item.get("customer_name")
+                        or item.get("amount") is None
+                        for item in saved_entries
+                    )
+                ):
+                    raise ValueError("Saved pending transaction entries are incomplete")
+
+                # Remove only temporary guided state; keep the exact parsed
+                # customer, amount and promised_date from the saved clarification.
+                GUIDED_SESSIONS.pop(sender_phone, None)
+                PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
+                early_pending_transaction_entries = [dict(item) for item in saved_entries]
+                early_forced_transaction_action = early_clarification_action
+                (supabase.table("pending_transaction_clarifications")
+                    .delete()
+                    .eq("sender_phone", sender_phone)
+                    .eq("business_user_id", business_user_id)
+                    .execute())
+                pending_transaction_clarification_active = False
+                print(
+                    "✅ EARLY_PENDING_CLARIFICATION_RESTORED "
+                    f"action={early_forced_transaction_action} "
+                    f"entries={early_pending_transaction_entries!r}"
+                )
+            except Exception as early_pending_error:
+                print(
+                    "❌ EARLY_PENDING_CLARIFICATION_RESTORE_FAILURE "
+                    f"{type(early_pending_error).__name__}: {early_pending_error}"
+                )
+                send_whatsapp(
+                    sender_phone,
+                    "❌ Fariintii sugaysay dib looma soo celin karin. Waxba lama diiwaangelin; fadlan mar kale isku day."
+                )
+                return {"status": "early_pending_clarification_restore_error"}
+
         if pending_transaction_clarification_active:
             # These are competing prompts for the same sender. Drop only their
             # temporary session state; no committed financial records are touched.
@@ -8494,8 +8573,8 @@ async def _whatsapp_webhook_process(request: Request):
     # A pending transaction clarification is persisted in Supabase so it survives
     # Render restarts. The original message is replayed only after a clear answer.
     pending_clarification = None
-    forced_transaction_action = None
-    pending_new_transaction_entries = None
+    forced_transaction_action = early_forced_transaction_action
+    pending_new_transaction_entries = early_pending_transaction_entries
     try:
         pending_result = (
             supabase.table("pending_transaction_clarifications")
