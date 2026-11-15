@@ -4132,10 +4132,18 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
     # longer name occur as substrings (e.g. LOW and IIDLE LOW), choose the
     # longest exact phrase. If two different names of the same longest length
     # are literally present, leave the choice ambiguous.
+    # A stored name may be a phrase inside the original message, but it must
+    # not be a *shorter fragment* of the name the parser already extracted.
+    # For example, if the user wrote "warsame cali" and the database only has
+    # "cali", do not silently downgrade the requested full name to "cali".
+    # Conversely, if the parser extracted only "warsame" and the stored name
+    # is "warsame cali", recovering the complete stored name is safe.
+    requested_name_parts = set(ai_norm.split())
     exact_candidates = [
         (len(normalized.split()), len(normalized), display, normalized)
         for normalized, display in stored_names.items()
         if f" {normalized} " in normalized_message
+        and requested_name_parts.issubset(set(normalized.split()))
     ]
     if exact_candidates:
         longest_words = max(item[0] for item in exact_candidates)
