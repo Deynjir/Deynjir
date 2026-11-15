@@ -327,6 +327,10 @@ def send_deynjir_other_services_menu(to_phone, page=1):
         ),
     }
     body, buttons, _fallback_lines = pages.get(page, pages[1])
+    print(
+        f"🧭 Sending other-services page={page} "
+        f"button_ids={[button_id for button_id, _ in buttons]!r}"
+    )
     # Keep service choices exclusively in the selectable WhatsApp buttons.
     fallback_text = (
         body
@@ -5930,6 +5934,13 @@ async def _whatsapp_webhook_process(request: Request):
         # choice 3. Route it directly to the interactive services pages so it
         # can never fall through to the legacy standalone "3 = debt list" path.
         if str(message_text or "").strip() == "OPEN_OTHER_SERVICES":
+            # Opening page 1 must establish the page-specific session. Without
+            # this, the next-page buttons are interpreted by the legacy menu.
+            GUIDED_SESSIONS[sender_phone] = {
+                "stage": "menu_other",
+                "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+            }
+            _save_persisted_workflow_sessions(sender_phone)
             send_deynjir_other_services_menu(sender_phone, page=1)
             return {"status": "other_services_menu_opened"}
 
@@ -6627,6 +6638,7 @@ async def _whatsapp_webhook_process(request: Request):
                         "stage": "menu_other_page2",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
                     }
+                    _save_persisted_workflow_sessions(sender_phone)
                     send_deynjir_other_services_menu(sender_phone, page=2)
                     return {"status": "other_services_page_two_sent"}
                 else:
@@ -6645,6 +6657,7 @@ async def _whatsapp_webhook_process(request: Request):
                         "stage": "menu_other_page3",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
                     }
+                    _save_persisted_workflow_sessions(sender_phone)
                     send_deynjir_other_services_menu(sender_phone, page=3)
                     return {"status": "other_services_page_three_sent"}
                 else:
@@ -6680,6 +6693,7 @@ async def _whatsapp_webhook_process(request: Request):
                         "stage": "menu",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
                     }
+                    _save_persisted_workflow_sessions(sender_phone)
                     send_deynjir_main_menu(sender_phone)
                     return {"status": "main_menu_returned_from_other_services"}
                 else:
@@ -7911,6 +7925,7 @@ async def _whatsapp_webhook_process(request: Request):
         if choice == "3":
             guided["stage"] = "menu_other"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL
+            _save_persisted_workflow_sessions(sender_phone)
             send_deynjir_other_services_menu(sender_phone, page=1)
             return {"status": "other_services_menu_sent"}
         elif choice == "4":
@@ -8809,6 +8824,13 @@ async def _whatsapp_webhook_process(request: Request):
     # The page-1 "Adeegyada xiga" button opens page 2; it must not be
     # collapsed to numeric choice 3 (the legacy debt-list shortcut).
     if str(message_text or "").strip() == "OPEN_OTHER_SERVICES_PAGE_2":
+        # Page 2 must own the next button (OTHER_NEXT_2 -> choice 6).
+        # Persist the stage so a restart cannot send that reply to the main menu.
+        GUIDED_SESSIONS[sender_phone] = {
+            "stage": "menu_other_page2",
+            "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+        }
+        _save_persisted_workflow_sessions(sender_phone)
         send_deynjir_other_services_menu(sender_phone, page=2)
         print("🧭 Other-services page 1 next button routed to page 2")
         return {"status": "other_services_page_2_opened"}
