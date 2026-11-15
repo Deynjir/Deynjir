@@ -376,17 +376,17 @@ def send_deynjir_yes_no(to_phone, body, yes_label="HAA", no_label="MAYA", fallba
     )
 
 
-def send_deynjir_main_menu(to_phone):
-    """Send the main menu once, with visible numbered choices and reply buttons."""
+def send_deynjir_main_menu(to_phone, intro=None):
+    """Send one compact interactive main menu; use numbered text only as API fallback."""
     clean_phone = str(to_phone).replace("+", "").split("@")[0].strip()
-    body = deynjir_main_menu()
+    body = ((str(intro).strip() + "\n\n") if intro else "") + "Maxaad rabtaa inaad qabato?"
     if GREEN_API_TOKEN:
         url = f"{GREEN_API_BASE}/waInstance{INSTANCE_ID}/sendInteractiveButtonsReply/{GREEN_API_TOKEN}"
         payload = {
             "chatId": f"{clean_phone}@c.us",
             "header": "Deynjir",
             "body": body,
-            "footer": "Dooro badhan ama ku jawaab 1, 2 ama 3.",
+            "footer": "Dooro adeeg.",
             "buttons": [
                 {"buttonId": "MAIN_ADD", "buttonText": "Deyn cusub"},
                 {"buttonId": "MAIN_PAY", "buttonText": "Lacag-bixin"},
@@ -404,7 +404,7 @@ def send_deynjir_main_menu(to_phone):
                 return True
         except Exception as exc:
             print(f"⚠️ Interactive menu unavailable; sending one text fallback: {type(exc).__name__}: {exc}")
-    return send_whatsapp(to_phone, body)
+    return send_whatsapp(to_phone, deynjir_recovery_menu_message(intro))
 
 
 def deynjir_recovery_menu_message(intro=None):
@@ -2573,6 +2573,15 @@ def parse_single_due_date_update(message_text):
         rf"\d{{1,2}}\s+(?:{month_pattern})(?:\s+\d{{4}})?)\s*[.!؟]?\s*$",
         re.I,
     )
+    date_token_re = re.compile(
+        rf"(?<!\w)(?:\d{{4}}-\d{{1,2}}-\d{{1,2}}|"
+        rf"\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{2,4}}|"
+        rf"(?:{month_pattern})\s+\d{{1,2}}(?:,?\s+\d{{4}})?|"
+        rf"\d{{1,2}}\s+(?:{month_pattern})(?:\s+\d{{4}})?)(?!\w)",
+        re.I,
+    )
+    if len(list(date_token_re.finditer(raw))) != 1:
+        return None
     match = date_re.search(raw)
     if not match:
         return None
@@ -2659,7 +2668,7 @@ def parse_due_date_batch(message_text):
     date_pattern = re.compile(
         rf"(?<!\w)(?P<date>"
         rf"\d{{4}}-\d{{1,2}}-\d{{1,2}}|"
-        rf"\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}}|"
+        rf"\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{2,4}}|"
         rf"(?:{month_pattern})\s+\d{{1,2}}(?:,?\s+\d{{4}})?|"
         rf"\d{{1,2}}\s+(?:{month_pattern})(?:\s+\d{{4}})?"
         rf")(?!\w)",
@@ -2678,8 +2687,11 @@ def parse_due_date_batch(message_text):
         value = " ".join(str(value).replace(",", " ").split())
         if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", value):
             return datetime.strptime(value, "%Y-%m-%d").date()
-        if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", value):
-            return datetime.strptime(value.replace("-", "/"), "%d/%m/%Y").date()
+        if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", value):
+            day, month, year = map(int, re.split(r"[/-]", value))
+            if year < 100:
+                year += 2000
+            return datetime(year, month, day).date()
         parts = value.split()
         year = None
         if parts and parts[-1].isdigit() and len(parts[-1]) == 4:
@@ -4114,6 +4126,36 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
     if not ai_norm:
         return None
 
+    # A deterministic local transaction parse is more authoritative than a
+    # shorter name recovered from the customer table. For example, if the user
+    # typed "dhudi cali 16/11/2026 12" and the AI later returns only "cali",
+    # do not let an existing customer named "cali" overwrite the supplied
+    # two-part name. Return the exact locally parsed name instead.
+    try:
+        local_entries = local_fallback_parse(message_text)
+    except Exception as local_parse_error:
+        local_entries = []
+        print(
+            "⚠️ Local name guard could not parse original message: "
+            f"{type(local_parse_error).__name__}: {local_parse_error}"
+        )
+    for local_entry in local_entries or []:
+        if not isinstance(local_entry, dict):
+            continue
+        local_action = str(local_entry.get("action") or "").upper()
+        local_name = str(local_entry.get("customer_name") or "").strip()
+        local_norm = normalize_customer_name(local_name)
+        if (
+            local_action in {"ADD", "PAY"}
+            and local_norm
+            and (local_norm == ai_norm or local_norm.endswith(" " + ai_norm))
+        ):
+            print(
+                "🛡️ Preserving complete locally parsed customer name: "
+                f"AI={ai_name!r}, local={local_name!r}"
+            )
+            return local_name
+
     result = (
         supabase.table("customers")
         .select("name")
@@ -4132,39 +4174,10 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
     # longer name occur as substrings (e.g. LOW and IIDLE LOW), choose the
     # longest exact phrase. If two different names of the same longest length
     # are literally present, leave the choice ambiguous.
-    # A stored name may be a phrase inside the original message, but it must
-    # not be a *shorter fragment* of the name the parser already extracted.
-    # For example, if the user wrote "warsame cali" and the database only has
-    # "cali", do not silently downgrade the requested full name to "cali".
-    # Conversely, if the parser extracted only "warsame" and the stored name
-    # is "warsame cali", recovering the complete stored name is safe.
-    requested_parts = ai_norm.split()
-    requested_name_parts = set(requested_parts)
-
-    # Work out whether the original message contains a multi-word name.
-    # Remove common date and amount formats first so numbers do not affect the
-    # count. If the parser extracted only "cali" from "warsame cali 12",
-    # the one-word database record "cali" must not win merely because that
-    # token appears in the message. A complete stored phrase such as
-    # "warsame cali" can still be recovered safely below.
-    source_for_name = str(message_text or "").casefold()
-    source_for_name = re.sub(r"\b\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b", " ", source_for_name)
-    source_for_name = re.sub(r"\b\d+(?:[.,]\d+)?\b", " ", source_for_name)
-    source_for_name = re.sub(r"[$€£]\s*", " ", source_for_name)
-    source_tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", source_for_name)
-    source_stop_words = {
-        "deyn", "dayn", "cusub", "lacag", "bixin", "bixiyay", "bixisay",
-        "wuu", "way", "iyo", "ku", "leh", "add", "pay", "debt",
-    }
-    source_name_tokens = [token for token in source_tokens if token not in source_stop_words]
-    source_has_multiword_name = len(source_name_tokens) > 1
-
     exact_candidates = [
         (len(normalized.split()), len(normalized), display, normalized)
         for normalized, display in stored_names.items()
         if f" {normalized} " in normalized_message
-        and requested_name_parts.issubset(set(normalized.split()))
-        and not (source_has_multiword_name and len(normalized.split()) == 1)
     ]
     if exact_candidates:
         longest_words = max(item[0] for item in exact_candidates)
@@ -4182,18 +4195,7 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
     # field with stored names. Never scan arbitrary windows of the full message:
     # narrative words, amounts and dates can otherwise accidentally match an
     # unrelated customer (the QARAN incident).
-    # When the source contains a multi-word customer name but the parser
-    # returned only one token, fuzzy matching is unsafe: it can map the final
-    # token to an unrelated one-word customer. Exact full-name recovery above
-    # is still allowed; otherwise leave the original parsed name untouched so
-    # normal customer matching can offer QOF CUSUB.
-    if source_has_multiword_name and len(requested_parts) == 1:
-        print(
-            "⚠️ Skipping one-token fuzzy name recovery for multi-word source: "
-            f"source_tokens={source_name_tokens!r}, ai_name={ai_name!r}"
-        )
-        return None
-
+    requested_parts = ai_norm.split()
     narrative_words = {
         "wuxuu", "wuxu", "wuxun", "waxuu", "waxay", "wuu", "lacag",
         "deyn", "dayn", "qabe", "qabo", "bixinayo", "bixiyay", "bixisay",
@@ -4336,7 +4338,7 @@ def _unique_customer_names(matches):
 def send_customer_match_confirmation(to_phone, customer_name, allow_new=False):
     """Offer HAA/MAYA/CUSUB as real reply buttons with a readable text fallback."""
     body = (
-        f"Waxaan helay hal macmiil oo magaciisu u egyahay: *{customer_name}*.\n\n"
+        f"Waxaan helay hal macmiil oo magacaagu u egyahay: *{customer_name}*.\n\n"
         "Ma isaga/iyada ayaad ula jeeddaa?"
     )
     buttons = [
@@ -6028,9 +6030,9 @@ async def _whatsapp_webhook_process(request: Request):
                         .execute())
                     GUIDED_SESSIONS.pop(sender_phone, None)
                     activate_guided_menu(sender_phone)
-                    send_whatsapp(
+                    send_deynjir_main_menu(
                         sender_phone,
-                        deynjir_recovery_menu_message("Waa la joojiyey. Wax deyn ah lama diiwaangelin.")
+                        intro="Waa la joojiyey. Wax deyn ah lama diiwaangelin."
                     )
                     return {"status": "pending_transaction_clarification_cancelled_early"}
 
@@ -6057,23 +6059,12 @@ async def _whatsapp_webhook_process(request: Request):
                 INACTIVITY_SESSIONS.pop(sender_phone, None)
                 early_pending_transaction_entries = [dict(item) for item in saved_entries]
                 early_forced_transaction_action = early_clarification_action
-                # Restore the ORIGINAL transaction text as the source context.
-                # The incoming button ID/label (TX_PAY, "Deyn soo xarootay",
-                # etc.) is not the source of the customer name or amount. Keeping
-                # the original text here lets the normal grounding checks verify
-                # the saved name without asking the shopkeeper to confirm it again.
-                early_original_transaction_message = str(early_row.get("original_message") or "").strip()
-                if early_original_transaction_message:
-                    message_text = early_original_transaction_message
                 # The user's button choice is authoritative. The saved parser
                 # output is intentionally provisional (usually ADD); overwrite
                 # every financial entry before any customer-match or replay path.
                 for saved_entry in early_pending_transaction_entries:
                     if str(saved_entry.get("action") or "").upper() in {"ADD", "PAY"}:
                         saved_entry["action"] = early_forced_transaction_action
-                # Persist the cleanup too, so an old guided/inactivity session
-                # cannot be restored after a Render restart and steal the next reply.
-                _save_persisted_workflow_sessions(sender_phone)
                 (supabase.table("pending_transaction_clarifications")
                     .delete()
                     .eq("sender_phone", sender_phone)
@@ -7887,9 +7878,9 @@ async def _whatsapp_webhook_process(request: Request):
     if guided and re.fullmatch(r"\s*(?:jooji|cancel|baaji)\s*", guided_text, re.I):
         GUIDED_SESSIONS.pop(sender_phone, None)
         activate_guided_menu(sender_phone)
-        send_whatsapp(
+        send_deynjir_main_menu(
             sender_phone,
-            deynjir_recovery_menu_message("Waa la joojiyey. Waxba lama beddelin.")
+            intro="Waa la joojiyey. Waxba lama beddelin."
         )
         return {"status": "guided_action_cancelled"}
 
@@ -8725,9 +8716,9 @@ async def _whatsapp_webhook_process(request: Request):
                 send_whatsapp(sender_phone, "❌ Joojinta way fashilantay. Fadlan mar kale isku day.")
                 return {"status": "pending_clarification_cancel_error"}
             activate_guided_menu(sender_phone)
-            send_whatsapp(
+            send_deynjir_main_menu(
                 sender_phone,
-                deynjir_recovery_menu_message("Waa la joojiyey. Wax deyn ah lama diiwaangelin.")
+                intro="Waa la joojiyey. Wax deyn ah lama diiwaangelin."
             )
             return {"status": "pending_clarification_cancelled"}
         elif clarification_action in {"ADD", "PAY"}:
@@ -11510,16 +11501,7 @@ async def whatsapp_webhook(request: Request):
             print(f"❌ Webhook rejected: invalid event ID length; type={event_type!r}")
             raise HTTPException(status_code=400, detail="Invalid Green-API message ID")
     if event_id and is_duplicate_webhook(event_id):
-        print(
-            "♻️ Duplicate Green-API webhook ignored: "
-            f"type={event_type!r}, event_id={event_id!r}"
-        )
         return {"status": "duplicate_webhook_ignored"}
-    if event_id:
-        print(
-            "🧾 Green-API webhook accepted: "
-            f"type={event_type!r}, event_id={event_id!r}"
-        )
     sender_data = payload.get("senderData") or {}
     sender_chat_id = str(sender_data.get("chatId") or "")
     session_sender = sender_chat_id.split("@")[0] if sender_chat_id else ""
