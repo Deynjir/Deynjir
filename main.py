@@ -3812,6 +3812,86 @@ def parse_multiline_menu_transaction(message_text):
     }]
 
 
+def parse_inline_somali_transaction(message_text):
+    """Deterministically split a single inline ADD/PAY note into name/date/amount/detail.
+
+    Handles notes such as: "Maxamed Qaylo 16/11/2026 $15 oo uu ku qaatay macawis".
+    The customer name is taken only from the text before the date/amount, so
+    dates, money, verbs and item descriptions cannot leak into customer_name.
+    """
+    raw = " ".join(str(message_text or "").strip().split())
+    if not raw:
+        return None
+    action = classify_transaction_direction(raw)
+    if action not in {"ADD", "PAY"}:
+        return None
+
+    date_matches = list(re.finditer(
+        r"(?<!\w)(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{1,2}-\d{1,2})(?!\w)", raw
+    ))
+    if len(date_matches) > 1:
+        return None
+    parsed_date = _parse_somali_date(date_matches[0].group(1)) if date_matches else None
+    if date_matches and not parsed_date:
+        return None
+
+    prefixed_currency_matches = list(re.finditer(
+        r"\$\s*(\d+(?:[.,]\d{1,2})?)", raw, flags=re.I
+    ))
+    amount_matches = prefixed_currency_matches or list(re.finditer(
+        r"(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)\s*\$", raw, flags=re.I
+    ))
+    if len(amount_matches) != 1:
+        return None
+    amount_match = amount_matches[0]
+    amount_text = next((g for g in amount_match.groups() if g is not None), None)
+    try:
+        amount = float(amount_text.replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+
+    # The name must precede the first structural marker (date or amount).
+    cut_positions = [amount_match.start()]
+    if date_matches:
+        cut_positions.append(date_matches[0].start())
+    name_end = min(cut_positions)
+    name = raw[:name_end].strip(" ,:;-.")
+    name = re.sub(r"^(?:add|pay|deyn cusub|dayn cusub|lacag bixin)\s+", "", name, flags=re.I).strip()
+    name = clean_extracted_customer_name(name)
+    if not name or re.search(r"\d", name):
+        return None
+
+    # Description is the meaningful item phrase after the transaction verb.
+    # Prefer the words after qaatay/bixiyay/keenay; otherwise clean the amount tail.
+    tail = raw[amount_match.end():].strip(" ,:;-.")
+    detail_match = re.search(
+        r"\b(?:qaatay|qaadatay|qaatey|qaateen|bixiyay|bixiyey|bixisay|"
+        r"bixiyeen|keenay|keentay|soo\s+celiyay|soo\s+celiyey)\b\s*(.*)$",
+        raw, flags=re.I,
+    )
+    description = detail_match.group(1).strip(" ,:;-.") if detail_match else tail
+    description = re.sub(r"^(?:(?:oo|iyo|ah)\s+|(?:uu|wuu|wuxuu|ayuu|ayaa|ayay|waxay|way)\s+|ku\s+)+", "", description, flags=re.I).strip(" ,:;-.")
+    description = re.sub(r"^(?:lacagta|lacag)\s+", "", description, flags=re.I).strip()
+    # A pure transaction-verb tail is not a description.
+    if normalize_customer_name(description) in {"", "oo", "uu", "ku", "qaatay", "bixiyay"}:
+        description = None
+
+    result = {
+        "action": action,
+        "customer_name": name,
+        "amount": amount,
+        "promised_date": parsed_date.isoformat() if parsed_date and action == "ADD" else None,
+        "transaction_date": parsed_date.isoformat() if parsed_date and action == "PAY" else None,
+        "description": description or None,
+        "payment_type": "PARTIAL" if action == "PAY" else None,
+        "_source_amount_verified": True,
+        "_inline_transaction_parsed": True,
+    }
+    return [result]
+
+
 def local_fallback_parse(message_text):
     """Conservatively parse common commands when Gemini is unavailable.
 
@@ -9632,6 +9712,9 @@ async def _whatsapp_webhook_process(request: Request):
             "filter_type": None,
         }]
         print(f"⚡ Debt-list command recognized locally before transaction parsing: {message_text!r}; skipping Gemini")
+    elif (inline_somali_entries := parse_inline_somali_transaction(message_text)):
+        entries = inline_somali_entries
+        print(f"⚡ Inline Somali transaction split locally: {entries!r}")
     elif (direct_somali_entries := local_fallback_parse(message_text)) and any(
         isinstance(item, dict)
         and str(item.get("action") or "").upper() in {"ADD", "PAY"}
@@ -10228,10 +10311,9 @@ async def _whatsapp_webhook_process(request: Request):
                 }
                 send_whatsapp(
                     sender_phone,
-                    f"Magaca si buuxda uma fahmin. Waxaan u qaatay *{grounded_name}*. "
+                    f"Magaca ma fahmin. Waxaan u qaatay *{grounded_name}*. "
                     "Fadlan qor magaca saxda ah haddii uu khaldan yahay. "
-                    "Haddii uu sax yahay, dib ugu soo dir magaca iyo lacagta. "
-                    "Waxba lama diiwaangelin weli."
+                    "Haddii uu sax yahay, dib u soo dir magaca iyo lacagta. "
                 )
                 return {"status": "customer_name_correction_requested"}
 
@@ -10475,7 +10557,7 @@ async def _whatsapp_webhook_process(request: Request):
                                 "*Xaqiiji deynta cusub*\n\n"
                                 f"Macmiil: *{existing.get('name') or name}*\n"
                                 f"Lacagta lagu darayo: *${add_amount:.2f}*" + due_line + "\n\n"
-                                "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u saxdo.\nWaxba lama kaydin ilaa aad xaqiijiso."
+                                "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u joojiso."
                             )
                             break
 
