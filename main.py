@@ -326,14 +326,16 @@ def send_deynjir_other_services_menu(to_phone, page=1):
             "7️⃣ IMPORT — Deymo hore\n8️⃣ Caawimaad\n9️⃣ Dib u noqo"
         ),
     }
-    body, buttons, fallback_lines = pages.get(page, pages[1])
-    # Include numbered choices in the interactive message itself as well as
-    # the API-failure fallback. This covers clients that accept the API request
-    # but fail to display its reply buttons.
-    visible_body = body + "\n\n" + fallback_lines + "\n\nSoo dir lambarka adeegga."
+    body, buttons, _fallback_lines = pages.get(page, pages[1])
+    # Keep service choices exclusively in the selectable WhatsApp buttons.
+    fallback_text = (
+        body
+        + "\n\nBadhamada adeegga lama soo bandhigi karin. "
+        "Fadlan mar kale fur MENU."
+    )
     return send_deynjir_choice_buttons(
-        to_phone, visible_body, buttons,
-        visible_body
+        to_phone, body, buttons,
+        fallback_text
     )
 
 
@@ -7901,7 +7903,7 @@ async def _whatsapp_webhook_process(request: Request):
         if choice == "3":
             guided["stage"] = "menu_other"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL
-            send_whatsapp(sender_phone, deynjir_other_services_menu())
+            send_deynjir_other_services_menu(sender_phone, page=1)
             return {"status": "other_services_menu_sent"}
         elif choice == "4":
             guided["stage"] = "search_name"
@@ -7948,7 +7950,7 @@ async def _whatsapp_webhook_process(request: Request):
             GUIDED_SESSIONS.pop(sender_phone, None)
             message_text = "LIISKA LACAG BIXINTA"
         else:
-            send_whatsapp(sender_phone, "Fadlan dooro 1, 2 ama 3.\n\n" + deynjir_other_services_menu())
+            send_deynjir_other_services_menu(sender_phone, page=1)
             return {"status": "other_services_invalid_choice"}
 
     if guided and guided.get("stage") in {"debt_name", "payment_name"}:
