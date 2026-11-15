@@ -346,7 +346,8 @@ def send_deynjir_choice_buttons(to_phone, body, buttons, fallback_text):
             "chatId": f"{clean_phone}@c.us",
             "header": "Deynjir",
             "body": body,
-            "footer": "",
+            # Green-API rejects an empty footer with HTTP 400.
+            "footer": "Dooro hal ikhtiyaar.",
             "buttons": [
                 {"buttonId": str(button_id), "buttonText": str(button_text)}
                 for button_id, button_text in buttons
@@ -3808,12 +3809,33 @@ def local_fallback_parse(message_text):
         segments = [part.strip() for part in re.split(r"[,;\n]+", raw) if part.strip()]
         ambiguous_entries = []
         for segment in segments:
-            match = re.search(r"(?:\$\s*(\d+(?:[.,]\d{1,2})?)|(\d+(?:[.,]\d{1,2})?)\s*\$|(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-]))", segment)
+            # Extract an explicit promised date BEFORE identifying the amount
+            # and customer name. Numeric dates must never leak into the name.
+            date_matches = list(re.finditer(
+                r"(?<!\w)(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{1,2}-\d{1,2})(?!\w)",
+                segment,
+            ))
+            promised_date = None
+            segment_without_date = segment
+            if len(date_matches) == 1:
+                date_match = date_matches[0]
+                parsed_due = _parse_somali_date(date_match.group(1))
+                if parsed_due:
+                    promised_date = parsed_due.isoformat()
+                    segment_without_date = (
+                        segment[:date_match.start()] + " " + segment[date_match.end():]
+                    )
+                    segment_without_date = re.sub(
+                        r"\b(?:ballanta|balanta|ballan|balan|muddo(?:da)?|taariikh(?:da)?)\b",
+                        " ", segment_without_date, flags=re.I
+                    )
+                    segment_without_date = " ".join(segment_without_date.split())
+            match = re.search(r"(?:\$\s*(\d+(?:[.,]\d{1,2})?)|(\d+(?:[.,]\d{1,2})?)\s*\$|(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)(?![\w/.-]))", segment_without_date)
             if not match:
                 ambiguous_entries = []
                 break
             amount_text = next((value for value in match.groups() if value is not None), None)
-            name_text = (segment[:match.start()] + " " + segment[match.end():]).strip(" -:,$")
+            name_text = (segment_without_date[:match.start()] + " " + segment_without_date[match.end():]).strip(" -:,$")
             name_text = re.sub(r"\b(?:usd|dollars?|dollar|dolar|dola(?:r|ro))\b", " ", name_text, flags=re.I)
             # WhatsApp users sometimes type amounts as "10&" or "10& dolar".
             # The ampersand is a typing artifact, never part of the customer name.
@@ -3822,7 +3844,7 @@ def local_fallback_parse(message_text):
             if not name_text:
                 ambiguous_entries = []
                 break
-            tail_description = segment[match.end():].strip(" .,:;-")
+            tail_description = segment_without_date[match.end():].strip(" .,:;-")
             tail_description = re.sub(
                 r"\b(?:ayuu|wuxuu|wuu|ayaa|iga|qaatay|qaatey|qaato|bixiyay|bixiyey|bixisay|celiyay|celiyey|paid|repaid|amaah|deyn|dayn|cusub|usd|dollars?|dollar|dolar|dola(?:r|ro))\b",
                 " ", tail_description, flags=re.I
@@ -3833,6 +3855,7 @@ def local_fallback_parse(message_text):
                 name_text = " ".join(name_text.split()).strip()
             ambiguous_entries.append({**base, "action": "ADD", "customer_name": name_text,
                                       "amount": float(amount_text.replace(",", ".")),
+                                      "promised_date": promised_date,
                                       "description": tail_description or None})
         if ambiguous_entries:
             return ambiguous_entries
