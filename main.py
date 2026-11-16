@@ -8634,10 +8634,9 @@ async def _whatsapp_webhook_process(request: Request):
                 _save_persisted_workflow_sessions(sender_phone)
                 send_whatsapp(
                     sender_phone,
-                    "Hagaag. Fadlan qor magaca saxda ah ee macmiilka. "
-                    "Lacagta iyo nooca macaamilka waan hayaa; uma baahnid inaad dib u qorto.\n\n"
-                    "Haddii uu yahay macmiil cusub, qor *CUSUB*. "
-                    "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+                    "Hagaag. soo qor magaca saxda ah ee macmiilka.\n\n"
+                    "Haddii uu yahay macmiil cusub, soo qor *CUSUB*.\n"
+                    "Qor *JOOJI* si aad uga baxdo."
                 )
                 return {"status": "transaction_confirmation_name_correction_requested"}
             elif confirmation_answer in {"jooji", "cancel", "baaji", "stop"}:
