@@ -293,39 +293,25 @@ def deynjir_main_menu():
 
 
 def deynjir_other_services_menu():
-    """Text fallback for services page 1; numbering matches the active router."""
+    """One complete text menu for all secondary services."""
     return (
-        "📋 *ADEEGYADA KALE (1/3)*\n\n"
+        "📋 *ADEEGYADA KALE*\n\n"
         "Dooro adeegga aad rabto:\n\n"
         "1️⃣ Liiska daynta\n"
         "2️⃣ Raadi macmiil\n"
-        "3️⃣ Adeegyada xiga\n\n"
-        "Soo dir 1, 2 ama 3."
+        "3️⃣ Ballamaha maanta\n"
+        "4️⃣ Liiska lacag-bixinta\n"
+        "5️⃣ IMPORT — Deymo hore\n"
+        "6️⃣ Caawimaad\n"
+        "7️⃣ Dib u noqo\n\n"
+        "Soo dir lambar 1 ilaa 7."
     )
 
 
 def send_deynjir_other_services_menu(to_phone, page=1):
-    """Send numbered text-only service pages; only the main menu has buttons."""
-    pages = {
-        1: (
-            "📋 *ADEEGYADA KALE (1/3)*\n\nDooro adeegga aad rabto:",
-            "1️⃣ Liiska daynta\n2️⃣ Raadi macmiil\n3️⃣ Adeegyada xiga",
-            "Soo dir 1, 2 ama 3.",
-        ),
-        2: (
-            "📋 *ADEEGYADA KALE (2/3)*\n\nDooro adeegga aad rabto:",
-            "4️⃣ Ballamaha maanta\n5️⃣ Liiska lacag-bixinta\n6️⃣ Bogga xiga",
-            "Soo dir 4, 5 ama 6.",
-        ),
-        3: (
-            "📋 *ADEEGYADA KALE (3/3)*\n\nDooro adeegga aad rabto:",
-            "7️⃣ IMPORT — Deymo hore\n8️⃣ Caawimaad\n9️⃣ Dib u noqo",
-            "Soo dir 7, 8 ama 9.",
-        ),
-    }
-    heading, options, instruction = pages.get(page, pages[1])
-    message = f"{heading}\n\n{options}\n\n{instruction}"
-    print(f"🧭 Sending text-only other-services page={page}")
+    """Send all secondary services in one text message; no pagination."""
+    message = deynjir_other_services_menu()
+    print("🧭 Sending complete text-only other-services menu")
     return send_whatsapp(to_phone, message)
 
 
@@ -5542,13 +5528,14 @@ async def _whatsapp_webhook_process(request: Request):
         "undo_no": "2", "maya, iska daa": "2", "maya iska daa": "2",
         "other_debt_list": "1", "liiska daynta": "1",
         "other_search": "2", "raadi macmiil": "2",
-        "other_next_1": "OPEN_OTHER_SERVICES_PAGE_2", "adeegyada xiga": "OPEN_OTHER_SERVICES_PAGE_2",
-        "other_appointments": "4", "ballamaha maanta": "4",
-        "other_payments": "5", "liiska lacag-bixinta": "5",
-        "other_next_2": "6", "bogga xiga": "6",
-        "other_import": "7", "import — deymo hore": "7", "soo geli daymo hore": "7",
-        "other_help": "8", "caawimaad": "8",
-        "other_back": "9", "dib u noqo": "9",
+        "other_appointments": "3", "ballamaha maanta": "3",
+        "other_payments": "4", "liiska lacag-bixinta": "4",
+        "other_import": "5", "import — deymo hore": "5", "soo geli daymo hore": "5",
+        "other_help": "6", "caawimaad": "6",
+        "other_back": "7", "dib u noqo": "7",
+        # Legacy pagination labels are normalized to the corresponding service.
+        "other_next_1": "3", "adeegyada xiga": "3",
+        "other_next_2": "4", "bogga xiga": "4",
         "customer_match_yes": "HAA", "haa": "HAA",
         "customer_match_no": "MAYA", "maya": "MAYA",
         "customer_match_new": "CUSUB", "qof cusub": "CUSUB",
@@ -5658,11 +5645,11 @@ async def _whatsapp_webhook_process(request: Request):
         if re.fullmatch(r"\s*(?:CANCEL|JOOJI|BAAJI)\s*", import_text, re.I) and sender_phone in IMPORT_SESSIONS:
             IMPORT_SESSIONS.pop(sender_phone, None)
             GUIDED_SESSIONS[sender_phone] = {
-                "stage": "menu_other_page3",
+                "stage": "menu_other",
                 "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
             }
             send_whatsapp(sender_phone, "✅ Import-ka waa la joojiyey. Waxba lama kaydin.")
-            send_deynjir_other_services_menu(sender_phone, page=3)
+            send_deynjir_other_services_menu(sender_phone)
             return {"status": "import_cancelled"}
         session_for_choice = IMPORT_SESSIONS.get(sender_phone)
         if session_for_choice and session_for_choice.get("stage") == "duplicate_choice":
@@ -5811,9 +5798,9 @@ async def _whatsapp_webhook_process(request: Request):
             if mode_choice in {"cancel", "jooji", "baaji"}:
                 IMPORT_SESSIONS.pop(sender_phone, None)
                 activate_guided_menu(sender_phone)
-                GUIDED_SESSIONS[sender_phone]["stage"] = "menu_other_page3"
+                GUIDED_SESSIONS[sender_phone]["stage"] = "menu_other"
                 send_whatsapp(sender_phone, "✅ Import-ka waa la joojiyey. Waxba lama kaydin.")
-                send_deynjir_other_services_menu(sender_phone, page=3)
+                send_deynjir_other_services_menu(sender_phone)
                 return {"status": "import_mode_cancelled"}
             if active_import.get("mode") != "debt":
                 send_whatsapp(sender_phone, "Dooro *DEYN* si aad u soo geliso deymaha hore, ama *JOOJI* si aad uga baxdo.")
@@ -6425,7 +6412,7 @@ async def _whatsapp_webhook_process(request: Request):
                 expired_menu_choice = (
                     not pending_transaction_clarification_active
                     and guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
-                    and str(message_text or "").strip() in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
+                    and str(message_text or "").strip() in {"1", "2", "3", "4", "5", "6", "7"}
                 )
                 GUIDED_SESSIONS.pop(sender_phone, None)
                 guided_waiting = {}
@@ -6517,10 +6504,7 @@ async def _whatsapp_webhook_process(request: Request):
             and not reminder_numeric_reply_priority
             and not customer_match_numeric_reply_priority
             and guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
-            and (
-                numeric_reply in {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
-                or numeric_reply == "OPEN_OTHER_SERVICES_PAGE_2"
-            )
+            and numeric_reply in {"1", "2", "3", "4", "5", "6", "7"}
         )
         guided_amount_reply = (
             not pending_transaction_clarification_active
@@ -6651,6 +6635,9 @@ async def _whatsapp_webhook_process(request: Request):
         if guided_menu_choice and not pending_payment_confirmation_active:
             choice = numeric_reply
             menu_stage = guided_waiting.get("stage")
+            if menu_stage in {"menu_other_page2", "menu_other_page3"}:
+                menu_stage = "menu_other"
+                guided_waiting["stage"] = "menu_other"
 
             # MAIN MENU: 1 = new debt, 2 = received payment, 3 = other services.
             if menu_stage == "menu":
@@ -6689,8 +6676,7 @@ async def _whatsapp_webhook_process(request: Request):
                     send_deynjir_other_services_menu(sender_phone, page=1)
                     return {"status": "other_services_menu_sent"}
 
-            # OTHER SERVICES MENU: page-specific choices; button IDs and typed numbers
-            # are normalized to the same values above.
+            # OTHER SERVICES MENU: all secondary services appear together.
             elif menu_stage == "menu_other":
                 if choice == "1":
                     GUIDED_SESSIONS.pop(sender_phone, None)
@@ -6702,39 +6688,13 @@ async def _whatsapp_webhook_process(request: Request):
                     }
                     send_whatsapp(sender_phone, "Qor magaca macmiilka aad raadinayso.\n\nQor *JOOJI* si aad uga baxdo.")
                     return {"status": "guided_search_name_requested"}
-                elif choice in {"3", "OPEN_OTHER_SERVICES_PAGE_2"}:
-                    GUIDED_SESSIONS[sender_phone] = {
-                        "stage": "menu_other_page2",
-                        "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
-                    }
-                    _save_persisted_workflow_sessions(sender_phone)
-                    send_deynjir_other_services_menu(sender_phone, page=2)
-                    return {"status": "other_services_page_two_sent"}
-                else:
-                    send_deynjir_other_services_menu(sender_phone, page=1)
-                    return {"status": "other_services_invalid_choice"}
-
-            elif menu_stage == "menu_other_page2":
-                if choice == "4":
+                elif choice == "3":
                     GUIDED_SESSIONS.pop(sender_phone, None)
                     message_text = "Balamaha Maanta"
-                elif choice == "5":
+                elif choice == "4":
                     GUIDED_SESSIONS.pop(sender_phone, None)
                     message_text = "LIISKA LACAG BIXINTA"
-                elif choice == "6":
-                    GUIDED_SESSIONS[sender_phone] = {
-                        "stage": "menu_other_page3",
-                        "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
-                    }
-                    _save_persisted_workflow_sessions(sender_phone)
-                    send_deynjir_other_services_menu(sender_phone, page=3)
-                    return {"status": "other_services_page_three_sent"}
-                else:
-                    send_deynjir_other_services_menu(sender_phone, page=2)
-                    return {"status": "other_services_invalid_choice"}
-
-            elif menu_stage == "menu_other_page3":
-                if choice == "7":
+                elif choice == "5":
                     GUIDED_SESSIONS.pop(sender_phone, None)
                     shop_name = str((business_user or {}).get("name") or sender_phone)
                     IMPORT_SESSIONS[sender_phone] = {
@@ -6753,11 +6713,11 @@ async def _whatsapp_webhook_process(request: Request):
                         mode_prompt + "\n\nDooro *DEYN* si aad u sii waddo ama *JOOJI* si aad uga baxdo."
                     )
                     return {"status": "menu_import_started"}
-                elif choice == "8":
+                elif choice == "6":
                     GUIDED_SESSIONS.pop(sender_phone, None)
                     send_whatsapp(sender_phone, deynjir_help_message())
                     return {"status": "help_sent"}
-                elif choice == "9":
+                elif choice == "7":
                     GUIDED_SESSIONS[sender_phone] = {
                         "stage": "menu",
                         "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
@@ -6766,7 +6726,7 @@ async def _whatsapp_webhook_process(request: Request):
                     send_deynjir_main_menu(sender_phone)
                     return {"status": "main_menu_returned_from_other_services"}
                 else:
-                    send_deynjir_other_services_menu(sender_phone, page=3)
+                    send_deynjir_other_services_menu(sender_phone)
                     return {"status": "other_services_invalid_choice"}
 
         # A disagreement shortly after a committed transaction opens a confirmation;
@@ -8040,7 +8000,10 @@ async def _whatsapp_webhook_process(request: Request):
             guided = None
             message_text = guided_text
 
-    if guided and guided.get("stage") == "menu_other":
+    if guided and guided.get("stage") in {"menu_other", "menu_other_page2", "menu_other_page3"}:
+        # Older persisted pagination stages are accepted, but all choices now
+        # use the single combined menu numbering.
+        guided["stage"] = "menu_other"
         choice = guided_text.strip()
         if choice == "1":
             GUIDED_SESSIONS.pop(sender_phone, None)
@@ -8048,23 +8011,31 @@ async def _whatsapp_webhook_process(request: Request):
         elif choice == "2":
             guided["stage"] = "search_name"
             guided["expires_at"] = datetime.now(timezone.utc) + GUIDED_SESSION_TTL
-            send_whatsapp(sender_phone, "Qor magaca qofka aad raadinayso.")
+            send_whatsapp(sender_phone, "Qor magaca qofka aad raadinayso.\n\nQor *JOOJI* si aad uga baxdo.")
             return {"status": "guided_search_name_requested"}
         elif choice == "3":
             GUIDED_SESSIONS.pop(sender_phone, None)
             message_text = "Balamaha Maanta"
         elif choice == "4":
             GUIDED_SESSIONS.pop(sender_phone, None)
-            send_whatsapp(sender_phone, deynjir_help_message())
-            return {"status": "help_sent"}
+            message_text = "LIISKA LACAG BIXINTA"
         elif choice == "5":
             GUIDED_SESSIONS.pop(sender_phone, None)
             message_text = "IMPORT"
         elif choice == "6":
             GUIDED_SESSIONS.pop(sender_phone, None)
-            message_text = "LIISKA LACAG BIXINTA"
+            send_whatsapp(sender_phone, deynjir_help_message())
+            return {"status": "help_sent"}
+        elif choice == "7":
+            GUIDED_SESSIONS[sender_phone] = {
+                "stage": "menu",
+                "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
+            }
+            _save_persisted_workflow_sessions(sender_phone)
+            send_deynjir_main_menu(sender_phone)
+            return {"status": "main_menu_returned_from_other_services"}
         else:
-            send_deynjir_other_services_menu(sender_phone, page=1)
+            send_deynjir_other_services_menu(sender_phone)
             return {"status": "other_services_invalid_choice"}
 
     if guided and guided.get("stage") in {"debt_name", "payment_name"}:
@@ -8627,14 +8598,32 @@ async def _whatsapp_webhook_process(request: Request):
                     f"name={confirmed_entry.get('customer_name')!r}, amount={confirmed_entry.get('amount')!r}"
                 )
             elif confirmation_answer in {"maya", "may", "no", "n", "2"}:
+                # MAYA means "correct the details", not "discard the whole
+                # transaction". Preserve the amount/action/date and ask only
+                # for the corrected customer name. No financial write occurs.
                 TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                pending_entry = dict(transaction_confirmation_state.get("entry") or {})
+                CUSTOMER_MATCH_SESSIONS[sender_phone] = {
+                    "business_user_id": str(business_user_id),
+                    "entry": pending_entry,
+                    "original_message": str(transaction_confirmation_state.get("original_message") or message_text or ""),
+                    "candidate_names": [],
+                    "stage": "enter_full_name",
+                    "remaining_entries": [
+                        dict(item) for item in (transaction_confirmation_state.get("remaining_entries") or [])
+                    ],
+                    "allow_new": True,
+                    "expires_at": datetime.now(timezone.utc) + GUIDED_SESSION_TTL,
+                }
                 _save_persisted_workflow_sessions(sender_phone)
                 send_whatsapp(
                     sender_phone,
-                    "Waxba lama diiwaangelin. Fadlan dib u qor magaca iyo lacagta saxda ah, "
-                    "tusaale: *Cali $25*. Qor *JOOJI* haddii aad rabto inaad ka baxdo."
+                    "Hagaag. Fadlan qor magaca saxda ah ee macmiilka. "
+                    "Lacagta iyo nooca macaamilka waan hayaa; uma baahnid inaad dib u qorto.\\n\\n"
+                    "Haddii uu yahay macmiil cusub, qor *CUSUB*. "
+                    "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
                 )
-                return {"status": "transaction_confirmation_declined_rewrite_requested"}
+                return {"status": "transaction_confirmation_name_correction_requested"}
             elif confirmation_answer in {"jooji", "cancel", "baaji", "stop"}:
                 TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
                 _save_persisted_workflow_sessions(sender_phone)
@@ -8996,20 +8985,6 @@ async def _whatsapp_webhook_process(request: Request):
                     clarification_prompt + "\n\nSoo qor *DEYN CUSUB*, *LACAG BIXIN* ama *JOOJI*."
                 )
                 return {"status": "awaiting_transaction_clarification"}
-
-    # The page-1 "Adeegyada xiga" button opens page 2; it must not be
-    # collapsed to numeric choice 3 (the legacy debt-list shortcut).
-    if str(message_text or "").strip() == "OPEN_OTHER_SERVICES_PAGE_2":
-        # Page 2 must own the next button (OTHER_NEXT_2 -> choice 6).
-        # Persist the stage so a restart cannot send that reply to the main menu.
-        GUIDED_SESSIONS[sender_phone] = {
-            "stage": "menu_other_page2",
-            "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
-        }
-        _save_persisted_workflow_sessions(sender_phone)
-        send_deynjir_other_services_menu(sender_phone, page=2)
-        print("🧭 Other-services page 1 next button routed to page 2")
-        return {"status": "other_services_page_2_opened"}
 
     # A standalone 1-6 outside any active workflow is treated as a menu choice.
     # This protects users whose menu state was lost (for example after a Render
@@ -10372,7 +10347,7 @@ async def _whatsapp_webhook_process(request: Request):
                 # the user rather than changing the wrong balance.
                 if amount is not None:
                     force_new_customer = bool(entry.get("_force_new_customer"))
-                    matches = [] if force_new_customer else find_debtor_matches(business_user_id, name, allow_fuzzy=True)
+                    matches = [] if force_new_customer else find_debtor_matches(business_user_id, name, allow_fuzzy=False)
                     if entry.get("_corrected_name_recheck") and not has_exact_customer_name_match(name, matches):
                         matches = []
                         force_new_customer = True
@@ -10554,7 +10529,7 @@ async def _whatsapp_webhook_process(request: Request):
                         sender_phone,
                         "*Xaqiiji deynta cusub*\n\n"
                         f"Macmiil: *{name}*\nLacagta: *${float(amount):.2f}*" + due_line + "\n\n"
-                        "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u saxdo.\nWaxba lama kaydin ilaa aad xaqiijiso."
+                        "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u joojiso."
                     )
                     break
 
@@ -10595,7 +10570,7 @@ async def _whatsapp_webhook_process(request: Request):
                 payment_amount = entry.get("amount")
                 payment_type = str(entry.get("payment_type") or "UNKNOWN").upper()
                 force_new_customer = bool(entry.get("_force_new_customer"))
-                matches = [] if force_new_customer else find_debtor_matches(business_user_id, name, allow_fuzzy=True)
+                matches = [] if force_new_customer else find_debtor_matches(business_user_id, name, allow_fuzzy=False)
                 if entry.get("_corrected_name_recheck") and not has_exact_customer_name_match(name, matches):
                     matches = []
                     force_new_customer = True
