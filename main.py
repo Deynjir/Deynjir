@@ -5955,6 +5955,11 @@ async def _whatsapp_webhook_process(request: Request):
         # choice 3. Route it directly to the interactive services pages so it
         # can never fall through to the legacy standalone "3 = debt list" path.
         if str(message_text or "").strip() == "OPEN_OTHER_SERVICES":
+            # A new explicit menu replaces an uncommitted ADD proposal.
+            # Never allow its stale HAA/MAYA prompt to capture menu numbers.
+            TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+            CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+            PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
             # Opening page 1 must establish the page-specific session. Without
             # this, the next-page buttons are interpreted by the legacy menu.
             GUIDED_SESSIONS[sender_phone] = {
@@ -6492,6 +6497,16 @@ async def _whatsapp_webhook_process(request: Request):
                 f"for sender={sender_phone}"
             )
 
+        # A displayed menu owns its numeric selection, even when an old
+        # uncommitted ADD confirmation was left in persisted workflow state.
+        # The proposal is discarded, never committed, before menu routing.
+        if (guided_waiting.get("stage") in {"menu", "menu_other", "menu_other_page2", "menu_other_page3"}
+                and numeric_reply in {"1", "2", "3", "4", "5", "6", "7"}
+                and not pending_payment_confirmation_active
+                and not pending_transaction_clarification_active):
+            if sender_phone in TRANSACTION_CONFIRMATION_SESSIONS:
+                TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
+                _save_persisted_workflow_sessions(sender_phone)
         # If a duplicate-name selector is waiting, its numbered choices own
         # the next numeric reply. An older menu must not steal "1" or "2".
         customer_match_numeric_reply_priority = bool(
@@ -7931,6 +7946,7 @@ async def _whatsapp_webhook_process(request: Request):
         GUIDED_SESSIONS.pop(sender_phone, None)
         PAUSED_GUIDED_SESSIONS.pop(sender_phone, None)
         CUSTOMER_MATCH_SESSIONS.pop(sender_phone, None)
+        TRANSACTION_CONFIRMATION_SESSIONS.pop(sender_phone, None)
         GUIDED_SESSIONS[sender_phone] = {
             "stage": "menu",
             "expires_at": datetime.now(timezone.utc) + GUIDED_MENU_SESSION_TTL,
@@ -8619,7 +8635,7 @@ async def _whatsapp_webhook_process(request: Request):
                 send_whatsapp(
                     sender_phone,
                     "Hagaag. Fadlan qor magaca saxda ah ee macmiilka. "
-                    "Lacagta iyo nooca macaamilka waan hayaa; uma baahnid inaad dib u qorto.\\n\\n"
+                    "Lacagta iyo nooca macaamilka waan hayaa; uma baahnid inaad dib u qorto.\n\n"
                     "Haddii uu yahay macmiil cusub, qor *CUSUB*. "
                     "Qor *JOOJI* haddii aad rabto inaad ka baxdo."
                 )
