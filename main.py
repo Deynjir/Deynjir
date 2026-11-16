@@ -305,45 +305,28 @@ def deynjir_other_services_menu():
 
 
 def send_deynjir_other_services_menu(to_phone, page=1):
-    """Send the requested three-page services menu using up to three reply buttons."""
+    """Send numbered text-only service pages; only the main menu has buttons."""
     pages = {
         1: (
-            "📋 ADEEGYADA KALE (1/3)\n\nDooro adeegga:",
-            [("OTHER_DEBT_LIST", "Liiska daynta"),
-             ("OTHER_SEARCH", "Raadi macmiil"),
-             ("OTHER_NEXT_1", "Adeegyada xiga")],
-            "1️⃣ Liiska daynta\n2️⃣ Raadi macmiil\n3️⃣ Adeegyada xiga"
+            "📋 *ADEEGYADA KALE (1/3)*\n\nDooro adeegga aad rabto:",
+            "1️⃣ Liiska daynta\n2️⃣ Raadi macmiil\n3️⃣ Adeegyada xiga",
+            "Soo dir 1, 2 ama 3.",
         ),
         2: (
-            "📋 ADEEGYADA KALE (2/3)\n\nDooro adeegga:",
-            [("OTHER_APPOINTMENTS", "Ballamaha maanta"),
-             ("OTHER_PAYMENTS", "Liiska lacag-bixinta"),
-             ("OTHER_NEXT_2", "Bogga xiga")],
-            "4️⃣ Ballamaha maanta\n5️⃣ Liiska lacag-bixinta\n6️⃣ Bogga xiga"
+            "📋 *ADEEGYADA KALE (2/3)*\n\nDooro adeegga aad rabto:",
+            "4️⃣ Ballamaha maanta\n5️⃣ Liiska lacag-bixinta\n6️⃣ Bogga xiga",
+            "Soo dir 4, 5 ama 6.",
         ),
         3: (
-            "📋 ADEEGYADA KALE (3/3)\n\nDooro adeegga:",
-            [("OTHER_IMPORT", "IMPORT — Deymo hore"),
-             ("OTHER_HELP", "Caawimaad"),
-             ("OTHER_BACK", "Dib u noqo")],
-            "7️⃣ IMPORT — Deymo hore\n8️⃣ Caawimaad\n9️⃣ Dib u noqo"
+            "📋 *ADEEGYADA KALE (3/3)*\n\nDooro adeegga aad rabto:",
+            "7️⃣ IMPORT — Deymo hore\n8️⃣ Caawimaad\n9️⃣ Dib u noqo",
+            "Soo dir 7, 8 ama 9.",
         ),
     }
-    body, buttons, _fallback_lines = pages.get(page, pages[1])
-    print(
-        f"🧭 Sending other-services page={page} "
-        f"button_ids={[button_id for button_id, _ in buttons]!r}"
-    )
-    # Keep service choices exclusively in the selectable WhatsApp buttons.
-    fallback_text = (
-        body
-        + "\n\nBadhamada adeegga lama soo bandhigi karin. "
-        "Fadlan mar kale fur MENU."
-    )
-    return send_deynjir_choice_buttons(
-        to_phone, body, buttons,
-        fallback_text
-    )
+    heading, options, instruction = pages.get(page, pages[1])
+    message = f"{heading}\n\n{options}\n\n{instruction}"
+    print(f"🧭 Sending text-only other-services page={page}")
+    return send_whatsapp(to_phone, message)
 
 
 def send_deynjir_choice_buttons(to_phone, body, buttons, fallback_text):
@@ -4212,50 +4195,13 @@ def _name_similarity(requested, stored):
 
 
 def resolve_name_from_original_message(business_user_id, message_text, ai_name):
-    """Recover a complete stored debtor name when the original message contains it.
+    """Recover a stored name only when the parsed/source name matches it exactly.
 
-    This corrects cases where the AI extracts only the first name from a full
-    name such as 'Edit Hinda bire oct 10'. It only resolves names that actually
-    appear as a complete phrase in the original message, and prefers the
-    longest phrase to avoid matching a shorter name inside a longer one.
+    Never choose a nearest customer by fuzzy similarity here. A typo or an
+    uncertain extraction must go through the normal clarification flow.
     """
     if not ai_name or not message_text:
         return None
-
-    normalized_message = f" {normalize_customer_name(message_text)} "
-    ai_norm = normalize_customer_name(ai_name)
-    if not ai_norm:
-        return None
-
-    # A deterministic local transaction parse is more authoritative than a
-    # shorter name recovered from the customer table. For example, if the user
-    # typed "dhudi cali 16/11/2026 12" and the AI later returns only "cali",
-    # do not let an existing customer named "cali" overwrite the supplied
-    # two-part name. Return the exact locally parsed name instead.
-    try:
-        local_entries = local_fallback_parse(message_text)
-    except Exception as local_parse_error:
-        local_entries = []
-        print(
-            "⚠️ Local name guard could not parse original message: "
-            f"{type(local_parse_error).__name__}: {local_parse_error}"
-        )
-    for local_entry in local_entries or []:
-        if not isinstance(local_entry, dict):
-            continue
-        local_action = str(local_entry.get("action") or "").upper()
-        local_name = str(local_entry.get("customer_name") or "").strip()
-        local_norm = normalize_customer_name(local_name)
-        if (
-            local_action in {"ADD", "PAY"}
-            and local_norm
-            and (local_norm == ai_norm or local_norm.endswith(" " + ai_norm))
-        ):
-            print(
-                "🛡️ Preserving complete locally parsed customer name: "
-                f"AI={ai_name!r}, local={local_name!r}"
-            )
-            return local_name
 
     result = (
         supabase.table("customers")
@@ -4271,69 +4217,42 @@ def resolve_name_from_original_message(business_user_id, message_text, ai_name):
         if normalized:
             stored_names.setdefault(normalized, display)
 
-    # First resolve literal stored-name phrases. If both a short name and a
-    # longer name occur as substrings (e.g. LOW and IIDLE LOW), choose the
-    # longest exact phrase. If two different names of the same longest length
-    # are literally present, leave the choice ambiguous.
-    exact_candidates = [
-        (len(normalized.split()), len(normalized), display, normalized)
-        for normalized, display in stored_names.items()
-        if f" {normalized} " in normalized_message
-    ]
-    if exact_candidates:
-        longest_words = max(item[0] for item in exact_candidates)
-        longest = [item for item in exact_candidates if item[0] == longest_words]
-        longest_chars = max(item[1] for item in longest)
-        longest = [item for item in longest if item[1] == longest_chars]
-        unique_exact = {item[3]: item[2] for item in longest}
-        if len(unique_exact) == 1:
-            resolved = next(iter(unique_exact.values()))
-            print(f"🔎 Recovered longest exact debtor name from original message: {ai_name!r} -> {resolved!r}")
+    ai_norm = normalize_customer_name(ai_name)
+    if ai_norm in stored_names:
+        return stored_names[ai_norm]
+
+    # A deterministic local parser may recover the complete name from the
+    # original transaction. Accept it only as an exact stored-name match.
+    try:
+        local_entries = local_fallback_parse(message_text)
+    except Exception as local_parse_error:
+        local_entries = []
+        print(
+            "⚠️ Local name guard could not parse original message: "
+            f"{type(local_parse_error).__name__}: {local_parse_error}"
+        )
+
+    for local_entry in local_entries or []:
+        if not isinstance(local_entry, dict):
+            continue
+        local_action = str(local_entry.get("action") or "").upper()
+        if local_action not in {"ADD", "PAY", "EDIT", "DELETE", "HISTORY", "SEARCH"}:
+            continue
+        local_name = str(local_entry.get("customer_name") or "").strip()
+        local_norm = normalize_customer_name(local_name)
+        if local_norm in stored_names:
+            resolved = stored_names[local_norm]
+            print(
+                "🔎 Recovered exact stored customer name from local parse: "
+                f"{local_name!r} -> {resolved!r}"
+            )
             return resolved
-        return None
 
-    # Fuzzy recovery may compare only the model's extracted customer-name
-    # field with stored names. Never scan arbitrary windows of the full message:
-    # narrative words, amounts and dates can otherwise accidentally match an
-    # unrelated customer (the QARAN incident).
-    requested_parts = ai_norm.split()
-    narrative_words = {
-        "wuxuu", "wuxu", "wuxun", "waxuu", "waxay", "wuu", "lacag",
-        "deyn", "dayn", "qabe", "qabo", "bixinayo", "bixiyay", "bixisay",
-        "bamey", "ku", "leh", "in", "uu", "iyo", "ayaa", "ayuu",
-    }
-    if not requested_parts or len(requested_parts) > 3 or any(part in narrative_words for part in requested_parts):
-        print(f"⚠️ Skipping fuzzy name recovery because extracted name looks like sentence text: {ai_name!r}")
-        return None
-
-    candidates = []
-    for normalized, display in stored_names.items():
-        score = _name_similarity(ai_norm, normalized)
-        if score >= 0.82:
-            candidates.append((score, len(normalized.split()), len(normalized), display, normalized))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda c: (c[0], c[1], c[2]), reverse=True)
-    best_score = candidates[0][0]
-    # Only auto-resolve when one stored name clearly wins. If two names are
-    # similarly close, leave the AI's name unchanged so normal disambiguation runs.
-    best = [c for c in candidates if best_score - c[0] <= 0.04]
-    unique_names = {c[3] for c in best}
-    if len(unique_names) == 1:
-        resolved = next(iter(unique_names))
-        print(f"🔎 Recovered full debtor name from original message: {ai_name!r} -> {resolved!r} (score={best_score:.3f})")
-        return resolved
     return None
 
 
-def find_debtor_matches(business_user_id, name, include_archived=False):
-    """Find exact names first, then aligned partial names, then safe fuzzy matches.
-
-    A fuzzy match is not silently selected when another distinct customer name is
-    nearly as likely; in that case all candidates are returned for clarification.
-    """
+def find_debtor_matches(business_user_id, name, include_archived=False, allow_fuzzy=False):
+    """Find exact/partial stored names; fuzzy candidates are opt-in for ADD/PAY confirmation only."""
     requested = normalize_customer_name(name)
     if not requested:
         return []
@@ -4384,7 +4303,13 @@ def find_debtor_matches(business_user_id, name, include_archived=False):
     if partial:
         return [row for item in partial for row in item["rows"]]
 
-    # Only then consider typo-tolerant fuzzy matches.
+    # Fuzzy candidates are opt-in for ADD/PAY only, where the caller asks the
+    # shopkeeper to correct/confirm before any financial action. Search, edit,
+    # history and other workflows must not guess a nearest customer.
+    if not allow_fuzzy:
+        return []
+
+    # Only then consider typo-tolerant fuzzy candidates.
     scored = []
     for normalized, item in names.items():
         stored_parts = normalized.split()
@@ -4588,15 +4513,8 @@ def find_delete_customer_candidates(business_user_id, requested_name):
         stored_tokens = normalized.split()
         # Every typed token must correspond to a stored token. Partial spelling
         # is allowed, but all possible full-name matches are retained.
-        token_scores = []
-        for token in request_tokens:
-            best = max(
-                (difflib.SequenceMatcher(None, token, stored).ratio() for stored in stored_tokens),
-                default=0.0,
-            )
-            token_scores.append(best)
-        if token_scores and all(score >= 0.78 for score in token_scores):
-            item["score"] = sum(token_scores) / len(token_scores)
+        if request_tokens and all(token in stored_tokens for token in request_tokens):
+            item["score"] = 1.0
             token_matches.append(item)
     if token_matches:
         token_matches.sort(key=lambda item: item["score"], reverse=True)
@@ -4610,19 +4528,8 @@ def find_delete_customer_candidates(business_user_id, requested_name):
     if partial:
         return partial
 
-    # Last resort: full-name fuzzy candidates. A single clear candidate is
-    # acceptable only because it will still require an explicit confirmation.
-    scored = []
-    for normalized, item in grouped.items():
-        score = _name_similarity(requested, normalized)
-        if score >= 0.78:
-            item["score"] = score
-            scored.append(item)
-    if not scored:
-        return []
-    scored.sort(key=lambda item: item["score"], reverse=True)
-    best_score = scored[0]["score"]
-    return [item for item in scored if best_score - item["score"] <= 0.08]
+    # No fuzzy fallback: a misspelled name is not a customer identity.
+    return []
 
 
 def begin_delete_flow(sender_phone, business_user_id, requested_name):
@@ -10465,7 +10372,7 @@ async def _whatsapp_webhook_process(request: Request):
                 # the user rather than changing the wrong balance.
                 if amount is not None:
                     force_new_customer = bool(entry.get("_force_new_customer"))
-                    matches = [] if force_new_customer else find_debtor_matches(business_user_id, name)
+                    matches = [] if force_new_customer else find_debtor_matches(business_user_id, name, allow_fuzzy=True)
                     if entry.get("_corrected_name_recheck") and not has_exact_customer_name_match(name, matches):
                         matches = []
                         force_new_customer = True
@@ -10571,7 +10478,7 @@ async def _whatsapp_webhook_process(request: Request):
                                 "*Xaqiiji deynta cusub*\n\n"
                                 f"Macmiil: *{existing.get('name') or name}*\n"
                                 f"Lacagta lagu darayo: *${add_amount:.2f}*" + due_line + "\n\n"
-                                "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u saxdo."
+                                "Soo qor *HAA* si loo diiwaangeliyo ama *MAYA* si aad u joojiso."
                             )
                             break
 
@@ -10688,7 +10595,7 @@ async def _whatsapp_webhook_process(request: Request):
                 payment_amount = entry.get("amount")
                 payment_type = str(entry.get("payment_type") or "UNKNOWN").upper()
                 force_new_customer = bool(entry.get("_force_new_customer"))
-                matches = [] if force_new_customer else find_debtor_matches(business_user_id, name)
+                matches = [] if force_new_customer else find_debtor_matches(business_user_id, name, allow_fuzzy=True)
                 if entry.get("_corrected_name_recheck") and not has_exact_customer_name_match(name, matches):
                     matches = []
                     force_new_customer = True
@@ -10741,7 +10648,7 @@ async def _whatsapp_webhook_process(request: Request):
                     start_customer_match_session(
                         sender_phone, business_user_id, entry, message_text, matches,
                         "similar_single", entries[entry_index + 1:],
-                        allow_new=True,
+                        allow_new=(action == "ADD"),
                     )
                     break
 
@@ -12355,19 +12262,106 @@ async def _send_period_report(report_type, start_date, end_date):
 
 @app.get("/cron/evening-checkin")
 async def evening_checkin(request: Request):
-    """Send the daily business activity report at 20:00 Somalia time."""
+    """At 20:00 EAT send one message: daily report if active, otherwise inactivity reminder."""
     if not cron_authorized(request):
         from fastapi import HTTPException
         raise HTTPException(status_code=401, detail="Unauthorized cron request")
+
     today = today_eat()
-    print(f"🌙 DAILY BUSINESS REPORT STARTED: {today.isoformat()}")
+    print(f"🌙 EVENING ACTIVITY ROUTER STARTED: {today.isoformat()}")
+    sent_count = skipped_count = error_count = 0
+
     try:
-        result = await _send_period_report("daily", today, today)
+        users_result = (
+            supabase.table("business_users")
+            .select("id, phone_number, name")
+            .eq("approval_status", "approved")
+            .execute()
+        )
+        users = users_result.data or []
+        print(f"👥 Approved business users found: {len(users)}")
     except Exception as exc:
-        print(f"❌ DAILY REPORT failed to load shops: {type(exc).__name__}: {exc}")
-        return {"status": "database_error", "detail": str(exc)}
-    print(f"🏁 DAILY REPORT FINISHED: sent={result['sent']}, skipped={result['skipped']}, errors={result['errors']}")
-    return {"status": "done", **result, "date": today.isoformat()}
+        print(f"❌ EVENING ROUTER database error loading business users: {type(exc).__name__}: {exc}")
+        return {"status": "database_error"}
+
+    for user in users:
+        business_user_id = user.get("id")
+        phone = str(user.get("phone_number") or "").strip()
+        shop_name = str(user.get("name") or "").strip()
+        if not business_user_id or not phone:
+            skipped_count += 1
+            continue
+
+        reserved = False
+        try:
+            # Both message types share one daily reservation, so a rerun cannot
+            # send both an inactivity reminder and Warbixinta Maanta.
+            reserved = _reserve_report_send(business_user_id, "daily", today, today)
+            if not reserved:
+                skipped_count += 1
+                print(f"⏭️ Evening message already sent today: shop={business_user_id}")
+                continue
+
+            data = _report_period_data(business_user_id, today, today)
+            is_active = bool(data.get("new_debt_count") or data.get("payment_count"))
+
+            if is_active:
+                message = _format_business_activity_report(
+                    "daily", today, today, data, shop_name
+                )
+                message_type = "daily_report"
+            else:
+                message = (
+                    "🌙 *Xusuusin Deynjir*\n\n"
+                    "Maanta wax deyn cusub ama lacag-bixin ah lama diiwaangelin.\n\n"
+                    "Haddii aad rabto inaad shaqada bilowdo, dooro adeegga:\n"
+                    "1️⃣ Deyn cusub\n"
+                    "2️⃣ Lacag-bixin\n"
+                    "3️⃣ Adeegyada kale\n\n"
+                    "Soo dir 1, 2 ama 3."
+                )
+                message_type = "inactivity_reminder"
+
+            ok = send_whatsapp(phone, message)
+            if not ok:
+                error_count += 1
+                _release_report_reservation(business_user_id, "daily", today, today)
+                print(f"❌ Evening {message_type} WhatsApp failed: shop={business_user_id}")
+                continue
+
+            sent_count += 1
+            if is_active:
+                print(
+                    f"✅ Warbixinta Maanta sent: shop={business_user_id}, "
+                    f"debts={data['new_debt_count']}, payments={data['payment_count']}"
+                )
+            else:
+                # The reminder is numbered text; the user's 1/2/3 replies are
+                # handled by the standard guided main-menu router.
+                activate_guided_menu(phone)
+                _save_persisted_workflow_sessions(phone)
+                print(f"✅ Inactivity reminder sent: shop={business_user_id}")
+
+        except Exception as exc:
+            error_count += 1
+            if reserved:
+                _release_report_reservation(business_user_id, "daily", today, today)
+            print(
+                f"❌ Evening message failed: shop={business_user_id}, "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    print(
+        f"🏁 EVENING ACTIVITY ROUTER FINISHED: sent={sent_count}, "
+        f"skipped={skipped_count}, errors={error_count}"
+    )
+    return {
+        "status": "done",
+        "sent": sent_count,
+        "skipped": skipped_count,
+        "errors": error_count,
+        "date": today.isoformat(),
+    }
 
 
 @app.get("/cron/periodic-reports")
@@ -12401,150 +12395,20 @@ async def periodic_reports(request: Request):
 
 @app.get("/cron/inactivity-checkin")
 async def inactivity_checkin(request: Request):
-    """Send a 6 PM reminder only to approved users with no debt activity today."""
+    """Legacy endpoint: inactivity is now decided once in the morning router."""
     if not cron_authorized(request):
         from fastapi import HTTPException
         raise HTTPException(status_code=401, detail="Unauthorized cron request")
-
-    print("🌙 INACTIVITY CHECK-IN STARTED")
-    today, start_iso, end_iso = _cron_date_boundaries()
-
-    sent_count = 0
-    skipped_count = 0
-    error_count = 0
-
-    try:
-        users_result = (
-            supabase.table("business_users")
-            .select("id, phone_number, name")
-            .eq("approval_status", "approved")
-            .execute()
-        )
-        users = users_result.data or []
-    except Exception as e:
-        print(f"❌ Error loading business users: {type(e).__name__}: {e}")
-        return {"status": "database_error"}
-
-    for user in users:
-        sender_phone = user.get("phone_number")
-
-        if not sender_phone:
-            continue
-
-        message = (
-            "🌙 *Xusuusin*\n\n"
-            "Maanta wax dhaqdhaqaaq deyn ah lama diiwaangelin.\n\n"
-            "Ma jiraan deymo cusub ama lacag-bixinno maanta dhacay?\n\n"
-            "Dooro adeegga aad rabto:"
-        )
-
-        send_deynjir_choice_buttons(
-            sender_phone,
-            message,
-            [
-                ("MAIN_ADD", "Deyn cusub"),
-                ("MAIN_PAY", "Lacag-bixin"),
-                ("MAIN_OTHER", "Adeegyada kale"),
-            ],
-            message
-        )
-        business_user_id = user.get("id")
-        phone = str(user.get("phone_number") or "").strip()
-
-        if not business_user_id or not phone:
-            skipped_count += 1
-            continue
-
-        try:
-            # Check whether any new debt was recorded today.
-            debts_result = (
-                supabase.table("customers")
-                .select("id")
-                .eq("business_user_id", business_user_id)
-                .gte("created_at", start_iso)
-                .lt("created_at", end_iso)
-                .limit(1)
-                .execute()
-            )
-
-            # Check whether any payment was recorded today.
-            payments_result = (
-                supabase.table("payments")
-                .select("id")
-                .eq("business_user_id", business_user_id)
-                .gte("paid_at", start_iso)
-                .lt("paid_at", end_iso)
-                .limit(1)
-                .execute()
-            )
-
-            has_new_debt = bool(debts_result.data)
-            has_payment = bool(payments_result.data)
-
-            # Do not send the inactivity reminder if there was activity.
-            if has_new_debt or has_payment:
-                skipped_count += 1
-                print(
-                    f"⏭️ Reminder skipped: user={business_user_id}, "
-                    f"new_debt={has_new_debt}, payment={has_payment}"
-                )
-                continue
-
-            INACTIVITY_SESSIONS[phone] = {
-                "business_user_id": str(business_user_id),
-                "stage": "menu",
-                "expires_at": datetime.now(timezone.utc) + INACTIVITY_SESSION_TTL,
-            }
-            _save_persisted_workflow_sessions(phone)
-
-            ok = send_deynjir_choice_buttons(
-                phone,
-                fallback_message,
-                [
-                    ("INACTIVITY_DEBT", "Deyn baxday"),
-                    ("INACTIVITY_PAYMENT", "Deyn soo xarootay"),
-                    ("INACTIVITY_OTHER", "Adeeg kale"),
-                ],
-                fallback_message,
-            )
-
-            if ok:
-                sent_count += 1
-                print(f"✅ Inactivity reminder with reply buttons sent: user={business_user_id}")
-            else:
-                # The helper sends the text fallback when interactive buttons fail.
-                # Keep the session so numeric choices still work.
-                sent_count += 1
-                print(f"ℹ️ Inactivity reminder sent with text fallback: user={business_user_id}")
-
-        except Exception as e:
-            error_count += 1
-            print(
-                f"❌ Inactivity reminder error: user={business_user_id}, "
-                f"{type(e).__name__}: {e}"
-            )
-
-    print(
-        f"🏁 INACTIVITY CHECK-IN FINISHED: "
-        f"sent={sent_count}, skipped={skipped_count}, errors={error_count}"
-    )
-
-    return {
-        "status": "done",
-        "sent": sent_count,
-        "skipped": skipped_count,
-        "errors": error_count,
-        "date": today.isoformat(),
-    }
+    print("ℹ️ INACTIVITY CHECK-IN SKIPPED: handled by morning activity router")
+    return {"status": "skipped", "reason": "handled_by_morning_activity_router"}
 
 
 @app.get("/cron/all-scheduled")
 async def all_scheduled_tasks(request: Request):
     """Single scheduler entry point for all existing Deynjir cron tasks.
 
-    Call this endpoint at 04:00, 15:00 and 17:00 UTC (07:00, 18:00 and
-    20:00 Somalia time). Keeping one Render Cron Job service avoids creating
-    separate paid Cron Job services for each task.
+    Call this endpoint at 04:00 and 17:00 UTC (07:00 and 20:00 Somalia time).
+    The morning router sends either a daily report or an inactivity reminder.
     """
     if not cron_authorized(request):
         from fastapi import HTTPException
@@ -12563,23 +12427,15 @@ async def all_scheduled_tasks(request: Request):
             print(f"❌ SCHEDULER daily digest failed: {type(exc).__name__}: {exc}")
             results["tasks"]["daily_digest"] = {"status": "error", "detail": str(exc)}
 
-    # 18:00 Somalia time — inactivity reminder (only shops with no activity).
-    elif hour == 18:
-        print("🕕 SCHEDULER: running inactivity check-in")
-        try:
-            results["tasks"]["inactivity_checkin"] = await inactivity_checkin(request)
-        except Exception as exc:
-            print(f"❌ SCHEDULER inactivity check-in failed: {type(exc).__name__}: {exc}")
-            results["tasks"]["inactivity_checkin"] = {"status": "error", "detail": str(exc)}
-
-    # 20:00 Somalia time — daily report, plus Friday/month-end reports.
+    # 20:00 Somalia time — exactly one of inactivity reminder / daily report,
+    # followed by weekly/month-end reports when scheduled.
     elif hour == 20:
-        print("🕗 SCHEDULER: running daily and periodic reports")
+        print("🕗 SCHEDULER: running conditional daily message and periodic reports")
         try:
-            results["tasks"]["daily_report"] = await evening_checkin(request)
+            results["tasks"]["evening_checkin"] = await evening_checkin(request)
         except Exception as exc:
-            print(f"❌ SCHEDULER daily report failed: {type(exc).__name__}: {exc}")
-            results["tasks"]["daily_report"] = {"status": "error", "detail": str(exc)}
+            print(f"❌ SCHEDULER evening activity router failed: {type(exc).__name__}: {exc}")
+            results["tasks"]["evening_checkin"] = {"status": "error", "detail": str(exc)}
         try:
             results["tasks"]["periodic_reports"] = await periodic_reports(request)
         except Exception as exc:
@@ -12587,7 +12443,7 @@ async def all_scheduled_tasks(request: Request):
             results["tasks"]["periodic_reports"] = {"status": "error", "detail": str(exc)}
     else:
         results["status"] = "no_task_for_this_hour"
-        results["message"] = "Run this endpoint at 07:00, 18:00 or 20:00 Somalia time."
+        results["message"] = "Run this endpoint at 07:00 or 20:00 Somalia time."
 
     return results
 
