@@ -29,7 +29,7 @@ from reportlab.lib import colors
 load_dotenv()
 
 APP_NAME = "Deynjir"
-DEYNJIR_BUILD_ID = "batch-parser-fix-2026-11-17-v2"
+DEYNJIR_BUILD_ID = "batch-parser-fix-2026-11-17-v3"
 print(f"🚀 DEYNJIR_BUILD_ID={DEYNJIR_BUILD_ID}")
 
 EAT = ZoneInfo("Africa/Mogadishu")
@@ -3624,10 +3624,25 @@ def parse_transaction_batch_text(message_text):
         rf"(?:\b(?:ballan(?:ta)?|wakhtiga\s+balanta|waqtiga\s+balanta|due(?:\s+date)?)\s*(?:waa)?\s*[:=-]?\s*)({date_pattern})",
         re.I,
     )
+    # Accept decimal amounts (12.50 / 12,50) and thousands separators
+    # (1,020.00 / 1,020) without confusing a thousands comma for a row split.
+    amount_number_pattern = r"(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
     currency_re = re.compile(
-        r"\$\s*(\d+(?:[.,]\d{1,2})?)|(?<![\w/.-])(\d+(?:[.,]\d{1,2})?)\s*\$"
+        rf"\$\s*({amount_number_pattern})|(?<![\w/.-])({amount_number_pattern})\s*\$"
     )
-    plain_amount_re = re.compile(r"(?<![\w/.-])(\d{1,7}(?:[.,]\d{1,2})?)(?![\w/.-])")
+    plain_amount_re = re.compile(
+        rf"(?<![\w/.-])({amount_number_pattern})(?![\w/.-])"
+    )
+
+    def parse_amount_number(value):
+        value = str(value).strip()
+        if "," in value and "." in value:
+            value = value.replace(",", "")
+        elif re.fullmatch(r"\d{1,3}(?:,\d{3})+", value):
+            value = value.replace(",", "")
+        else:
+            value = value.replace(",", ".")
+        return float(value)
 
     def split_line(line):
         line = " ".join(line.split()).strip()
@@ -3723,7 +3738,7 @@ def parse_transaction_batch_text(message_text):
         amount_match = amount_matches[0]
         amount_text = next((group for group in amount_match.groups() if group is not None), None)
         try:
-            amount = float(amount_text.replace(",", "."))
+            amount = parse_amount_number(amount_text)
         except (TypeError, ValueError):
             return None
         if not math.isfinite(amount) or amount <= 0:
@@ -3737,7 +3752,7 @@ def parse_transaction_batch_text(message_text):
             r"usd|dollars?|dollar|dolar|dola(?:r|ro))\b", " ", name)
         name = re.sub(r"[$]", " ", name)
         name = re.sub(r"\s*&\s*", " ", name)
-        name = " ".join(name.split()).strip(" .,:;-&")
+        name = " ".join(name.split()).strip(" .,:;-&—–")
         if not name or len(name) > 120 or not re.search(r"[A-Za-z\u0080-\uffff]", name):
             return None
 
