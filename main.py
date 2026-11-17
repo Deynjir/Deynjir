@@ -3710,7 +3710,7 @@ def parse_transaction_batch_text(message_text):
         mode = next(iter(row_actions)) if row_actions else "clarification"
     if row_actions and mode not in {"clarification", next(iter(row_actions))}:
         return None
-    if len(parsed_rows) < 2 or len(parsed_rows) > 50:
+    if len(parsed_rows) < 2 or len(parsed_rows) > 200:
         return None
     return mode, parsed_rows
 
