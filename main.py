@@ -789,6 +789,7 @@ SOMALI UNDERSTANDING (IMPORTANT): Understand the whole sentence, not only exact 
 - Understand forms such as qaatay, qaadatay, qaateen, qaadanayo; bixiyay, bixisay, bixiyeen; keenay, keentay; qabtay, qabatay; celiyay, celisay; shubay, shubtay.
 - "ka siiyay" can mean the shop gave the customer credit; classify as ADD only when the sentence clearly describes money given to that customer as a debt. Do not confuse it with money the customer paid back.
 - Remove grammatical filler (wuu, wuxuu, ayay, waxay, ayaan, baan, buu, bay) from the customer name, but preserve every actual name part.
+- Treat informal transaction tails such as "waxan siyey", "waxaan siiyey", "waan siiyay", and "ile/ilaa ballantaye" as transaction wording, not customer-name text. For "Asiili cisman waxan siyey ile balantaye $30", customer_name must be "Asiili cisman"; preserve the amount and any clearly stated due date separately.
 - Never include transaction wording in customer_name. In particular, remove "deyn cusub", "dayn cusub", "oo", "ah", and action phrases such as "wuxuu qaatay" from the END of a name. Examples: "omar wuxuu qaatay deyn cusub oo $35 ah" -> customer_name="omar", amount=35; "Cumar 35" -> customer_name="Cumar", amount=35; "Omar $35" -> customer_name="Omar", amount=35. Never save "omar deyn cusub oo" as a customer name.
 - Negative/no-activity statements are status information, not transactions. Understand natural variations of negated activity wording (for example, no money was received, no customer repaid, no new debt, or nothing happened today), including informal word order and spelling. Do not create ADD or PAY from them. If a guided workflow is waiting, interpret the reply against that stage; if it clearly reports no activity, end the unfinished flow without saving. If the user says the previous reply was not a name, never use that sentence as a customer name.
 - If a sentence says only that a customer has not paid, do not create a transaction. If the direction or amount is unclear, ask a short clarification. Never invent an amount or mark a partial payment as full.
@@ -2262,6 +2263,11 @@ def clean_extracted_customer_name(value):
         r"(?:qaatay|qaadatay|qaatey|qaateen|qaaty|bixiyay|bixiyey|bixisay|"
         r"bixiyeen|soo\s+celiyay|soo\s+celiyey|celiyay|celiyey|"
         r"keenay|keentay|amaahday|amaah)\b.*$",
+        # Informal first-person transaction wording, including common typos.
+        r"\s+(?:waxaan|waxan|waan)\s+(?:siiyay|siiyey|siyey|siyeey|siiye|"
+        r"siinay|siinayey|siinayay)(?:\s+.*)?$",
+        r"\s+(?:ile|ilaa)\s+ballan(?:ta|taye)?(?:\s+.*)?$",
+        r"\s+(?:ballan(?:ta|taye)?|balan(?:ta|taye)?)(?:\s+.*)?$",
         r"\s+(?:deyn|dayn)(?:\s+cusub)?(?:\s+oo)?(?:\s+ah)?\s*$",
         r"\s+(?:cusub\s+oo|oo\s+ah|oo|ah)\s*$",
     )
@@ -2275,6 +2281,45 @@ def clean_extracted_customer_name(value):
     }:
         return None
     return name
+
+
+def clean_customer_name_correction(value, pending_entry=None):
+    """Clean a reply that corrects/confirms a pending customer name.
+
+    Removes conversational acknowledgement and only removes a trailing amount
+    when it matches the amount already held in the pending transaction.
+    """
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return None
+
+    text = re.sub(
+        r"^(?:waa\s+sax|waa\s+sax\s+waa|sax\s+weeye|waa\s+saxan)\s+",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+
+    pending_amount = (pending_entry or {}).get("amount")
+    if pending_amount is not None:
+        try:
+            amount_value = float(pending_amount)
+        except (TypeError, ValueError):
+            amount_value = None
+        if amount_value is not None:
+            amount_pattern = r"\s+(\d+(?:[.,]\d{1,2})?)\s*&?\s*$"
+            amount_match = re.search(amount_pattern, text)
+            if amount_match:
+                try:
+                    reply_amount = float(amount_match.group(1).replace(",", "."))
+                except ValueError:
+                    reply_amount = None
+                if reply_amount is not None and math.isclose(
+                    reply_amount, amount_value, rel_tol=0, abs_tol=0.005
+                ):
+                    text = text[:amount_match.start()].strip()
+
+    return clean_extracted_customer_name(text)
 
 
 def customer_name_is_grounded_in_source(customer_name, source_message):
@@ -8716,7 +8761,7 @@ async def _whatsapp_webhook_process(request: Request):
                 )
                 return {"status": "customer_name_correction_required"}
             else:
-                corrected_name = clean_extracted_customer_name(answer)
+                corrected_name = clean_customer_name_correction(answer, entry)
                 if not corrected_name or len(corrected_name) > 120 or re.search(r"\d", corrected_name):
                     send_whatsapp(
                         sender_phone,
@@ -8804,8 +8849,11 @@ async def _whatsapp_webhook_process(request: Request):
             elif answer_folded == "cusub":
                 send_whatsapp(sender_phone, "Halkan waxaa loo baahan yahay magaca macmiilka jira. Fadlan qor magaca buuxa ama *JOOJI*.")
                 return {"status": "customer_match_new_not_allowed"}
-            elif len(answer) >= 2 and len(answer) <= 120 and not re.fullmatch(r"\d+", answer):
-                selected_name = answer
+            elif len(answer) >= 2 and len(answer) <= 120:
+                selected_name = clean_customer_name_correction(answer, entry)
+                if not selected_name or re.search(r"\d", selected_name):
+                    send_whatsapp(sender_phone, "Fadlan qor magaca macmiilka oo keliya, ama *JOOJI*.")
+                    return {"status": "customer_match_full_name_invalid"}
                 entry["_existing_account_lookup_attempted"] = bool(
                     is_existing_account_add_request(customer_match_state.get("original_message"))
                 )
