@@ -29,7 +29,7 @@ from reportlab.lib import colors
 load_dotenv()
 
 APP_NAME = "Deynjir"
-DEYNJIR_BUILD_ID = "batch-parser-fix-2026-11-17-v3"
+DEYNJIR_BUILD_ID = "import-style-batch-parser-2026-11-17-v4"
 print(f"🚀 DEYNJIR_BUILD_ID={DEYNJIR_BUILD_ID}")
 
 EAT = ZoneInfo("Africa/Mogadishu")
@@ -9482,9 +9482,51 @@ async def _whatsapp_webhook_process(request: Request):
     )
     multiline_transaction = parse_multiline_menu_transaction(message_text)
 
-    # Direct multi-row text lists use the same preview/OK workflow as Excel and
-    # image imports. This avoids the single-customer natural-language parser.
-    direct_batch = parse_transaction_batch_text(message_text)
+    # For ordinary multi-customer messages, use the SAME Gemini extraction and
+    # strict row validation as text-based IMPORT. The deterministic parser is
+    # retained as a fallback only for non-candidate batches. This avoids its
+    # fragile comma/number splitting for inputs such as "$1,020.00" and
+    # "RIDWAAN 23, CALI BAD 32". No financial write happens here.
+    raw_batch_text = str(message_text or "").replace("\r", "\n").strip()
+    nonempty_batch_lines = [line.strip() for line in raw_batch_text.splitlines() if line.strip()]
+    amount_tokens = re.findall(
+        r"\$?\s*(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\s*\$?",
+        raw_batch_text,
+    )
+    import_style_batch = (
+        len(nonempty_batch_lines) >= 2 and len(amount_tokens) >= 2
+    ) or (len(amount_tokens) >= 3 and ("," in raw_batch_text or ";" in raw_batch_text))
+
+    direct_batch = None
+    if import_style_batch and classify_transaction_direction(raw_batch_text) is None:
+        try:
+            imported_batch_rows = _extract_import_text(raw_batch_text, "debt")
+            if len(imported_batch_rows) < 2:
+                raise ValueError(
+                    f"Import-style parser found only {len(imported_batch_rows)} rows; expected at least 2."
+                )
+            direct_batch = ("clarification", imported_batch_rows)
+            print(
+                f"🧾 IMPORT_STYLE_TRANSACTION_BATCH_MATCH build={DEYNJIR_BUILD_ID} "
+                f"count={len(imported_batch_rows)} "
+                f"names={[row.get('name') for row in imported_batch_rows]!r}"
+            )
+        except Exception as import_batch_error:
+            print(
+                f"❌ IMPORT_STYLE_TRANSACTION_BATCH_REJECTED build={DEYNJIR_BUILD_ID} "
+                f"error_type={type(import_batch_error).__name__} error={import_batch_error}"
+            )
+            send_whatsapp(
+                sender_phone,
+                "Liiska oo dhan si sax ah looma akhrin karin. Waxba lama diiwaangelin. "
+                "Fadlan hubi in saf kasta leeyahay magac iyo lacag, kadib mar kale dir."
+            )
+            return {"status": "import_style_batch_parse_error"}
+
+    # Explicitly directed batches and other supported formats retain the
+    # deterministic parser and the existing import preview/confirmation flow.
+    if direct_batch is None:
+        direct_batch = parse_transaction_batch_text(message_text)
     if direct_batch:
         print(
             f"🧾 DIRECT_BATCH_PARSER_MATCH build={DEYNJIR_BUILD_ID} "
