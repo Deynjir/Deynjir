@@ -29,6 +29,8 @@ from reportlab.lib import colors
 load_dotenv()
 
 APP_NAME = "Deynjir"
+DEYNJIR_BUILD_ID = "batch-parser-fix-2026-11-17-v2"
+print(f"🚀 DEYNJIR_BUILD_ID={DEYNJIR_BUILD_ID}")
 
 EAT = ZoneInfo("Africa/Mogadishu")
 
@@ -9469,6 +9471,11 @@ async def _whatsapp_webhook_process(request: Request):
     # image imports. This avoids the single-customer natural-language parser.
     direct_batch = parse_transaction_batch_text(message_text)
     if direct_batch:
+        print(
+            f"🧾 DIRECT_BATCH_PARSER_MATCH build={DEYNJIR_BUILD_ID} "
+            f"mode={direct_batch[0]!r} count={len(direct_batch[1])} "
+            f"names={[row.get('name') for row in direct_batch[1]]!r}"
+        )
         batch_mode, batch_rows = direct_batch
         try:
             if batch_mode == "clarification":
